@@ -1,0 +1,10 @@
+// afterwrd-etag (index.js says what it's for). Not on workers.dev or any address: nothing can reach it.
+{
+	"$schema": "../../node_modules/wrangler/config-schema.json",
+	"name": "afterwrd-etag",
+	"main": "index.js",
+	"compatibility_date": "2026-10-01",
+	"workers_dev": false,
+	"preview_urls": false,
+	"observability": { "enabled": false }
+}
