@@ -7,7 +7,7 @@
 import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { settled, siteSql as sql } from "./helpers.mjs";
+import { settled, siteSql as sql, steady } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const [stateA, stateB] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -100,9 +100,20 @@ const browser = await puppeteer.launch({ executablePath: CHROME, headless: true 
 let relay = null;
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
+  // What every page of theirs needs: errors noted, and afterwrd.app's relay stood in for.
+  const prepare = async (page) => {
+    page.on("pageerror", (e) => errors.push(`${site}: ${e.message}`));
+    page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const to = new URL(req.url());
+      if (to.hostname !== "afterwrd.app") return req.continue();
+      if (to.pathname === "/connect/") relay = to;
+      req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+    });
+  };
   const page = await context.newPage();
-  page.on("pageerror", (e) => errors.push(`${site}: ${e.message}`));
-  page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
+  await prepare(page);
   const cdp = await page.createCDPSession();
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal",
@@ -111,14 +122,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
-    const to = new URL(req.url());
-    if (to.hostname !== "afterwrd.app") return req.continue();
-    if (to.pathname === "/connect/") relay = to;
-    req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
-  });
-  return page;
+  return steady(page, prepare);
 }
 const text = async (page, sel = "main") => (await page.$eval(sel, (m) => m.textContent).catch(() => "")).replace(/\s+/g, " ");
 // Press a button that goes to Cloudflare by way of the relay, and come back the way the relay would, with `code`.

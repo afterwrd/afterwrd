@@ -6,6 +6,11 @@
 #   npm run test:e2e -- upgrade v0.17.0  an older release's site (0.17.0 or later), upgraded in place to this code
 set -uo pipefail
 
+# Kept awake while it runs (macOS): a laptop going to sleep part-way through stops the sites and loses Chrome's tabs.
+if [ -z "${AFTERWRD_AWAKE:-}" ] && command -v caffeinate >/dev/null 2>&1; then
+  AFTERWRD_AWAKE=1 exec caffeinate -ims "$0" "$@"
+fi
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORKER="$(cd "$HERE/../.." && pwd)"
 export OUT="$HERE/out"
@@ -19,6 +24,8 @@ if [ -z "${CHROME:-}" ]; then
   CHROME="$(cd "$WORKER" && node test/e2e/chrome.mjs)" || { echo "Couldn't get the tests' Chrome (see above)." >&2; exit 1; }
 fi
 export CHROME
+# The tests read the sites' databases with Node's own SQLite (helpers.mjs), which Node still calls experimental.
+export NODE_OPTIONS="${NODE_OPTIONS:-} --disable-warning=ExperimentalWarning"
 
 for port in 8787 8788 8789 8790; do
   if lsof -iTCP:$port -sTCP:LISTEN >/dev/null 2>&1; then

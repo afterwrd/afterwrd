@@ -166,9 +166,12 @@ export function donePage(finishPath, { carryOn = null } = {}) {
   p { margin: 8px 0; }
   a { color: #ffab73; }
   #error:empty { display: none; }
+  /* Passing through: nothing but the background unless it takes a moment, so it doesn't flash. A problem shows at once. */
+  body.passing main { animation: appear 0s 0.5s both; }
+  @keyframes appear { from { visibility: hidden; } }
 </style>
 </head>
-<body>
+<body class="passing">
 <main>
 <p class="brand" aria-label="afterwrd">afterw<svg class="o" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</p>
 <p id="status">One moment…</p>
@@ -176,7 +179,10 @@ export function donePage(finishPath, { carryOn = null } = {}) {
 <p id="carry-on" hidden><a href="${carryOn ?? "/"}">Carry on to your site</a>. You can turn this on later on its Update page.</p>
 </main>
 <script>
-  const carryOn = () => { if (${JSON.stringify(Boolean(carryOn))}) document.getElementById("carry-on").hidden = false; };
+  const carryOn = () => {
+    document.body.classList.remove("passing");
+    if (${JSON.stringify(Boolean(carryOn))}) document.getElementById("carry-on").hidden = false;
+  };
   (async () => {
     const params = new URLSearchParams(location.hash.slice(1));
     const status = document.getElementById("status");

@@ -45,8 +45,9 @@ check("asked for both, it shows both permissions, what each can do and for how l
   && !(await shown("#ask-auto")) && (await words("#ask-both")).includes("Automatic updates") && (await words("#ask-both")).includes("Friends' checks")
   && (await words("#ask-both")).includes("Until you turn it off") && (await words("#ask-both")).includes("Connected Applications"));
 check("…with the site's address, to check it's yours", (await words("#both-host")) === new URL(SITE).host);
-check("…and, during setup, a Not now that carries on with the site's setup", await shown("#not-now")
-  && (await page.$eval("#not-now-link", (a) => a.href)) === `${SITE}/_admin/setup/done`);
+check("…shown at once (asking isn't passing through), with nothing more underneath",
+  await page.evaluate(() => !document.body.classList.contains("passing")) && !(await page.$("#not-now"))
+  && !(await words("main")).includes("passes you between"));
 await Promise.all([toCloudflare(), page.click("#continue-both")]);
 check("Continue asks Cloudflare for automatic updates only", cloudflare?.searchParams.get("scope") === "offline_access workers-scripts.edit");
 await backHome();
@@ -59,10 +60,16 @@ await backHome();
 cloudflare = null;
 await page.goto(out(`${SITE}/_cloudflare/checks-done`));
 check("…but only once: asked again, it asks first", await shown("#ask-checks") && cloudflare === null);
+// Passing through (on the way back from Cloudflare, say), the page shows nothing but its background at first, so a
+// page gone in a blink doesn't flash. (Without its script, it's never told it's asking, so it stays passing.)
+await page.setJavaScriptEnabled(false);
+await page.goto(RELAY);
+check("passing through, at first only the background shows", await page.$eval("main", (m) => getComputedStyle(m).visibility) === "hidden");
+await page.setJavaScriptEnabled(true);
 
 // --- both, then a different site: asked as usual --------------------------------------------------------------------
 await page.goto(out(`${SITE}/_cloudflare/auto-done`, { both: "1" }));
-check("asked for both outside setup, there's no Not now", await shown("#ask-both") && !(await shown("#not-now")));
+check("asked for both outside setup, it's the same page", await shown("#ask-both"));
 await Promise.all([toCloudflare(), page.click("#continue-both")]);
 await backHome();
 cloudflare = null;

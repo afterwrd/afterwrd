@@ -162,6 +162,7 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
 /** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */
 export function setupDonePage() {
   return page("One moment", `
+<style>main { animation: appear 0s 0.5s both; } @keyframes appear { from { visibility: hidden; } }</style>
 <p id="status">One moment…</p>`, `
   afterPasskey(false);`);
 }
