@@ -126,7 +126,17 @@ export async function etagOf(token, account, repo, version, manifestSha256) {
     form.append(m.name, new File([file], m.name, { type: m.type }));
   }
   const { id } = await cf(token, `/accounts/${account}/workers/scripts/${ETAG_WORKER}/versions`, { method: "POST", body: form });
-  const etag = (await cf(token, `/accounts/${account}/workers/scripts/${ETAG_WORKER}/versions/${id}`))?.resources?.script?.etag;
+  // Cloudflare can take a moment to find a version it has just made (it once answered 404 straight away): ask again.
+  let found = null;
+  for (let attempt = 0; !found; attempt++) {
+    try {
+      found = await cf(token, `/accounts/${account}/workers/scripts/${ETAG_WORKER}/versions/${id}`);
+    } catch (error) {
+      if (error.status !== 404 || attempt >= 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+  const etag = found?.resources?.script?.etag;
   if (!/^[0-9a-f]{64}$/.test(etag ?? "")) throw new Error(`Cloudflare didn't give ${version} an etag.`);
   return etag;
 }
