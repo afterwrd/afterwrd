@@ -528,9 +528,10 @@ function page(connected, go, error) {
       if (invite) handOn.set("invite", invite);
       $("continue").href = next + "#" + handOn.toString();
       try { localStorage.removeItem(KEPT); } catch {}
-      $("ready").hidden = false;
-      // Straight on to the new site (the button stays, in case the browser holds back the move).
+      // Straight on to the new site. The "ready" box, with its button, shows only if the browser holds back the move:
+      // shown first, it flashed up just as the page went.
       location.assign($("continue").href);
+      setTimeout(() => { $("ready").hidden = false; }, 2500);
     } catch (err) {
       $("error").textContent = err.message;
       $("again").hidden = false;
