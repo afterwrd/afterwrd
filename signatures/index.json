@@ -1,6 +1,12 @@
 {
-  "seq": 16,
+  "seq": 17,
   "releases": [
+    {
+      "version": "0.50.1",
+      "manifest_sha256": "960be0f3c32b89a22d7476f9b094104e10dca087d3eab3c123a75d159055983c",
+      "signed_at": "2026-11-15T15:59:47Z",
+      "etag": "66defd7254b7d7cd7452a93d0a1927205b659e646a3a56fa053b59e76d68cef3"
+    },
     {
       "version": "0.50.0",
       "manifest_sha256": "f088a154f454b4faef29404c6f98d196d2ef82a0d126615e1b95fba76699bad6",
@@ -98,6 +104,6 @@
       "etag": "7d08fbae9f17aca7cdfb4dc641c214d5c3026a0f4c323642e38a0852316507e1"
     }
   ],
-  "signature": "yj3ng8qFlIP3vHJOxoSEDLoCr+rv3o6cOAz66hXvolkMisQL2uMtvVLhogwb9BlEKfR29q36yrDbVTIpwUEoCQ==",
-  "signature2": "G460W5nXmvSkNgvvPGdkJM3JWBPZ4aXJXJ6oIbc5TerSAEuJ94PvuN3n+hlWbIokEPXJIW/8jUInc4I5uIg0Aw=="
+  "signature": "LjadyRBratKL7ZKPJRlw7xSjIEJhp4FjeD7QJflFGaGpb5LzhICDDr15tLe3Z4sxg1ccmcdV5ETjELZtNWqFAQ==",
+  "signature2": "LFpso1l/u2pUXJIXeExghnKVlufRirXi8LUjo84N8y7a6GkpuYh833OF1AtnhkBXw3xJ5UAHHLmQPCDRvn8lAw=="
 }
