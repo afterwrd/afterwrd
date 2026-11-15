@@ -27,7 +27,7 @@
   "afterwrd": {
     "releases": "afterwrd/afterwrd",
     "site": "afterwrd.app",
-    "cloudflareClient": "9a89827907d5681523b116176031302e",
+    "cloudflareClient": "b31941d48dae93f31e2d9a64a865d5e6",
     "cloudflareClientsBefore": [
       "9a89827907d5681523b116176031302e"
     ],
