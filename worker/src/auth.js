@@ -132,7 +132,7 @@ async function registerVerify(request, env, url, { token, response }) {
   if (!spent.meta.changes) return json({ error: "This link has already been used." }, 400);
 
   const { credential } = registrationInfo;
-  await env.DB.batch([
+  const [, , count] = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO credentials (id, user_id, public_key, counter, transports, created_at, last_used_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -141,8 +141,11 @@ async function registerVerify(request, env, url, { token, response }) {
     // The first passkey ends setup: any other unused link for the owner (setup can be posted more than once) goes.
     env.DB.prepare(`DELETE FROM device_links WHERE user_id = ?1 AND used_at IS NULL
       AND (SELECT COUNT(*) FROM credentials WHERE user_id = ?1) = 1`).bind(link.user_id),
+    env.DB.prepare("SELECT COUNT(*) AS n FROM credentials WHERE user_id = ?").bind(link.user_id),
   ]);
-  return startSession(env, link.user_id, json({ ok: true }), credential.id);
+  // The first passkey is the end of a new site's setup: the page goes on to its permissions (setupPermissionsPage).
+  const first = /** @type {{ n: number } | undefined} */ (count.results?.[0])?.n === 1;
+  return startSession(env, link.user_id, json({ ok: true, first }), credential.id);
 }
 
 // --- sign-in ---------------------------------------------------------------

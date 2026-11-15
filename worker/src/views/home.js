@@ -38,7 +38,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], unchecked = false, checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {} }) {
+export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {} }) {
   const stream = [
     ...own.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
@@ -55,11 +55,6 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
         : auto.last.result === "kept" ? html`afterwrd ${auto.last.version} failed its checks after updating your site's database, so it was kept.`
         : html`afterwrd ${auto.last.version} didn't work on this site, so it was put back as it was.`}
       <a href="/_admin/update#auto">See what happened</a>.</p>`}
-    ${!auto.on && !auto.later && !auto.problem && html`<form class="notice" method="post" action="/_admin/update/auto-later" data-region="" data-inplace="remove">
-      afterwrd can keep itself up to date, so you never have to update it, and let your friends' afterwrd sites check it
-      now and then, so you'd hear if anything were ever wrong with it. Cloudflare asks you to allow each.
-      <a href="/_cloudflare/auto-start?then=checks" id="auto-offer">Turn them on</a>
-      <button class="link">Not now</button></form>`}
     ${checkFailure && html`<p class="notice alert" id="check-failure"><strong>${checkFailure.name}'s site checked yours</strong> on
       ${fmtDate(checkFailure.checked_at)} and found something that needs a look: ${checkFailure.problems[0]}
       <a href="/_admin/update#check">See what it found</a>.</p>`}
@@ -72,9 +67,6 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
       <a href="/_admin/update#checking">See what it found</a> <button class="link">Put it away</button></form>`)}
     ${checkGrant.problem && html`<p class="notice alert">Your friends' sites can't check yours by themselves any more:
       ${checkGrant.problem} <a href="/_admin/update#check">Let them again</a>.</p>`}
-    ${auto.on && !checkGrant.on && !checkGrant.later && !checkGrant.problem && html`<form class="notice" id="checks-offer" method="post" action="/_admin/checks/let-later" data-region="" data-inplace="remove">
-      Let your friends' afterwrd sites check yours by themselves now and then, so you'd hear if anything were ever wrong with it.
-      <a href="/_admin/update#check">Let them</a> <button class="link">Not now</button></form>`}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">
       ${newDevices.devices.length === 1
         ? html`A new device was added to your site on ${fmtDate(newDevices.devices[0].created_at)}.`
@@ -145,11 +137,6 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
         }
       });
     </script>`}
-    ${unchecked && html`<form class="notice checked-notice" method="post" action="/_admin/checks/myself">Your site hasn't been checked yet.
-      Before you share much, it's worth checking it's exactly the published afterwrd:
-      <a href="/_admin/update#check">ask a friend with afterwrd to check it</a>, or
-      <a href="https://afterwrd.app/check/">check it yourself</a>. This goes once a friend's site has checked it, or
-      <button class="link">you've checked it yourself</button>.</form>`}
     ${composer()}
     ${feed.unreachable.length > 2
       ? html`<p class="notice">Couldn't reach ${feed.unreachable.length} friends' sites just now, so their newest posts may be missing.</p>`

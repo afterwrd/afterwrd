@@ -192,9 +192,7 @@ sql(stateA, "DELETE FROM check_tokens");
 const autoOn = await connect(sam, "#auto a.button", "auto.code-1");
 check("Sam turns on automatic updates", autoOn === null && (await text(sam, "#auto")).includes("Automatic updates are on"), autoOn);
 await sam.goto(`${B}/`);
-check("then Home offers, once, to let friends' sites check his", Boolean(await sam.$("#checks-offer")));
-await Promise.all([settled(sam), sam.click("#checks-offer button")]);
-check("…and \"Not now\" puts it away", !(await sam.$("#checks-offer")));
+check("then Home doesn't nag about friends' checks", !(await sam.$("#checks-offer")));
 let found = await samsRun();
 let result = JSON.parse(found?.result ?? "{}");
 check("Sam's daily run checks Ann's site: all good", found?.verdict === "all good", `${found?.verdict} ${JSON.stringify(result).slice(0, 400)}`);
@@ -294,20 +292,27 @@ for (let i = 0; i < 4; i++) {
 await sam.goto(`${B}/`);
 check("…and still do after more than five (the last check that got through is kept)", /hasn't let yours check it the last \d+ times/.test(await text(sam, ".friend-check")));
 
-// --- Home's offer for a new site: both Allows, one after the other ----------------------------------------------------
+// --- a new site's setup: both Allows, one after the other, then on to the site -------------------------------------
 sql(stateB, "UPDATE settings SET value = json_set(value, '$.on', json('false')) WHERE key = 'auto_update'");
-await sam.goto(`${B}/`);
 relay = null;
-await Promise.all([sam.waitForFunction(() => document.title === "relay stand-in"), sam.click("#auto-offer")]);
-check("Home's offer asks first for automatic updates", relay?.searchParams.get("to") === `${B}/_cloudflare/auto-done`);
+await Promise.all([sam.waitForFunction(() => document.title === "relay stand-in"), sam.goto(`${B}/_cloudflare/auto-start?then=checks&setup=1`)]);
+check("setup asks first for automatic updates, the relay page told it's both, during setup", relay?.searchParams.get("to") === `${B}/_cloudflare/auto-done`
+  && relay.searchParams.get("both") === "1" && relay.searchParams.get("setup") === "1", relay?.href);
 const firstState = relay.searchParams.get("state");
 relay = null;
 await sam.goto(`${B}/_cloudflare/auto-done#${new URLSearchParams({ code: "auto.code-9", state: firstState })}`);
 await sam.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 });
-check("…then straight on to letting friends' sites check it", relay?.searchParams.get("to") === `${B}/_cloudflare/checks-done`);
+check("…then straight on to letting friends' sites check it, still during setup", relay?.searchParams.get("to") === `${B}/_cloudflare/checks-done`
+  && relay.searchParams.get("setup") === "1", relay?.href);
 await sam.goto(`${relay.searchParams.get("to")}#${new URLSearchParams({ code: "checks.code-9", state: relay.searchParams.get("state") })}`);
-await sam.waitForFunction(() => location.pathname === "/_admin/update", { timeout: 15000 });
-check("…and both are on", (await text(sam, "#auto")).includes("Automatic updates are on") && (await text(sam, "#check")).includes("Your friends' sites check yours by themselves"));
+await sam.waitForFunction(() => location.pathname === "/", { timeout: 15000 });
+await sam.goto(`${B}/_admin/update`);
+check("…and both are on, and setup carries on to the site", (await text(sam, "#auto")).includes("Automatic updates are on") && (await text(sam, "#check")).includes("Your friends' sites check yours by themselves"));
+// Not allowing one during setup still leaves a way on.
+await sam.goto(`${B}/_cloudflare/auto-start?then=checks&setup=1`).catch(() => {});
+await sam.goto(`${B}/_cloudflare/auto-done#error=access_denied`);
+check("…and not allowing one during setup says so, with a way on to the site", (await text(sam, "main")).includes("You didn't allow it")
+  && await sam.$eval("#carry-on", (p) => !p.hidden && p.querySelector("a").getAttribute("href") === "/_admin/setup/done"));
 
 // --- Sam stops checking friends' sites -------------------------------------------------------------------------------
 await sam.goto(`${B}/_admin/update`);

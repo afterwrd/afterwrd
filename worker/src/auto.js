@@ -53,6 +53,8 @@ const GROUPS_PER_RUN = 3; // groups updated by one run of the schedule…
 const GROUPS_NOW = 8; // …or when the owner is waiting for it on the Update page
 const START_COOKIE = "cf_auto";
 const START_SECONDS = 600;
+/** Where a new site's setup ends, after its permissions, allowed or not (views/pages.js setupDonePage). */
+export const SETUP_DONE = "/_admin/setup/done";
 const SETTINGS_KEY = "auto_update";
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
@@ -91,14 +93,22 @@ export async function handleAutoConnect(request, env, url) {
     relay.searchParams.set("to", `${url.origin}/_cloudflare/auto-done`);
     relay.searchParams.set("state", state);
     relay.searchParams.set("challenge", challenge);
-    const then = url.searchParams.get("then") === "checks" ? ".checks" : "";
+    // With friends' checks next, the relay page says what both are before the first Allow; during a new site's setup
+    // (views/pages.js afterPasskey) it also offers to leave them for now.
+    const checks = url.searchParams.get("then") === "checks";
+    const setup = checks && url.searchParams.get("setup") === "1";
+    if (checks) relay.searchParams.set("both", "1");
+    if (setup) relay.searchParams.set("setup", "1");
     return withCookie(Response.redirect(relay.toString(), 302),
-      `${START_COOKIE}=${state}.${verifier}${then}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+      `${START_COOKIE}=${state}.${verifier}${checks ? ".checks" : ""}${setup ? ".setup" : ""}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   }
-  if (request.method === "GET" && path === "/auto-done") return html(donePage("/_cloudflare/auto-finish"));
+  if (request.method === "GET" && path === "/auto-done") {
+    const setup = (readCookie(request, START_COOKIE) ?? "").endsWith(".setup");
+    return html(donePage("/_cloudflare/auto-finish", { carryOn: setup ? SETUP_DONE : null }));
+  }
   if (request.method === "POST" && path === "/auto-finish") {
     const clear = `${START_COOKIE}=; Path=/_cloudflare; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
-    const [state, verifier, then] = (readCookie(request, START_COOKIE) ?? "").split(".");
+    const [state, verifier, then, setup] = (readCookie(request, START_COOKIE) ?? "").split(".");
     const body = await request.json().catch(() => ({}));
     if (!state || !verifier) return withCookie(json({ error: "This has expired. Start again from your Update page." }, 400), clear);
     if (body.state !== state) return withCookie(json({ error: "That isn't what this site started. Start again." }, 400), clear);
@@ -109,8 +119,11 @@ export async function handleAutoConnect(request, env, url) {
     } catch (error) {
       return withCookie(json({ error: error.message }, 400), clear);
     }
-    // Asked for both at once (Home): on to friends' checks, one more Allow, unless they're already allowed.
-    const next = then === "checks" && !(await checkGrant(env.DB)).on ? "/_cloudflare/checks-start" : "/_admin/update#auto";
+    // Asked for both at once (a new site's setup, or the Update page): on to friends' checks, one more Allow, unless
+    // they're already allowed. Setup then ends at SETUP_DONE.
+    const checksNext = then === "checks" && !(await checkGrant(env.DB)).on;
+    const next = checksNext ? `/_cloudflare/checks-start${setup === "setup" ? "?setup=1" : ""}`
+      : setup === "setup" ? SETUP_DONE : "/_admin/update#auto";
     return withCookie(json({ back: next }), clear);
   }
   return null;

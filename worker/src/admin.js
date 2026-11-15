@@ -13,6 +13,7 @@ import { handleEvents } from "./events.js";
 import { handleUpdate } from "./update.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 import { devicesPage } from "./views/devices.js";
+import { setupDonePage } from "./views/pages.js";
 
 // A device link grants owner access to whoever opens it, so it's short-lived.
 export const DEVICE_LINK_SECONDS = 3600;
@@ -35,6 +36,8 @@ export async function handleAdmin(request, env, url, owner) {
   if (request.method === "GET" && url.pathname === "/_admin") {
     return html(devicesPage(pageData(env, { ...(await devicesData(env.DB, owner)), me: await headerMe(env.DB, owner) })));
   }
+  // Where a new site's setup ends, after its permissions (views/pages.js afterPasskey).
+  if (request.method === "GET" && url.pathname === "/_admin/setup/done") return html(setupDonePage());
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   // Notifications about events (push.js): turning a device off from here, and "That was me" on Home's notice.
   const forget = /^\/_admin\/notifications\/(\d+)\/forget$/.exec(url.pathname);

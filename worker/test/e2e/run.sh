@@ -117,6 +117,7 @@ run_central() { # the installer at install.afterwrd.app, on 8791, with stand-ins
   wait_for 8791
   suite central.mjs
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 1
+  suite relay.mjs # afterwrd.app's Connect page, everything around it stood in for
 }
 run_checks() { # one site, with stand-ins for Cloudflare and GitHub on 8799 (checks.mjs runs them)
   fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \

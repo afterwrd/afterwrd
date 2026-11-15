@@ -328,6 +328,9 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   release, checks it, and installs it over itself, keeping your passkeys, connections, photos and database. It puts the
   new version in place without making it live, switches to it, and checks that it works; if it doesn't, it switches
   straight back. Updates only ever go forward: an older release can't be installed over a newer one.</p>
+  <p>At the end of setup, a new site asks Cloudflare for two lasting permissions, one after the other, after a page that
+  says what each can do and for how long: automatic updates and friends' checks, below. You can leave them for now and
+  turn them on later on the Update page.</p>
   <p><b>Automatic updates</b>, if you turn them on, do the same by themselves, once a day. Cloudflare asks you to allow
   <i>Background Access</i> to change your Workers, and nothing else. Your site then installs a release only when it has
   been signed with afterwrd's own key, which is kept off GitHub, and has been out for three days (one, for a security

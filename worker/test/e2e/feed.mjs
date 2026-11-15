@@ -628,11 +628,7 @@ check("Home asks at most 40 sites while it waits, and sums up those it couldn't 
   notices.join(" | "));
 check("…and asks the rest in the background, for next time", await waitFor(() =>
   sql(stateA, "SELECT COUNT(*) AS n FROM connections WHERE id < 0 AND feed_checked_at IS NOT NULL")[0].n === 45, 20_000));
-const checkNotice = await ann.$eval("form.checked-notice", (f) => f.textContent.replace(/\s+/g, " ")).catch(() => "");
-check("a site nobody has checked suggests getting it checked", checkNotice.startsWith("Your site hasn't been checked yet") && checkNotice.includes("check it yourself"), checkNotice);
-await Promise.all([ann.waitForNavigation(), ann.click("form.checked-notice button.link")]);
-check("…until the owner says they've checked it themselves", new URL(ann.url()).pathname === "/" && (await ann.$("form.checked-notice")) === null
-  && sql(stateA, "SELECT COUNT(*) AS n FROM checked WHERE connection_id IS NULL")[0].n === 1);
+check("a site nobody has checked doesn't nag about it on Home", (await ann.$("form.checked-notice")) === null);
 check("the friends column shows a dozen, then a link to the rest", (await ann.$$(".mini-friends li")).length === 12
   && (await ann.$eval('aside.side a[href="/friend"]', (a) => a.textContent).catch(() => "")) === "All 46 friends");
 sql(stateA, "DELETE FROM connections WHERE id < 0");

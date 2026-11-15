@@ -25,11 +25,32 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2
 const broughtLink = `http://localhost:8788/_connect/${"x".repeat(43)}`; // a friend's link, as the installer hands it on
 await page.goto(`${BASE}/_auth/setup?code=local-test-setup-code#${new URLSearchParams({ name: "New Owner", invite: broughtLink })}`);
 check("the name given to the installer is ready on the setup page", (await page.$eval("#name", (i) => i.value)) === "New Owner");
+// afterwrd.app's relay page, stood in for: where the new site sends the browser to ask Cloudflare for its permissions.
+let relay = null;
+await page.setRequestInterception(true);
+const standIn = (req) => {
+  const at = new URL(req.url());
+  if (at.hostname === "afterwrd.app" && at.pathname === "/favicon.ico") return req.respond({ status: 404, body: "" });
+  if (at.hostname === "afterwrd.app") {
+    relay = at;
+    return req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+  }
+  req.continue();
+};
+page.on("request", standIn);
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
-await Promise.all([page.waitForNavigation(), page.click("#go")]);
+await Promise.all([page.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 }), page.click("#go")]);
+check("straight after the passkey, a site from the installer asks for automatic updates and friends' checks together",
+  relay?.searchParams.get("to") === `${BASE}/_cloudflare/auto-done` && relay.searchParams.get("both") === "1"
+  && relay.searchParams.get("setup") === "1", relay?.href);
+// "Not now" on the relay page: on to the end of setup, which carries on as before.
+await page.goto(`${BASE}/_admin/setup/done`);
+await page.waitForFunction(() => location.pathname !== "/_admin/setup/done", { timeout: 15000 });
 const landed = new URL(page.url());
-check("a friend's link brought from the installer opens straight after the passkey", landed.pathname === "/_admin/connections/new"
+check("…and after them (or without them), a friend's link brought from the installer opens", landed.pathname === "/_admin/connections/new"
   && landed.searchParams.get("link") === broughtLink, page.url());
+page.off("request", standIn);
+await page.setRequestInterception(false);
 await page.goto(`${BASE}/`);
 
 const nav = () => page.$$eval("header.site nav.main a", (l) => l.map((a) => a.querySelector("span").textContent).join(","));

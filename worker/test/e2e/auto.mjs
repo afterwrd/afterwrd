@@ -183,13 +183,11 @@ async function dailyRun() {
   return state();
 }
 
-// --- off, offered once on Home -----------------------------------------------------------------------------------
+// --- off: not offered on Home (a new site is asked during its setup: fresh.mjs), only on the Update page -------------
 await owner.goto(`${BASE}/`);
-check("Home offers automatic updates while they're off", (await text()).includes("afterwrd can keep itself up to date"));
-await Promise.all([settled(owner), owner.click("form[action='/_admin/update/auto-later'] button")]);
-check("…and \"Not now\" puts the offer away", !(await text()).includes("afterwrd can keep itself up to date"));
+check("Home doesn't nag about automatic updates while they're off", !(await text()).includes("keep itself up to date"));
 await owner.goto(`${BASE}/_admin/update`);
-check("the Update page still offers it", (await text("#auto")).includes("Turn on automatic updates"));
+check("the Update page offers them", (await text("#auto")).includes("Turn on automatic updates"));
 check("health answers: migrations done, typical reads work", await fetch(`${BASE}/_version?health=1`).then((r) => r.json()).then((h) => h.ok === true));
 
 // --- turning it on -----------------------------------------------------------------------------------------------

@@ -34,7 +34,7 @@ const POST_SCRIPT = `
   }
   const error = document.getElementById("error");`;
 
-export function connectionsPage({ friends: connections, unchecked = false, me = null }) {
+export function connectionsPage({ friends: connections, me = null }) {
   return shell(me, "Add a friend", `
 <p class="crumbs"><a href="/friend">Friends</a> /</p>
 <h1>Add a friend</h1>
@@ -50,8 +50,6 @@ export function connectionsPage({ friends: connections, unchecked = false, me = 
 them how to set one up first. Once you're friends, you'll each see the other's new posts on <a href="/">Home</a>, and
 can read each other's posts and photos (everything you've published) on your own site. Your comments are kept on
 their site. Removing a friend ends all of it at once.</p>
-${unchecked ? `<p class="meta" id="unchecked">Your site hasn't been checked yet. Once a friend with afterwrd is here, it's worth
-<a href="/_admin/update#check">asking them to check it</a>, before you invite many others.</p>` : ""}
 
 <div class="actions-row">
   <button class="chip primary" id="make">Make a friend link</button>

@@ -28,7 +28,7 @@
 //   POST /_admin/checks/found/<id>/seen   puts a finding away on Home
 import pkg from "../package.json";
 import { CODE_RE, donePage, exchangeCode, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
-import { autoState, step } from "./auto.js";
+import { autoState, SETUP_DONE, step } from "./auto.js";
 import { checkSite, cloudflareReader, siteFiles, siteIn } from "./checks.js";
 import { callSite } from "./peers.js";
 import { signedList } from "./signing.js";
@@ -77,13 +77,20 @@ export async function handleChecksConnect(request, env, url) {
     relay.searchParams.set("to", `${url.origin}/_cloudflare/checks-done`);
     relay.searchParams.set("state", state);
     relay.searchParams.set("challenge", challenge);
+    // Straight after automatic updates during a new site's setup (auto.js): the relay page says so, and it ends at
+    // SETUP_DONE, allowed or not.
+    const setup = url.searchParams.get("setup") === "1";
+    if (setup) relay.searchParams.set("setup", "1");
     return withCookie(Response.redirect(relay.toString(), 302),
-      `${START_COOKIE}=${state}.${verifier}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+      `${START_COOKIE}=${state}.${verifier}${setup ? ".setup" : ""}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   }
-  if (request.method === "GET" && path === "/checks-done") return html(donePage("/_cloudflare/checks-finish"));
+  if (request.method === "GET" && path === "/checks-done") {
+    const setup = (readCookie(request, START_COOKIE) ?? "").endsWith(".setup");
+    return html(donePage("/_cloudflare/checks-finish", { carryOn: setup ? SETUP_DONE : null }));
+  }
   if (request.method === "POST" && path === "/checks-finish") {
     const clear = `${START_COOKIE}=; Path=/_cloudflare; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
-    const [state, verifier] = (readCookie(request, START_COOKIE) ?? "").split(".");
+    const [state, verifier, setup] = (readCookie(request, START_COOKIE) ?? "").split(".");
     const body = await request.json().catch(() => ({}));
     if (!state || !verifier) return withCookie(json({ error: "This has expired. Start again from your Update page." }, 400), clear);
     if (body.state !== state) return withCookie(json({ error: "That isn't what this site started. Start again." }, 400), clear);
@@ -93,7 +100,7 @@ export async function handleChecksConnect(request, env, url) {
     } catch (error) {
       return withCookie(json({ error: error.message }, 400), clear);
     }
-    return withCookie(json({ back: "/_admin/update#check" }), clear);
+    return withCookie(json({ back: setup === "setup" ? SETUP_DONE : "/_admin/update#check" }), clear);
   }
   return null;
 }

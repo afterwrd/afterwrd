@@ -17,7 +17,7 @@ import { ownerName } from "../peers.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
 import { newPushDevices, pushKey } from "../push.js";
-import { checkRequests, lastChecked, recentChecks } from "../checks.js";
+import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
 import { autoState } from "../auto.js";
 import { checkGrant, friendCheckAlerts, lastFailure } from "../friendchecks.js";
@@ -589,7 +589,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
  */
 async function home(ctx, params) {
   const { db } = ctx;
-  const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, checked, requests, checkFailure,
+  const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
     friendChecks, checkGrantState, asking, introductions] = await Promise.all([
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
@@ -597,8 +597,7 @@ async function home(ctx, params) {
     newDevices(db, ctx.user),
     newPushDevices(db),
     securityFixWaiting(db),
-    autoState(db), // automatic updates (auto.js): offered once, and anything that needs the owner
-    lastChecked(db),
+    autoState(db), // automatic updates (auto.js): anything that needs the owner
     checkRequests(db),
     lastFailure(db),
     friendCheckAlerts(db),
@@ -612,14 +611,12 @@ async function home(ctx, params) {
   return {
     own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
     newDevices: newDevicesFound, newNotifying, securityFix, auto,
-    // Until it's been checked (by a friend's site, or the owner themselves: checks.js), Home suggests a check.
-    unchecked: !checked,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or
     // that their sites keep refusing): friendchecks.js.
     checkFailure, friendChecks,
-    checkGrant: checkGrantState, // offered once, after automatic updates
+    checkGrant: checkGrantState, // a problem with it, if there is one
     asking, introductions,
   };
 }

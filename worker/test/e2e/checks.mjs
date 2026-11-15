@@ -191,11 +191,11 @@ async function runCheck(code, site = FRIEND_SITE, fixed = false) {
   return { checkLink, message, before, relay, friend, after };
 }
 
-// --- before any check: Home, Add a friend and Update suggest one ---------------------------------------------------
+// --- before any check: only Update says so (checks happen in the background, so Home and Add a friend don't nag) -----
 const textOf = async (path, selector = "main") => { await owner.goto(BASE + path); return owner.$eval(selector, (m) => m.textContent.replace(/\s+/g, " ")); };
-check("an unchecked site suggests a check on Home", (await textOf("/")).includes("Your site hasn't been checked yet"));
-check("…and on Add a friend", (await textOf("/_admin/connections")).includes("hasn't been checked yet"));
-check("…and Update says it hasn't been", (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
+check("an unchecked site doesn't nag about it on Home", !(await textOf("/")).includes("hasn't been checked yet"));
+check("…or on Add a friend", !(await textOf("/_admin/connections")).includes("hasn't been checked yet"));
+check("…but Update says it hasn't been", (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
 
 // The site being checked is a friend's: once a check passes, its site is told (and only then).
 const THEIR_KEY = "k".repeat(43); // what this site sends when calling theirs
@@ -345,10 +345,8 @@ const tell = (body, key = OUR_KEY) => fetch(`${BASE}/_peer/checked`, { method: "
   headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
 check("only a friend can say they checked this site", (await tell({ type: "Checked", site: BASE, version: "9.9.9" }, "x".repeat(43))).status === 401);
 check("…and only of this site", (await tell({ type: "Checked", site: "http://localhost:8789", version: "9.9.9" })).status === 400
-  && (await textOf("/")).includes("hasn't been checked yet"));
+  && (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
 check("a friend's site saying it checked this one is kept", (await tell({ type: "Checked", site: BASE, version: "9.9.9" })).status === 200);
-check("…and Home stops suggesting a check", !(await textOf("/")).includes("hasn't been checked yet"));
-check("…as does Add a friend", !(await textOf("/_admin/connections")).includes("hasn't been checked yet"));
 const lastLine = await textOf("/_admin/update", "#last-checked");
 check("…and Update says who checked it last, and when", /^Last checked by Bob Example's site on \d{1,2} \w{3} \d{4} \(afterwrd 9\.9\.9\)\.$/.test(lastLine), lastLine);
 await Promise.all([owner.waitForNavigation(), owner.click("#check form button.link")]);

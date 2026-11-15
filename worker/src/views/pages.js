@@ -44,7 +44,11 @@ const CLIENT = `
     const invite = new URLSearchParams(location.hash.slice(1)).get("invite");
     try { if (invite && INVITE_RE.test(invite)) sessionStorage.setItem("afterwrd-invite", invite); } catch {}
   };
-  const afterPasskey = () => {
+  // The very first passkey of a site set up from the installer (setupPage hands on "#setup") goes on to the site's two
+  // lasting permissions (automatic updates, then friends' checks: auto.js, friendchecks.js), which end at
+  // /_admin/setup/done (setupDonePage), which carries on as below. A link made by hand (scripts/owner.mjs) doesn't.
+  const afterPasskey = (first) => {
+    if (first) return location.replace("/_cloudflare/auto-start?then=checks&setup=1");
     let invite = null;
     try { invite = sessionStorage.getItem("afterwrd-invite"); sessionStorage.removeItem("afterwrd-invite"); } catch {}
     location.replace(invite && INVITE_RE.test(invite) ? "/_admin/connections/new?link=" + encodeURIComponent(invite) : "/");
@@ -143,14 +147,23 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
 <button id="go">Create a passkey</button>
 <p id="error" role="alert"></p>`, `
   const token = location.pathname.split("/").pop();
+  const fromSetup = location.hash === "#setup";
   run(document.getElementById("go"), async () => {
     const options = await post("/_auth/register/options", { token });
     const credential = await navigator.credentials.create({ publicKey: {
       ...options, challenge: dec(options.challenge), user: { ...options.user, id: dec(options.user.id) },
       excludeCredentials: ids(options.excludeCredentials) } });
-    await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
-    afterPasskey();
+    const { first } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
+    afterPasskey(first && fromSetup);
   });`);
+}
+
+/** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */
+export function setupDonePage() {
+  return page("Your site is ready", `
+<h1>Your site is ready</h1>
+<p id="status">Taking you to it…</p>`, `
+  afterPasskey(false);`);
 }
 
 export function setupPage() {
@@ -166,13 +179,15 @@ this device, then you can import your Facebook download and invite friends.</p>
   // The name they gave the installer, brought after the # (so no server saw it on the way): ready to use or correct.
   const given = (new URLSearchParams(location.hash.slice(1)).get("name") ?? "").trim().slice(0, 100);
   if (given) document.getElementById("name").value = given;
+  // Sent by the installer (which always brings the name): after the passkey, on to the site's lasting permissions.
+  const fromInstaller = new URLSearchParams(location.hash.slice(1)).has("name");
   // Off the address bar and out of history, so an abandoned setup doesn't leave the code lying around.
   history.replaceState(null, "", "/_auth/setup");
   run(document.getElementById("go"), async () => {
     const name = document.getElementById("name").value.trim();
     if (!name) throw new Error("Give your name.");
     const { link } = await post("/_auth/setup", { code, name });
-    location.replace(link);
+    location.replace(fromInstaller ? link + "#setup" : link);
   });`);
 }
 

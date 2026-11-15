@@ -25,7 +25,6 @@ import { testingHere } from "./cloudflare.js";
 import { loadMembers } from "./membership.js";
 import { connectLinkPage, messagePage } from "./views/pages.js";
 import { callSite, host, KEY_RE, ownerName, siteOrigin } from "./peers.js";
-import { lastChecked } from "./checks.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256, withoutKeys } from "./util.js";
 import { headerMe } from "./photos.js";
 import { confirmPage, connectionsMessage, connectionsPage, introducedPage, introducePage, togetherPage } from "./views/connections.js";
@@ -241,7 +240,7 @@ export async function handleConnections(request, env, url, owner) {
   if (request.method === "GET" && path === "") {
     const { results } = await db.prepare(`SELECT id, origin, name, connected_at FROM connections WHERE connected_at IS NOT NULL
       AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE`).all();
-    return html(connectionsPage(pageData(env, { friends: results, unchecked: !(await lastChecked(db)), me })));
+    return html(connectionsPage(pageData(env, { friends: results, me })));
   }
   if (path === "/new") {
     const link = url.searchParams.get("link") ?? "";

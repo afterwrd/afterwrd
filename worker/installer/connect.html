@@ -28,8 +28,12 @@
   a { color: var(--accent-strong); }
   .meta { color: var(--muted); font-size: 0.9rem; }
   #error:empty { display: none; }
-  #ask[hidden], #ask-check[hidden], #ask-auto[hidden], #ask-checks[hidden] { display: none; }
-  #host, #check-host, #auto-host, #checks-host { font: 800 1.15rem/1.3 var(--round); word-break: break-all; }
+  #ask[hidden], #ask-check[hidden], #ask-auto[hidden], #ask-checks[hidden], #ask-both[hidden], #not-now[hidden] { display: none; }
+  #host, #check-host, #auto-host, #checks-host, #both-host { font: 800 1.15rem/1.3 var(--round); word-break: break-all; }
+  .grants { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.92rem; }
+  .grants th, .grants td { text-align: left; vertical-align: top; padding: 8px 6px; border-top: 1px solid #2e3d35; }
+  .grants thead th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .grants tbody th { font-weight: 700; }
   button { display: inline-block; padding: 10px 18px; border: 0; border-radius: 999px; background: var(--text); color: var(--bg);
     font: inherit; font-weight: 700; cursor: pointer; margin-top: 8px; }
 </style>
@@ -56,6 +60,24 @@
   Cloudflare (My Profile → Access Management → Connected Applications). Only continue if this is <b>your own</b> site's
   address.</p>
   <p><button id="continue-auto">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-both" hidden>
+  <p><b>Two permissions from Cloudflare, so your site looks after itself</b></p>
+  <p id="both-host"></p>
+  <table class="grants">
+    <thead><tr><th></th><th>What it can do</th><th>How long</th></tr></thead>
+    <tbody>
+      <tr><th>Automatic updates</th><td>Install each new afterwrd release, once it's signed and has been out a few days.
+        It can change your Workers, but can't read your databases or your account's settings.</td><td>Until you turn it off</td></tr>
+      <tr><th>Friends' checks</th><td>Let your friends' afterwrd sites read your site's code, to confirm it's the real
+        afterwrd. Read-only: it can't change anything. Each friend's site gets a one-hour pass at a time.</td><td>Until you turn it off</td></tr>
+    </tbody>
+  </table>
+  <p class="meta">Turn either off any time on your site's Update page, or in Cloudflare under My Profile → Access
+  Management → Connected Applications. On each of the next two Cloudflare pages, leave <b>Background Access</b> ticked
+  and press <b>Allow</b>. Only continue if this is <b>your own</b> site's address.</p>
+  <p><button id="continue-both">Continue to Cloudflare</button></p>
+  <p id="not-now" hidden><a id="not-now-link" href="#">Not now</a>: you can turn these on later on your site's Update page.</p>
 </section>
 <section id="ask-checks" hidden>
   <p>Let your friends' afterwrd sites check yours by themselves?</p>
@@ -98,6 +120,8 @@
     "/_cloudflare/checks-done": "offline_access workers-scripts.content_read",
   };
   const KEY = "afterwrd-connect";
+  const BOTH_KEY = "afterwrd-connect-both";
+  const BOTH_FOR_MS = 15 * 60 * 1000;
   const status = document.getElementById("status");
   const problem = document.getElementById("error");
   const fail = (text) => { status.textContent = ""; problem.textContent = text; };
@@ -131,14 +155,7 @@
         fail("Your browser won't let this page remember which site asked (private browsing can do that). Try in an ordinary window.");
       }
       if (!problem.textContent) {
-        // The one place the person can see which site is being connected, so it asks before going on.
-        const kind = { "/_check/done": ["check-host", "ask-check", "continue-check"],
-          "/_cloudflare/auto-done": ["auto-host", "ask-auto", "continue-auto"],
-          "/_cloudflare/checks-done": ["checks-host", "ask-checks", "continue-checks"] }[site.pathname] ?? ["host", "ask", "continue"];
-        status.textContent = "";
-        document.getElementById(kind[0]).textContent = site.host;
-        document.getElementById(kind[1]).hidden = false;
-        document.getElementById(kind[2]).addEventListener("click", () => {
+        const toCloudflare = () => {
           const auth = new URL("https://dash.cloudflare.com/oauth2/auth");
           auth.searchParams.set("response_type", "code");
           auth.searchParams.set("client_id", CLIENT_ID);
@@ -148,7 +165,36 @@
           auth.searchParams.set("code_challenge", challenge);
           auth.searchParams.set("code_challenge_method", "S256");
           location.replace(auth.toString());
-        });
+        };
+        // Both lasting permissions at once (a new site's setup, or turning both on): automatic updates first, with
+        // what both are, then friends' checks. That second one, read-only, goes straight on to Cloudflare when this
+        // tab has just been through the first for the same site, so it isn't asked twice. Only once, and not for long.
+        const both = params.get("both") === "1" && site.pathname === "/_cloudflare/auto-done";
+        let shown = null;
+        try { shown = JSON.parse(sessionStorage.getItem(BOTH_KEY) || "null"); sessionStorage.removeItem(BOTH_KEY); } catch {}
+        if (site.pathname === "/_cloudflare/checks-done" && shown?.host === site.host && Date.now() - shown.at < BOTH_FOR_MS) {
+          status.textContent = "Next, friends' checks…";
+          toCloudflare();
+        } else {
+          // The one place the person can see which site is being connected, so it asks before going on.
+          const kind = both ? ["both-host", "ask-both", "continue-both"] : { "/_check/done": ["check-host", "ask-check", "continue-check"],
+            "/_cloudflare/auto-done": ["auto-host", "ask-auto", "continue-auto"],
+            "/_cloudflare/checks-done": ["checks-host", "ask-checks", "continue-checks"] }[site.pathname] ?? ["host", "ask", "continue"];
+          status.textContent = "";
+          document.getElementById(kind[0]).textContent = site.host;
+          document.getElementById(kind[1]).hidden = false;
+          // During a new site's setup, these can be left for now: on to the end of its setup instead.
+          if (both && params.get("setup") === "1") {
+            document.getElementById("not-now-link").href = site.origin + "/_admin/setup/done";
+            document.getElementById("not-now").hidden = false;
+          }
+          document.getElementById(kind[2]).addEventListener("click", () => {
+            if (both) {
+              try { sessionStorage.setItem(BOTH_KEY, JSON.stringify({ host: site.host, at: Date.now() })); } catch {}
+            }
+            toCloudflare();
+          });
+        }
       }
     }
   } else if (params.has("code") || params.has("error")) {

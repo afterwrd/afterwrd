@@ -146,8 +146,9 @@ export async function exchangeCode(env, code, verifier, origin, redirectUri = RE
 }
 
 // Back from the relay: the code and state travel in the fragment (never sent to a server or kept in a log), and this
-// page posts them to /finish, which can read the cookie the fragment can't.
-export function donePage(finishPath) {
+// page posts them to /finish, which can read the cookie the fragment can't. With `carryOn` (a new site's setup), a
+// problem, or not allowing it, still leaves a way on: setup carries on without it.
+export function donePage(finishPath, { carryOn = null } = {}) {
   return `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -167,8 +168,10 @@ export function donePage(finishPath) {
 <main>
 <p id="status">Finishing connecting to Cloudflare…</p>
 <p id="error" role="alert"></p>
+<p id="carry-on" hidden><a href="${carryOn ?? "/"}">Carry on to your site</a>. You can turn this on later on its Update page.</p>
 </main>
 <script>
+  const carryOn = () => { if (${JSON.stringify(Boolean(carryOn))}) document.getElementById("carry-on").hidden = false; };
   (async () => {
     const params = new URLSearchParams(location.hash.slice(1));
     const status = document.getElementById("status");
@@ -179,6 +182,7 @@ export function donePage(finishPath) {
       problem.textContent = params.get("error") === "access_denied"
         ? "You didn't allow it, so nothing has changed. You can go back and try again."
         : "Cloudflare couldn't connect: " + params.get("error");
+      carryOn();
       return;
     }
     try {
@@ -203,6 +207,7 @@ export function donePage(finishPath) {
     } catch (err) {
       status.textContent = "";
       problem.textContent = err.message;
+      carryOn();
     }
   })();
 </script>
