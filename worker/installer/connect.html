@@ -106,7 +106,10 @@
 <p id="error" role="alert"></p>
 </main>
 <script>
-  const CLIENT_ID = "__OAUTH_CLIENT__";
+  // The sign-in apps a site may ask through: this release's, then earlier ones (worker/src/cloudflare.js). The one the
+  // site says, as that's the one it swaps the code with; a site from before 0.51.0 says nothing, and used the first.
+  const CLIENTS = "__OAUTH_CLIENTS__".split(" ");
+  const UNSAID = "__OAUTH_CLIENT_UNSAID__";
   // What Cloudflare is asked for depends only on where the browser goes back to, so a check can't be given more:
   //   /_cloudflare/done  a site installing or updating itself (as in worker/src/cloudflare.js SCOPES). "Workers
   //                      Admin", because "Workers Editor" can't create a Worker.
@@ -161,7 +164,7 @@
         const toCloudflare = () => {
           const auth = new URL("https://dash.cloudflare.com/oauth2/auth");
           auth.searchParams.set("response_type", "code");
-          auth.searchParams.set("client_id", CLIENT_ID);
+          auth.searchParams.set("client_id", CLIENTS.includes(params.get("client")) ? params.get("client") : UNSAID);
           auth.searchParams.set("redirect_uri", location.origin + location.pathname);
           auth.searchParams.set("scope", SCOPES[site.pathname]);
           auth.searchParams.set("state", state);

@@ -17,7 +17,14 @@
 import pkg from "../package.json";
 import { html, json } from "./util.js";
 
+// The sign-in app ("OAuth client") afterwrd asks Cloudflare through. Earlier ones (package.json cloudflareClientsBefore,
+// oldest first) keep working for what they were given: a lasting permission is renewed with the app that was allowed
+// (grantClient), and the relay page asks through whichever app the site says (sites from before 0.51.0 say nothing,
+// and used the first). So moving to a new app never ends anyone's automatic updates or friends' checks.
 export const CLIENT_ID = pkg.afterwrd.cloudflareClient;
+export const EARLIER_CLIENTS = /** @type {string[]} */ (pkg.afterwrd.cloudflareClientsBefore ?? []);
+/** The app a lasting permission must be renewed with: the one noted when it was given, or the first, from before. */
+export const grantClient = (noted) => (noted === CLIENT_ID || EARLIER_CLIENTS.includes(noted) ? noted : EARLIER_CLIENTS[0] ?? CLIENT_ID);
 export const RELAY = `https://${pkg.afterwrd.site}/connect/`;
 // What Cloudflare is asked for (the relay page, installer/connect.html, sends it; keep the two the same): making,
 // changing and deleting Workers (afterwrd's own, and groups'; "Workers Editor" can't make a new one, so a fresh
@@ -117,6 +124,7 @@ export async function relayLink(to) {
   relay.searchParams.set("to", to);
   relay.searchParams.set("state", state);
   relay.searchParams.set("challenge", challenge);
+  relay.searchParams.set("client", CLIENT_ID); // the app this site swaps the code with (exchangeCode)
   return { verifier, state, relay };
 }
 

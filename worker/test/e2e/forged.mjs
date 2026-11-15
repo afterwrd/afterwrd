@@ -1,7 +1,7 @@
 // What a hostile friend's site might send, through the real parsing code.
 // The real friends.js and feed.js, bundled by run.sh (with a stand-in for Cloudflare's runtime) into $OUT/bundle.mjs.
 import { pathToFileURL } from "node:url";
-const { cleanMentions, linkify, noteMentions, callSite, cleanFeed, icsFile, loadRelease, markMine, markMineInGroup, parseEvent, parseGroupPage, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+const { cleanMentions, linkify, noteMentions, callSite, cleanFeed, icsFile, loadRelease, markMine, markMineInGroup, parseEvent, parseGroupPage, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 const B = "https://bob.example";
 const A = "https://ann.example";
 const hash = "a".repeat(64);
@@ -224,4 +224,10 @@ github.close();
     globalThis.fetch = realFetch;
   }
 }
+// --- which sign-in app a lasting permission is renewed with (cloudflare.js) -------------------------------------------
+const first = EARLIER_CLIENTS[0] ?? CLIENT_ID;
+check("a permission given through this release's sign-in app is renewed with it", grantClient(CLIENT_ID) === CLIENT_ID);
+check("one given through an earlier app is renewed with that app", EARLIER_CLIENTS.every((c) => grantClient(c) === c));
+check("one from before the app was noted is renewed with the first app afterwrd had", grantClient(null) === first && grantClient(undefined) === first);
+check("an app nobody knows is never used", grantClient("evil-client") === first);
 process.exit(failed ? 1 : 0);

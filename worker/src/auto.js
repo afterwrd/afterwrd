@@ -29,7 +29,7 @@
 // (Versions before 0.41.0 didn't know this, and put the old version back regardless.) The time of every switch is
 // kept for a later, owner-chosen restore.
 import pkg from "../package.json";
-import { exchangeCode, pkce, readCookie, RELAY, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
+import { CLIENT_ID, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
 import { existingDatabase, FILES_AT_ONCE, findWorker, liveVersion, loadRelease, stageVersion, switchTo, uploadAssets, useApiBase, api } from "./deploy.js";
 import { isGroupWorker } from "./groupsites.js";
 import { checkNewer, ensureSchema } from "./migrate.js";
@@ -102,6 +102,7 @@ export async function handleAutoConnect(request, env, url) {
     relay.searchParams.set("to", `${url.origin}/_cloudflare/auto-done`);
     relay.searchParams.set("state", state);
     relay.searchParams.set("challenge", challenge);
+    relay.searchParams.set("client", CLIENT_ID);
     // With friends' checks next, the relay page says what both are before the first Allow; during a new site's setup
     // (views/pages.js afterPasskey) it also offers to leave them for now.
     const checks = url.searchParams.get("then") === "checks";
@@ -156,6 +157,7 @@ async function turnOn(env, url, data) {
   await api(data.access_token, `/accounts/${account}/workers/scripts/${script}/schedules`, { method: "PUT", body: JSON.stringify([{ cron }]) });
   const box = vault(env);
   await box.keepSecret("auto_refresh", data.refresh_token);
+  await box.keepSecret("auto_client", CLIENT_ID); // renewed with the app it was given to (cloudflare.js grantClient)
   await box.keepSecret("auto_key", randomKey()); // a new key each time they're turned on
   await saveState(env.DB, { on: true, origin: url.origin, account, script, cron, since: now(), refreshedAt: now(), problem: null, offPending: null });
 }
@@ -464,7 +466,7 @@ async function accessToken(env, origin) {
   const endpoint = testingHere(env, origin) && env.OAUTH_TOKEN_URL ? env.OAUTH_TOKEN_URL : TOKEN_ENDPOINT;
   const response = await fetch(endpoint, {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: pkg.afterwrd.cloudflareClient }),
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: grantClient(await box.secret("auto_client")) }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || typeof data.access_token !== "string" || !CODE_RE.test(data.access_token)) {

@@ -27,7 +27,7 @@
 //   POST /_admin/checks/checking-off, /checking-on
 //   POST /_admin/checks/found/<id>/seen   puts a finding away on Home
 import pkg from "../package.json";
-import { CODE_RE, donePage, exchangeCode, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
+import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
 import { checkSite, cloudflareReader, siteFiles, siteIn } from "./checks.js";
 import { callSite } from "./peers.js";
@@ -77,6 +77,7 @@ export async function handleChecksConnect(request, env, url) {
     relay.searchParams.set("to", `${url.origin}/_cloudflare/checks-done`);
     relay.searchParams.set("state", state);
     relay.searchParams.set("challenge", challenge);
+    relay.searchParams.set("client", CLIENT_ID);
     // Straight after automatic updates during a new site's setup (auto.js): the relay page says so, and it ends at
     // SETUP_DONE, allowed or not.
     const setup = url.searchParams.get("setup") === "1";
@@ -117,6 +118,7 @@ async function letOn(env, data) {
   }
   const box = vault(env);
   await box.keepSecret("check_refresh", data.refresh_token);
+  await box.keepSecret("check_client", CLIENT_ID); // renewed with the app it was given to (cloudflare.js grantClient)
   await box.keepSecret("check_access", null);
   await saveSetting(env.DB, GRANT_KEY, { on: true, since: now(), problem: null });
 }
@@ -165,7 +167,7 @@ async function checkAccess(env, origin) {
   const endpoint = testingHere(env, origin) && env.OAUTH_TOKEN_URL ? env.OAUTH_TOKEN_URL : TOKEN_ENDPOINT;
   const response = await fetch(endpoint, {
     method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: pkg.afterwrd.cloudflareClient }),
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refresh, client_id: grantClient(await box.secret("check_client")) }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || typeof data.access_token !== "string" || !CODE_RE.test(data.access_token)) {

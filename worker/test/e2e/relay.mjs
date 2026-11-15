@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PAGE = readFileSync(new URL("../../installer/connect.html", import.meta.url), "utf8").replaceAll("__OAUTH_CLIENT__", "test-client");
+const PAGE = readFileSync(new URL("../../installer/connect.html", import.meta.url), "utf8").replaceAll("__OAUTH_CLIENTS__", "new-client old-client").replaceAll("__OAUTH_CLIENT_UNSAID__", "old-client");
 const RELAY = "https://afterwrd.app/connect/";
 const SITE = "https://ann.example-1.workers.dev";
 const OTHER = "https://bob.example-2.workers.dev";
@@ -84,6 +84,18 @@ await page.goto(out(`${SITE}/_cloudflare/checks-done`, { both: "1" }));
 check("\"both\" means nothing on the way to friends' checks", await shown("#ask-checks") && !(await shown("#ask-both")));
 await page.goto(out("https://evil.example/_cloudflare/auto-done", { both: "1", setup: "1" }));
 check("an address that isn't an afterwrd site's is refused", !(await shown("#ask-both")) && (await words("#error")).length > 0);
+
+// --- which sign-in app it asks through -------------------------------------------------------------------------------
+const askedThrough = async (extra) => {
+  cloudflare = null;
+  await page.goto(out(`${SITE}/_cloudflare/done`, extra));
+  await Promise.all([toCloudflare(), page.click("#continue")]);
+  return cloudflare?.searchParams.get("client_id");
+};
+check("a site that says which sign-in app it uses is asked through that one", (await askedThrough({ client: "new-client" })) === "new-client");
+check("…as is one that names an earlier app", (await askedThrough({ client: "old-client" })) === "old-client");
+check("a site from before 0.51.0, which doesn't say, is asked through the first app, as it was", (await askedThrough({})) === "old-client");
+check("an app the page doesn't know is never asked through", (await askedThrough({ client: "evil-client" })) === "old-client");
 
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();

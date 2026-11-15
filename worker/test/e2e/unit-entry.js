@@ -8,3 +8,4 @@ export { findOrCreateDatabase, findWorker, loadRelease } from "../../src/deploy.
 export { serveStatic } from "../../src/static.js";
 export { cleanMentions, noteMentions } from "../../src/mentions.js";
 export { linkify } from "../../src/views/format.js";
+export { CLIENT_ID, EARLIER_CLIENTS, grantClient } from "../../src/cloudflare.js";

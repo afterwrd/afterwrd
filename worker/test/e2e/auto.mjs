@@ -53,7 +53,7 @@ function release(version, { signedAgo, tamper = false, newStore = false, securit
   releases.set(version, { manifest, entry: { version, manifest_sha256: tamper ? sha("something else") : sha(manifest), signed_at: iso(signedAgo), etag: sha(`etag ${version}`) } });
   list.seq++;
 }
-const token = { exchanges: [], refreshes: [], revoked: new Set(), n: 0 };
+const token = { exchanges: [], refreshes: [], clients: [], revoked: new Set(), n: 0 };
 const cf = { schedules: [], versions: [], deployments: [], live: "11111111-1111-4111-8111-111111111111", unhealthy: new Set() };
 const asked = [];
 // Cloudflare's upload sessions, as the real one behaves: it asks only for files it hasn't got, four to a bucket, and
@@ -86,6 +86,7 @@ const server = createServer(async (req, res) => {
       return send(200, { access_token: `tok-auto-${++token.n}`, refresh_token: `ref-auto-${token.n}`, token_type: "bearer", expires_in: 3600, scope: "offline_access workers-scripts.edit" });
     }
     token.refreshes.push(p.refresh_token);
+    token.clients.push(p.client_id);
     if (token.revoked.has(p.refresh_token)) return send(400, { error: "invalid_grant" });
     return send(200, { access_token: `tok-auto-${++token.n}`, refresh_token: `ref-auto-${token.n}`, token_type: "bearer", expires_in: 3600 });
   }
@@ -359,6 +360,10 @@ check("\"Install it now\" installs it without waiting the days out", state().las
   && cf.versions.length === 1 && cf.live === cf.versions[0].id, JSON.stringify(state().last));
 check("…and the site's group follows in the same run, as signed", grp.version === SITE_VERSION && grp.deployments.length === 1
   && grp.deployments[0] === grp.versions[0], JSON.stringify(grp));
+const CLIENT = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).afterwrd.cloudflareClient;
+check("the grant was swapped for, and is renewed with, this release's sign-in app (noted with it)",
+  token.exchanges.length > 0 && token.exchanges.every((e) => e.client_id === CLIENT) && token.clients.length > 0
+  && token.clients.every((c) => c === CLIENT), `${JSON.stringify(token.exchanges.map((e) => e.client_id))} ${JSON.stringify(token.clients)}`);
 check("…the release's site files uploaded a few at a time, over several requests, for the site and its group",
   uploads.sessions >= 6 && uploads.held.get("localhost")?.size >= 20 && uploads.held.get("localhost-grp")?.size >= 20
   && cf.versions[0]?.meta?.assets?.jwt === "assets-jwt", `${uploads.sessions} sessions, ${uploads.requests} uploads`);

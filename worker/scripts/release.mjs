@@ -212,7 +212,8 @@ writeFileSync(join(site, "index.html"), readFileSync(join(worker, "installer", "
 // The Connect page, at /connect/: the address Cloudflare's sign-in sends people back to (src/cloudflare.js).
 mkdirSync(join(site, "connect"), { recursive: true });
 writeFileSync(join(site, "connect", "index.html"), readFileSync(join(worker, "installer", "connect.html"), "utf8")
-  .replaceAll("__OAUTH_CLIENT__", project.cloudflareClient));
+  .replaceAll("__OAUTH_CLIENTS__", [project.cloudflareClient, ...(project.cloudflareClientsBefore ?? [])].join(" "))
+  .replaceAll("__OAUTH_CLIENT_UNSAID__", (project.cloudflareClientsBefore ?? [])[0] ?? project.cloudflareClient));
 // "How it works", beside it at /how-it-works/.
 mkdirSync(join(site, "how-it-works"), { recursive: true });
 writeFileSync(join(site, "how-it-works", "index.html"), readFileSync(join(worker, "installer", "how-it-works.html"), "utf8")

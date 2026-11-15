@@ -3,6 +3,7 @@
 // Needs a fresh local database with SETUP_CODE=local-test-setup-code.
 //   node fresh.mjs <zip> <fixtures dir>
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
@@ -43,7 +44,9 @@ await Promise.all([page.waitForNavigation(), page.click("#go")]);
 await Promise.all([page.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 }), page.click("#go")]);
 check("straight after the passkey, a site from the installer asks for automatic updates and friends' checks together",
   relay?.searchParams.get("to") === `${BASE}/_cloudflare/auto-done` && relay.searchParams.get("both") === "1"
-  && relay.searchParams.get("setup") === "1", relay?.href);
+  && relay.searchParams.get("setup") === "1"
+  && relay.searchParams.get("client") === JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).afterwrd.cloudflareClient,
+  relay?.href);
 // "Not now" on the relay page: on to the end of setup, which carries on as before.
 await page.goto(`${BASE}/_admin/setup/done`);
 await page.waitForFunction(() => location.pathname !== "/_admin/setup/done", { timeout: 15000 });
