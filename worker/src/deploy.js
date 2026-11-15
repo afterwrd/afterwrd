@@ -63,7 +63,7 @@ export async function findWorker(token, hostname) {
 
 // GitHub sometimes answers a download with a 5xx (a 504 once stopped an update) or drops the connection, so
 // each download is tried up to 3 times, a second and then 3 seconds apart. Every try is one of the 50 calls the free
-// plan allows a request, and a fresh install already makes about 30, so a release gets at most 6 extra tries.
+// plan allows a request (two with GitHub's redirect to where the file is), so a release gets at most 6 extra tries.
 const TRY_AGAIN_MS = [1000, 3000];
 const SPARE_TRIES = 6;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
@@ -86,8 +86,14 @@ export async function loadRelease(base, manifestSha256 = null) {
   };
 }
 
-/** Uploads the release's site files (unchanged ones are skipped by Cloudflare); returns the token deploying needs. */
-export async function uploadAssets(token, account, script, release) {
+/**
+ * Uploads the release's site files (unchanged ones are skipped by Cloudflare); returns the token deploying needs.
+ * With `most`, it stops after the first whole bucket (Cloudflare's grouping) that takes it to that many files and
+ * returns null: call it again for the rest, which Cloudflare then leaves out, as it keeps what's been uploaded. Each
+ * file is a download from GitHub, two or three of a request's 50 calls with the redirects, and a new site has every
+ * file to upload.
+ */
+export async function uploadAssets(token, account, script, release, { most = Infinity } = {}) {
   const { manifest } = release;
   const byHash = new Map(manifest.assets.map((a) => [a.hash, a]));
   const session = await api(token, `/accounts/${account}/workers/scripts/${script}/assets-upload-session`, {
@@ -95,7 +101,10 @@ export async function uploadAssets(token, account, script, release) {
     body: JSON.stringify({ manifest: Object.fromEntries(manifest.assets.map((a) => [a.path, { hash: a.hash, size: a.size }])) }),
   });
   let jwt = session.jwt;
+  let done = 0;
   for (const bucket of session.buckets ?? []) {
+    if (done >= most) return null;
+    done += bucket.length;
     const form = new FormData();
     for (const hash of bucket) {
       const asset = byHash.get(hash);
@@ -213,11 +222,20 @@ async function releaseForm(release, metadata) {
 async function downloadWithRetries(url, tries) {
   for (let attempt = 0; ; attempt++) {
     let status = null; // what GitHub answered, if it answered and it wasn't OK
+    let broke = null; // why there was no answer, if there wasn't one
     try {
       const response = await fetch(url, { headers: { "User-Agent": "afterwrd" }, signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
       if (response.ok) return new Uint8Array(await response.arrayBuffer());
       status = response.status;
-    } catch {} // no answer, or it broke off part way
+    } catch (error) { // no answer, it broke off part way, or Cloudflare refused the call (too many in one request)
+      broke = error;
+    }
+    if (broke && /subrequest/i.test(broke.message)) {
+      // Asking again can't help: it would only be refused too. Say what happened, so it can be put right.
+      throw new Error("Couldn't download the release: this went over the number of calls Cloudflare allows at once. "
+        + "Please tell whoever looks after afterwrd.");
+    }
+    if (broke) console.error(`Download of ${url} failed:`, broke.message);
     const problem = new Error(status ? `Couldn't download the release (${status}).` : "Couldn't download the release: GitHub didn't answer.");
     // A 404 and the like won't change by asking again; a 5xx, 429 or no answer might.
     if (status && status < 500 && status !== 429) throw problem;

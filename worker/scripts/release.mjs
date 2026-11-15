@@ -63,6 +63,17 @@ if (uncovered.length) {
   process.exit(1);
 }
 
+// One code module, not one per migration. Installing or updating a site downloads every module separately, and on
+// Cloudflare's free plan a request may make only 50 calls, each of GitHub's redirects counting as one: 0.49.0 had
+// 21 modules (index.js and 20 migrations), which took the installer's deploy step over the limit. So the .sql files
+// wrangler leaves beside index.js are built into it here, as the same text the Worker imported them as.
+const single = await bundle({
+  entryPoints: [join(dist, "index.js")], bundle: true, format: "esm", target: "es2022", platform: "neutral", write: false,
+  charset: "utf8", loader: { ".sql": "text" }, external: ["cloudflare:*", "node:*"],
+});
+writeFileSync(join(dist, "index.js"), single.outputFiles[0].contents);
+for (const name of readdirSync(dist).filter((n) => n.endsWith(".sql"))) rmSync(join(dist, name));
+
 const TYPES = {
   ".js": "application/javascript", ".css": "text/css", ".html": "text/html", ".json": "application/json",
   ".svg": "image/svg+xml", ".png": "image/png", ".wasm": "application/wasm", ".woff2": "font/woff2", ".txt": "text/plain",
@@ -82,6 +93,10 @@ const modules = readdirSync(dist)
     type: name.endsWith(".js") ? "application/javascript+module" : "text/plain",
     ...add(readFileSync(join(dist, name))),
   }));
+if (modules.length !== 1) {
+  console.error(`The Worker should be one code module, but the build made ${modules.length}: ${modules.map((m) => m.name).join(", ")}`);
+  process.exit(1);
+}
 
 const publicDir = join(worker, config.assets.directory);
 const walk = (dir) => readdirSync(dir, { withFileTypes: true })

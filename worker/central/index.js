@@ -158,6 +158,8 @@ async function workersDev(token, account) {
   }
 }
 
+const FILES_AT_ONCE = 8;
+
 async function ownAccount(token, id) {
   accountId(id);
   if (!(await api(token, "/accounts")).some((a) => a.id === id)) throw new Error("That account isn't one you allowed.");
@@ -202,9 +204,11 @@ const STEPS = {
     return { version: await latestVersion(here), site: siteAddress(here, site, domain) };
   },
 
+  // A few files at a time (jwt null: the page asks again for the rest), so a new site's every file never takes one
+  // request over the 50 calls Cloudflare allows: each is a download from GitHub, two or three calls with its redirects.
   async assets(token, { account, name, version }, here) {
     await ownAccount(token, account);
-    return { jwt: await uploadAssets(token, account, siteName(name), await release(here, version)) };
+    return { jwt: await uploadAssets(token, account, siteName(name), await release(here, version), { most: FILES_AT_ONCE }) };
   },
 
   async deploy(token, { account, name, version, jwt }, here) {
@@ -493,7 +497,9 @@ with Cloudflare's own Deploy page instead</a>. <a href="https://afterwrd.app/how
       $("renaming").hidden = true;
       const { version, site } = checked;
       log("Uploading afterwrd " + version + "'s site files…");
-      const { jwt } = await step("assets", { account: account.id, name, version });
+      let jwt = null;
+      for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await step("assets", { account: account.id, name, version }));
+      if (!jwt) throw new Error("Couldn't finish uploading afterwrd's site files. Try again in a minute.");
       log("Creating the database and installing afterwrd…");
       const { next } = await step("deploy", { account: account.id, name, version, jwt });
       log("Waiting for your site to start at " + new URL(site).host + "…");

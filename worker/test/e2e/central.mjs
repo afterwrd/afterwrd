@@ -22,7 +22,11 @@ const add = (text) => { const bytes = Buffer.from(text); files.set(sha(bytes), b
 const MANIFEST = {
   name: "afterwrd", version: "9.9.9", main_module: "index.js", compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"],
   modules: [{ name: "index.js", type: "application/javascript+module", ...add("export default { fetch() { return new Response('hi'); } };") }],
-  assets: [{ path: "/static/style.css", type: "text/css", hash: "0123456789abcdef0123456789abcdef", ...add("body { color: green; }") }],
+  // As many site files as a real release has (36 in 0.49.0, and more to come), so uploading them all must take more
+  // than one request.
+  assets: [{ path: "/static/style.css", type: "text/css", hash: "0123456789abcdef0123456789abcdef", ...add("body { color: green; }") },
+    ...Array.from({ length: 44 }, (_, i) => ({ path: `/static/file${i}.js`, type: "application/javascript",
+      hash: String(i).padStart(32, "f"), ...add(`// file ${i}`) }))],
   assets_config: { html_handling: "none", not_found_handling: "none", run_worker_first: true },
   durable_objects: [{ name: "MEDIA", class_name: "MediaStore" }, { name: "OUTBOX", class_name: "Outbox" }],
   migrations: { new_tag: "v1", new_sqlite_classes: ["MediaStore", "Outbox"] },
@@ -60,8 +64,18 @@ async function cloudflare(token, method, path, body, contentType) {
     return ok(token === "tok-leftover" ? [{ uuid: "old-database", name: "afterwrd" }] : []);
   }
   if (/\/d1\/database\/old-database\/query$/.test(path)) return ok([{ results: [{ n: 9 }], success: true }]);
-  if ((m = /^\/accounts\/(\w+)\/workers\/scripts\/([\w-]+)\/assets-upload-session$/.exec(path))) return ok({ jwt: "session-jwt", buckets: [[MANIFEST.assets[0].hash]] });
-  if (/\/workers\/assets\/upload$/.test(path.split("?")[0])) return ok({ jwt: "completion-jwt" });
+  // Cloudflare keeps what's been uploaded, so a new session asks only for the rest, a few files to a bucket.
+  if ((m = /^\/accounts\/(\w+)\/workers\/scripts\/([\w-]+)\/assets-upload-session$/.exec(path))) {
+    const missing = MANIFEST.assets.map((a) => a.hash).filter((h) => !(s.uploaded ??= new Set()).has(h));
+    const buckets = [];
+    for (let i = 0; i < missing.length; i += 4) buckets.push(missing.slice(i, i + 4));
+    return ok({ jwt: buckets.length ? `session-${token}` : "completion-jwt", buckets });
+  }
+  if (/\/workers\/assets\/upload$/.test(path.split("?")[0])) {
+    const form = await new Response(body, { headers: { "Content-Type": contentType } }).formData();
+    for (const hash of form.keys()) s.uploaded.add(hash);
+    return ok({ jwt: s.uploaded.size === MANIFEST.assets.length ? "completion-jwt" : null });
+  }
   if ((m = /^\/accounts\/(\w+)\/workers\/scripts\/([\w-]+)$/.exec(path)) && method === "PUT") {
     const form = await new Response(body, { headers: { "Content-Type": contentType } }).formData();
     s.workers[`${m[1]}/${m[2]}`] = true;
@@ -75,8 +89,15 @@ async function cloudflare(token, method, path, body, contentType) {
   return fail(404, `No route for ${method} ${path}`);
 }
 
+// The calls the installer makes out, as Cloudflare's free plan counts them (50 a request): one for each call to
+// Cloudflare, and for each download from GitHub three, allowing for its redirect to where the file is kept and one
+// more for a repository that has moved. The page's steps go one at a time, so each one's share can be told apart.
+let outgoing = 0;
+const stepCalls = []; // {step, calls}
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1:8799");
+  if (url.pathname.startsWith("/releases/")) outgoing += 3;
+  if (url.pathname.startsWith("/client/v4/")) outgoing += 1;
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   const body = Buffer.concat(chunks);
@@ -93,7 +114,7 @@ const server = createServer(async (req, res) => {
     const token = (req.headers.authorization ?? "").replace(/^Bearer /, "");
     const path = url.pathname.slice("/client/v4".length) + url.search;
     calls.push(`${token} ${req.method} ${path}`);
-    const answer = await cloudflare(token === "session-jwt" ? "jwt" : token, req.method, path, body, req.headers["content-type"]);
+    const answer = await cloudflare(token.replace(/^session-/, ""), req.method, path, body, req.headers["content-type"]);
     return send(answer.status, answer.body);
   }
   send(404, { error: "no" });
@@ -108,6 +129,11 @@ async function install(code, { person = "Ann Example", domains = [], account = n
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
+  const startedAt = new Map();
+  page.on("request", (req) => { if (req.url().startsWith(`${BASE}/step/`)) startedAt.set(req, outgoing); });
+  page.on("requestfinished", (req) => {
+    if (startedAt.has(req)) stepCalls.push({ step: new URL(req.url()).pathname.slice(6), calls: outgoing - startedAt.get(req) });
+  });
   let allow = null;
   await page.setRequestInterception(true);
   page.on("request", (req) => {
@@ -207,6 +233,11 @@ check("then it goes straight on to the new site's setup link, their name after t
   && /^[0-9a-f]{48}$/.test(setupCode ?? ""), fresh.next);
 check("…and the token is dropped here", !(await fresh.page.cookies(BASE)).some((c) => c.name.includes("install_token")));
 check("every file came from the release, checked", calls.some((c) => c.includes("assets/upload")) && made.modules.join() === "index.js");
+check("…every site file, a few at a time over several requests", state["tok-fresh"].uploaded?.size === MANIFEST.assets.length
+  && stepCalls.filter((s) => s.step === "assets").length >= 3, stepCalls.map((s) => s.step).join(" "));
+const busiest = stepCalls.reduce((most, s) => (s.calls > most.calls ? s : most), { calls: 0 });
+check("…and no step comes near the 50 calls Cloudflare allows a request, even with GitHub's redirects", busiest.calls > 0 && busiest.calls <= 45,
+  `${busiest.step}: ${busiest.calls}`);
 
 // Invited by a friend: the invitation goes along, after the #, never to the installer's server.
 const friendLink = `http://localhost:8787/_connect/${"y".repeat(43)}`;
