@@ -203,6 +203,22 @@ export async function runningSince(db) {
 }
 
 /**
+ * The lock one run at a time takes ("<time>:<run>"), if there isn't a fresh one: its run id, or null. Getting back in
+ * through Cloudflare (recover.js) takes it too, as that makes a version live as well.
+ */
+export async function takeLock(db) {
+  const run = randomKey().slice(0, 16);
+  const taken = await db.prepare(`INSERT INTO settings (key, value) VALUES ('auto_lock', ?1)
+    ON CONFLICT(key) DO UPDATE SET value = ?1 WHERE CAST(settings.value AS INTEGER) < ?2`).bind(`${now()}:${run}`, now() - LOCK_SECONDS).run();
+  return taken.meta?.changes ? run : null;
+}
+
+/** Lets go of the lock, if it's still `run`'s. */
+export async function releaseLock(db, run) {
+  await db.prepare("DELETE FROM settings WHERE key = 'auto_lock' AND value LIKE ?").bind(`%:${run}`).run();
+}
+
+/**
  * The Worker's cron trigger, and "Install it now" on the Update page ({now: true}: no waiting the days out). False if
  * another run is still going.
  */
@@ -212,10 +228,8 @@ export async function runAuto(env, { now: ownerAsked = false } = {}) {
   if (!state.on || !state.origin) return true;
   // One run at a time: the lock ("<time>:<run>") is taken only if there isn't a fresh one. Each line of progress
   // renews it, so a long run keeps it; only this run removes it.
-  const run = randomKey().slice(0, 16);
-  const taken = await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('auto_lock', ?1)
-    ON CONFLICT(key) DO UPDATE SET value = ?1 WHERE CAST(settings.value AS INTEGER) < ?2`).bind(`${now()}:${run}`, now() - LOCK_SECONDS).run();
-  if (!taken.meta?.changes) return false;
+  const run = await takeLock(env.DB);
+  if (!run) return false;
   try {
     await saveState(env.DB, { progress: [] });
     await runOnce(env, state, ownerAsked);
@@ -225,7 +239,7 @@ export async function runAuto(env, { now: ownerAsked = false } = {}) {
       await saveState(env.DB, { lastRun: Date.now(), problem: plain(error), lastCheck: { at: now(), words: `It couldn't run: ${plain(error)}` } });
     }
   } finally {
-    await env.DB.prepare("DELETE FROM settings WHERE key = 'auto_lock' AND value LIKE ?").bind(`%:${run}`).run();
+    await releaseLock(env.DB, run);
     // Turned off while it ran: now nothing is using the grant, it can go.
     if ((await autoState(env.DB)).offPending) await finishTurningOff(env, state.origin).catch((error) => console.error("Turning off:", error.message));
   }
@@ -260,7 +274,7 @@ async function runOnce(env, state, ownerAsked = false) {
   if (list && list.seq < (state.listSeq ?? 0)) throw new Error("The list of signed releases went backwards, so nothing was installed.");
   if (list && list.seq > (state.listSeq ?? 0)) await saveState(env.DB, { listSeq: list.seq });
   // The owner pressing "Install it now" doesn't wait the days out, and may try a release that didn't take before.
-  const choice = await chooseRelease(env, origin, list, ownerAsked ? [] : state.failed ?? [], fetch, { noWait: ownerAsked });
+  const choice = await chooseRelease(env, origin, list, ownerAsked ? [] : state.failed ?? [], fetch, { noWait: ownerAsked, early: Boolean(state.early) });
   const stillOn = async () => {
     if (!(await autoState(env.DB)).on) throw Object.assign(new Error("Turned off while running."), { off: true });
   };
@@ -275,10 +289,10 @@ async function runOnce(env, state, ownerAsked = false) {
     if (!token) throw new Error("Cloudflare no longer allows background access. Turn automatic updates on again from the Update page.");
     const { account, script } = await whichWorker(env, token, origin);
     const common = { token, account, script, version: choice.ready.version, manifestSha256: choice.ready.manifestSha256 };
-    await progress(env, `Uploading afterwrd ${choice.ready.version}'s site files…`);
+    await progress(env, `Copying afterwrd ${choice.ready.version} to your account…`);
     const jwt = await uploadAll(() => step(env, origin, { step: "assets", ...common }));
     await stillOn();
-    await progress(env, `Uploading afterwrd ${choice.ready.version} (not live yet)…`);
+    await progress(env, `Getting afterwrd ${choice.ready.version} ready (not live yet)…`);
     const staged = await step(env, origin, { step: "stage", ...common, jwt });
     if (staged.needsHand) {
       await saveState(env.DB, { lastRun: Date.now(), waiting: { version: choice.ready.version, needsHand: true }, ...(await clearProblem(env)),
@@ -415,7 +429,7 @@ async function progress(env, line) {
  * The newest release in the signed list that's newer than this site, hasn't failed here, and has been out long
  * enough: {ready: {version, manifestSha256}}, and/or, if one is signed but still waiting, {waiting: {version, after}}.
  */
-export async function chooseRelease(env, origin, list, failed = [], fetcher = fetch, { noWait = false } = {}) {
+export async function chooseRelease(env, origin, list, failed = [], fetcher = fetch, { noWait = false, early = false } = {}) {
   if (!releaseKey(env, origin)) return { waiting: { unsigned: true } };
   if (!list) return { waiting: null };
   let waiting = null;
@@ -430,7 +444,7 @@ export async function chooseRelease(env, origin, list, failed = [], fetcher = fe
     const manifest = response?.ok && length < 2_000_000 ? new Uint8Array(await response.arrayBuffer()) : null;
     if (!manifest || manifest.length > 2_000_000 || (await sha256hex(manifest)) !== signed.manifestSha256) continue; // not what was signed
     const fixes = (() => { try { return JSON.parse(new TextDecoder().decode(manifest)).security_fix === version; } catch { return false; } })();
-    const after = signed.signedAt + waitFor(env, fixes);
+    const after = signed.signedAt + waitFor(fixes, early);
     if (noWait || now() >= after) return { ready: { version, manifestSha256: signed.manifestSha256, after }, waiting };
     waiting ??= { version, after };
   }
@@ -438,14 +452,14 @@ export async function chooseRelease(env, origin, list, failed = [], fetcher = fe
 }
 
 /**
- * How long a signed release waits before sites take it. A site's owner can shorten it for their own site with the
- * Worker secret TEST_AUTO_WAIT_SECONDS (for trying automatic updates out; a friend's check shows it as a secret
- * afterwrd doesn't use).
+ * How long a signed release waits before sites take it: none for a site whose owner chose to get updates first (for
+ * people helping to test afterwrd: setEarly), so a problem shows there before it reaches everyone else.
  */
-function waitFor(env, fixes) {
-  const test = Number(env.TEST_AUTO_WAIT_SECONDS);
-  if (Number.isFinite(test) && test >= 0 && env.TEST_AUTO_WAIT_SECONDS !== undefined && env.TEST_AUTO_WAIT_SECONDS !== "") return Math.floor(test);
-  return fixes ? SECURITY_WAIT_SECONDS : WAIT_SECONDS;
+const waitFor = (fixes, early) => (early ? 0 : fixes ? SECURITY_WAIT_SECONDS : WAIT_SECONDS);
+
+/** "Get updates first" on the Update page: on or off. */
+export async function setEarly(env, on) {
+  await saveState(env.DB, { early: on ? true : null });
 }
 
 /**

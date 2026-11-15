@@ -11,6 +11,7 @@ import { handlePhotos, headerMe } from "./photos.js";
 import { handlePosts } from "./posts.js";
 import { handleEvents } from "./events.js";
 import { handleUpdate } from "./update.js";
+import { recoveredSeen, recovering } from "./recover.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 import { devicesPage } from "./views/devices.js";
 import { setupDonePage } from "./views/pages.js";
@@ -51,11 +52,19 @@ export async function handleAdmin(request, env, url, owner) {
   }
 
   const body = await request.json().catch(() => ({}));
-  const action = /^\/_admin\/devices\/(link|cancel-links|sign-out|delete-passkey|seen)$/.exec(url.pathname)?.[1];
+  // While a recovery through Cloudflare waits for its new passkey (recover.js), a session that slipped in from before
+  // it can't make a way in of its own, or cancel the recovery's link.
+  if (/^\/_admin\/devices\/(link|cancel-links)$/.test(url.pathname) && await recovering(env.DB)) {
+    return json({ error: "Someone is getting back into your site through Cloudflare: finish that first." }, 409);
+  }
+  const action = /^\/_admin\/devices\/(link|cancel-links|sign-out|delete-passkey|seen|recovered-seen)$/.exec(url.pathname)?.[1];
   try {
     switch (action) {
       case "seen":
         await devicesSeen(env, owner);
+        return Response.redirect(`${url.origin}/`, 303);
+      case "recovered-seen": // "Done" on Home's notice after getting back in through Cloudflare (recover.js)
+        await recoveredSeen(env, owner);
         return Response.redirect(`${url.origin}/`, 303);
       case "link":
         return json({ link: await createDeviceLink(env, url, owner.id) });
@@ -96,11 +105,15 @@ export async function cancelDeviceLinks(env, owner) {
   await env.DB.prepare("DELETE FROM device_links WHERE user_id = ? AND used_at IS NULL").bind(owner.id).run();
 }
 
-/** Signs out on every device, this one included, and turns notifications off on all of them. */
+/**
+ * Signs out on every device, this one included, and turns notifications off on all of them. "Get updates first" goes
+ * off too (auto.js setEarly): a session someone else had could have turned it on.
+ */
 export async function signOutEverywhere(env, owner) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(owner.id),
     env.DB.prepare("DELETE FROM push_devices"),
+    env.DB.prepare("UPDATE settings SET value = json_remove(value, '$.early') WHERE key = 'auto_update'"),
   ]);
 }
 

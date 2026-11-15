@@ -280,6 +280,7 @@ check("…and words of its own aren't taken", (await peerCall(A, "/_peer/check-f
 
 // --- Ann stops letting them: three refusals in a row show on Sam's Home ---------------------------------------------
 await ann.goto(`${A}/_admin/update`);
+await ann.$eval("#checks-more", (d) => { d.open = true; }); // folded away
 await Promise.all([ann.waitForNavigation(), ann.click("form[action='/_admin/checks/let-off'] button")]);
 check("Ann can stop letting friends' sites check hers", (await text(ann, "#check")).includes("Let your friends' sites check yours by themselves"));
 for (let i = 0; i < 3; i++) {
@@ -320,6 +321,7 @@ check("…and not allowing one during setup says so, with a way on to the site",
 
 // --- Sam stops checking friends' sites -------------------------------------------------------------------------------
 await sam.goto(`${B}/_admin/update`);
+await sam.$eval("#checks-more", (d) => { d.open = true; }); // folded away
 await Promise.all([sam.waitForNavigation(), sam.click("form[action='/_admin/checks/checking-off'] button")]);
 again();
 const before = sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n;

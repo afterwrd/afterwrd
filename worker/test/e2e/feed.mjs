@@ -335,6 +335,7 @@ const makeLinkAsBob = () => bob.evaluate((id) => fetch("/_admin/checks/new", { m
 await bob.goto(`${B}/`);
 check("a friend's site can't make a check link for someone who didn't ask", (await makeLinkAsBob()) === 409);
 await ann.goto(`${A}/_admin/update`);
+await ann.$eval("#checks-more", (d) => { d.open = true; }); // asking by hand is folded away
 await ann.$eval("#ask-other", (d) => { d.open = true; });
 await ann.click("#ask-check");
 const askMessage = await ann.$eval("#ask-message", (t) => t.value);
@@ -360,7 +361,7 @@ await ann.goto(checkLink);
 const checkPage = await ann.$eval("main", (m) => m.textContent.replace(/\s+/g, " "));
 check("Ann opens it: Bob's site, ready to check her site and only hers", checkPage.includes("Bob Example would like to check your site")
   && checkPage.includes("Your site: localhost:8787") && (await ann.$("input[name=site]")) === null, checkPage.slice(0, 300));
-await ann.goto(`${A}/_admin/update`);
+await ann.goto(`${A}/_admin/update#checks-more`); // asking by hand is folded away; the link opens it
 await ann.click(`button[data-ask="${bobId}"]`);
 await ann.waitForFunction(() => document.getElementById("ask-result").textContent, { timeout: 10_000 });
 await bob.goto(`${B}/`);

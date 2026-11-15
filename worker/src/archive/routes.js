@@ -16,6 +16,7 @@ import * as groups from "../membership.js";
 import { ownerName } from "../peers.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
+import { recoveredHere } from "../recover.js";
 import { newPushDevices, pushKey } from "../push.js";
 import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
@@ -590,7 +591,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered] = await Promise.all([
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
     onThisDay(ctx, 2),
@@ -607,10 +608,11 @@ async function home(ctx, params) {
       ORDER BY connected_at DESC LIMIT 3`),
     // Friends introducing the owner to someone: asked (or not) from Home too.
     all(db, `${INTRODUCTIONS_SQL} LIMIT 3`, [now() - INTRODUCTION_DAYS * 86400]),
+    recoveredHere(db, ctx.user), // got back in through Cloudflare, on this device (recover.js)
   ]);
   return {
     own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or

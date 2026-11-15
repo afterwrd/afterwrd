@@ -2,7 +2,7 @@
 # afterwrd's end-to-end tests: real local copies of the site (wrangler dev) driven by Chrome, with a virtual
 # passkey authenticator. See README.md.
 #   npm run test:e2e                     everything except upgrade
-#   npm run test:e2e -- <suite>…         some: core fresh albums update feed groups checks central forged
+#   npm run test:e2e -- <suite>…         some: core fresh albums update feed groups checks recover central forged
 #   npm run test:e2e -- upgrade v0.17.0  an older release's site (0.17.0 or later), upgraded in place to this code
 set -uo pipefail
 
@@ -131,6 +131,12 @@ run_checks() { # one site, with stand-ins for Cloudflare and GitHub on 8799 (che
     --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var RELEASES_URL:http://127.0.0.1:8799/releases
   suite checks.mjs; stop
 }
+run_recover() { # getting back in without a passkey (recover.js): one site, a stand-in for Cloudflare on 8799 (recover.mjs runs it)
+  fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
+    --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var TEST_SUBDOMAIN:ann \
+    --var TEST_VERSION_ID:22222222-2222-4222-8222-222222222222
+  suite recover.mjs; stop
+}
 run_auto() { # automatic updates: one site, the daily run started by /__scheduled, stand-ins on 8799 (auto.mjs runs them)
   fresh --test-scheduled --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
     --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var RELEASES_URL:http://127.0.0.1:8799/releases \
@@ -179,10 +185,10 @@ run_upgrade() { # $1: an older release tag
   git -C "$WORKER" worktree remove --force "$OUT/old"
 }
 
-if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed groups polls mentions events checks central forged; fi
+if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed groups polls mentions events checks recover central forged; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    core|fresh|albums|update|auto|friendchecks|feed|groups|checks|central|forged|screenshots|notifications|polls|mentions|events) "run_$1" ;;
+    core|fresh|albums|update|auto|friendchecks|feed|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|events) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;
   esac

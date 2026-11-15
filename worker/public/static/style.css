@@ -739,6 +739,9 @@ table.numbers tbody tr:hover { background: var(--raised); }
   background: var(--button); color: var(--on-button); cursor: pointer; }
 
 /* Checking a friend's site (Friends page; src/checks.js) */
+/* Friends: checking a friend's site by hand, folded away (friends' sites check each other by themselves). */
+.checks-fold > summary { cursor: pointer; color: var(--muted); }
+.checks-fold > summary h2 { display: inline-block; margin-bottom: 0.4rem; }
 .checks .check-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.8rem; }
 .checks details { margin-top: 0.5rem; }
 .check-result p { margin: 0.4rem 0; }

@@ -18,6 +18,8 @@ interface AutoState {
   lastCheck?: unknown;
   refusedAt?: number | null;
   groups?: unknown;
+  /** "Get updates first": signed releases install without waiting the days out. */
+  early?: boolean;
 }
 
 /** Whether friends' sites may check this one by themselves (src/friendchecks.js). */

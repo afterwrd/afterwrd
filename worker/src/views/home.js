@@ -38,7 +38,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {} }) {
+export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null }) {
   const stream = [
     ...own.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
@@ -67,6 +67,10 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
       <a href="/_admin/update#checking">See what it found</a> <button class="link">Put it away</button></form>`)}
     ${checkGrant.problem && html`<p class="notice alert">Your friends' sites can't check yours by themselves any more:
       ${checkGrant.problem} <a href="/_admin/update#check">Let them again</a>.</p>`}
+    ${recovered && html`<form class="notice alert" id="recovered" method="post" action="/_admin/devices/recovered-seen" data-region="" data-inplace="remove">
+      You got back into your site through Cloudflare on ${fmtDate(recovered)}. Every other device was signed out and its
+      passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in
+      <a href="/_admin">Your devices</a>. <button class="link">Done</button></form>`}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">
       ${newDevices.devices.length === 1
         ? html`A new device was added to your site on ${fmtDate(newDevices.devices[0].created_at)}.`

@@ -196,6 +196,10 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li>Your first passkey is made during setup, from a link the installer gives you that holds a random 192-bit code known
     only to your site. Adding another device makes a one-time link that works for an hour; <i>Your devices</i> can cancel
     links, remove a passkey (which signs that device out) or sign out everywhere.</li>
+    <li>Lost every device? <i>Lost your device?</i> on the sign-in page lets you in again if you can sign in to the
+    Cloudflare account your site is in (which can already change your site): Cloudflare gives your site an hour's
+    read-only access, your site checks it's the account serving it, signs every device out and makes a one-time link
+    for the device you're on. Nothing is kept.</li>
     <li>A signed-in session is a random token in a cookie the browser won't share with scripts or other sites
     (<code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code>, <code>__Host-</code>), valid for 30 days.</li>
   </ul>
@@ -401,7 +405,8 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li><b>Your Cloudflare account.</b> Anyone who gets into it can read your database and change your Worker. Use a
     strong password and two-factor authentication there, and ideally an account used for nothing else.</li>
     <li><b>Your devices.</b> A passkey is as safe as the phone or computer it's on. If one is lost, remove its passkey from
-    <i>Your devices</i>, which signs it out.</li>
+    <i>Your devices</i>, which signs it out. If it was your only one, <i>Lost your device?</i> on the sign-in page gets
+    you back in through your Cloudflare account.</li>
     <li><b>Your friends.</b> Anything you share with a connected site is on that site, under its owner's control, the same
     as telling a friend something. Choose who you approve.</li>
     <li><b>Cloudflare itself.</b> Your site runs on Cloudflare's computers, under Cloudflare's terms. afterwrd doesn't

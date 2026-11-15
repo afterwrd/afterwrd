@@ -25,7 +25,8 @@
 import pkg from "../package.json";
 import { connectedToken, tokenFor } from "./cloudflare.js";
 import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, stageVersion, uploadAssets } from "./deploy.js";
-import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, startRunNow, switchCarefully, turnOff } from "./auto.js";
+import { recovering } from "./recover.js";
+import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, setEarly, startRunNow, switchCarefully, turnOff } from "./auto.js";
 import { checkNewer, PROBLEM_KEY } from "./migrate.js";
 import { releaseKey, signedList } from "./signing.js";
 import { GROUP_RELEASE, isGroupWorker } from "./groupsites.js";
@@ -74,6 +75,12 @@ export async function handleUpdate(request, env, url, owner) {
   if (path === "/auto-off") {
     await turnOff(env, url);
     return Response.redirect(`${url.origin}/_admin/update#auto`, 303);
+  }
+  if (path === "/early-on" || path === "/early-off") { // "Get updates first", for people helping to test afterwrd
+    // Not turned on while a recovery through Cloudflare waits (recover.js), which turned it off.
+    if (path === "/early-on" && await recovering(env.DB)) return new Response("Finish getting back into your site first.", { status: 409 });
+    await setEarly(env, path === "/early-on");
+    return Response.redirect(`${url.origin}/_admin/update#early`, 303);
   }
   const body = await request.json().catch(() => ({}));
   if (path === "/group-assets" || path === "/group-deploy") return updateGroup(request, env, path, body);
@@ -199,7 +206,7 @@ async function autoData(env, url, latest) {
   const list = await signedList(env, url.origin);
   if (!list || list.seq < (state.listSeq ?? 0)) return { ...data, next: { version: latest.version, unsigned: true } };
   // The newest signed release (what "Install it now" installs), and when it'd install itself.
-  const pick = (await chooseRelease(env, url.origin, list, [], fetch, { noWait: true })).ready;
+  const pick = (await chooseRelease(env, url.origin, list, [], fetch, { noWait: true, early: Boolean(state.early) })).ready;
   if (!pick) return { ...data, next: { version: latest.version, unsigned: true } };
   data.next = { version: pick.version, after: pick.after, failed: (state.failed ?? []).includes(pick.version),
     // GitHub's newest isn't signed (yet), but an older one, still newer than this site, is.

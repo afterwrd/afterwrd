@@ -222,7 +222,7 @@ async function install(code, { person = "Ann Example", domains = [], account = n
 // (as a name would be typed: capitals, spaces, an accent).
 const fresh = await install("fresh", { person: "Ann Example", domains: ["Ann Exämple 2 "] });
 check("the page says what's needed, phone included, and asks no names before connecting", fresh.before.includes("works on a phone")
-  && fresh.before.includes("Make a free Cloudflare account") && fresh.before.includes("confirm your address") && !fresh.before.includes("site's name"));
+  && fresh.before.includes("Make a free Cloudflare account") && fresh.before.includes("Confirm your email") && !fresh.before.includes("site's name"));
 check("Connect goes straight to Cloudflare, asking for what installing needs, coming back here", fresh.allow.pathname === "/oauth2/auth"
   && fresh.allow.searchParams.get("redirect_uri") === `${BASE}/done` && fresh.allow.searchParams.get("scope") === "workers-scripts.admin d1.write account-settings.read");
 const swap = exchanges.at(-1);

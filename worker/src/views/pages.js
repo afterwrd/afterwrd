@@ -125,7 +125,8 @@ export function loginPage(next) {
 <h1>Sign in</h1>
 <p>This is a private afterwrd site. Sign in with your passkey.</p>
 <button id="go">Sign in with a passkey</button>
-<p id="error" role="alert"></p>`, `
+<p id="error" role="alert"></p>
+<p class="small"><a href="/_auth/recover">Lost your device?</a></p>`, `
   // Words kept on this device while they were being written (ui.js) go once it's signed out, however that happened:
   // Sign out here, from another device, or the session running out. This may be a shared phone or computer.
   try { Object.keys(localStorage).filter((k) => k.startsWith("afterwrd-draft:")).forEach((k) => localStorage.removeItem(k)); } catch {}
@@ -137,6 +138,23 @@ export function loginPage(next) {
     await post("/_auth/login/verify", { response: credentialJSON(credential) });
     location.replace(next);
   });`);
+}
+
+// Lost every device you sign in with (recover.js): back in through the Cloudflare account the site is in.
+export function recoverPage() {
+  return page("Lost your device?", `
+<h1>Lost your device?</h1>
+<p>If you can't sign in on any of your phones or computers, you can add this one instead, as long as you can still sign
+in to the Cloudflare account your site is in.</p>
+<p>Cloudflare will ask you to let afterwrd change your Workers for an hour, as it does for an update. Your site uses
+that once, to prove the account can change it (by making the version that's running live again, which changes
+nothing), and keeps nothing.</p>
+<p>Then every device signed in to your site is signed out, in case someone else has the one you lost, and you make a
+passkey on this one. That replaces the passkeys on all your other devices: add any you find again from Your devices.</p>
+<a class="button" href="/_auth/recover/start">Connect Cloudflare</a>
+<p class="small">Can't sign in to Cloudflare either? Get back into Cloudflare first, from its own sign-in page (Forgot
+password, or the backup codes it gave you when you turned on two-step sign-in), then come back here.</p>
+<p class="small"><a href="/_auth/login">Back to sign in</a></p>`);
 }
 
 // A link to add one of the owner's devices (from Your devices, or setting up a new site).
@@ -172,10 +190,9 @@ export function setupPage() {
 <h1>Your site is ready</h1>
 <p id="given" hidden>It's yours, <b id="given-name"></b> (<a href="#" id="change">change your name</a>).</p>
 <p id="name-box"><input id="name" placeholder="Your name" autocomplete="name" maxlength="100"></p>
-<p>Next, make yourself its owner with a passkey on this device: your face, fingerprint or device PIN, and no
-password. Then you can post, add photos and invite friends.</p>
-<p id="hour-over" class="small" hidden>The one-hour permission you gave the installer runs out by itself, and it kept
-nothing.</p>
+<p>Now make a passkey on this device to sign in with: your face, fingerprint or device PIN. There's no password.
+Then you can post, add photos and invite friends.</p>
+<p id="hour-over" class="small" hidden>The installer's one-hour access ends by itself. It kept nothing.</p>
 <button id="go">Continue</button>
 <p id="error" role="alert"></p>`, `
   const code = new URLSearchParams(location.search).get("code");

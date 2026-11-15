@@ -127,6 +127,9 @@ photos and videos. To check a release for yourself, see [Check it yourself](SECU
   follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
   wasn't you, remove it in *Your devices*.
+- **Lost every device you sign in with?** *Lost your device?* on the sign-in page gets you back in, as long as you
+  can still sign in to the Cloudflare account your site is in: Cloudflare is asked for an hour's read-only access, your
+  site checks it's in that account, signs every device out, and lets you make a passkey on the one you're using.
 - **Use a Cloudflare account just for afterwrd** if you use Cloudflare for anything else (see step 1).
 
 ## Running and developing the Worker

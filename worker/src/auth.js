@@ -8,6 +8,7 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import { createDeviceLink, DEVICE_LINK_SECONDS } from "./admin.js";
+import { handleRecover, recovering, recoveryDone } from "./recover.js";
 import { deviceLinkPage, loginPage, messagePage, setupPage, signOutPage } from "./views/pages.js";
 import { fromBase64Url, html, json, now, randomToken, sha256, toBase64Url } from "./util.js";
 
@@ -42,6 +43,12 @@ export async function handleAuth(request, env, url) {
     if (route === "GET /_auth/logout") return html(signOutPage());
     if (route === "POST /_auth/logout") return await logout(request, env);
     if (route === "GET /_auth/setup" || route === "POST /_auth/setup") return await setup(request, env, url, body);
+    // Lost every passkey: back in through the site's Cloudflare account (recover.js).
+    if (url.pathname === "/_auth/recover" || url.pathname.startsWith("/_auth/recover/")) {
+      const signedIn = request.method === "GET" && url.pathname === "/_auth/recover" && Boolean(await currentUser(request, env));
+      const answer = await handleRecover(request, env, url, body, signedIn);
+      if (answer) return answer;
+    }
     if (request.method === "GET" && url.pathname.startsWith("/_auth/device/")) {
       const link = await findDeviceLink(env, url.pathname.slice("/_auth/device/".length));
       return link
@@ -132,6 +139,8 @@ async function registerVerify(request, env, url, { token, response }) {
   if (!spent.meta.changes) return json({ error: "This link has already been used." }, 400);
 
   const { credential } = registrationInfo;
+  // The link a recovery through Cloudflare made (recover.js): this passkey replaces all the others.
+  const recovery = (await recovering(env.DB))?.link === link.token_hash;
   const [, , count] = await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO credentials (id, user_id, public_key, counter, transports, created_at, last_used_at)
@@ -142,6 +151,7 @@ async function registerVerify(request, env, url, { token, response }) {
     env.DB.prepare(`DELETE FROM device_links WHERE user_id = ?1 AND used_at IS NULL
       AND (SELECT COUNT(*) FROM credentials WHERE user_id = ?1) = 1`).bind(link.user_id),
     env.DB.prepare("SELECT COUNT(*) AS n FROM credentials WHERE user_id = ?").bind(link.user_id),
+    ...(recovery ? recoveryDone(env.DB, link.user_id, credential.id) : []),
   ]);
   // The first passkey is the end of a new site's setup: the page goes on to its permissions (setupPermissionsPage).
   const first = /** @type {{ n: number } | undefined} */ (count.results?.[0])?.n === 1;
@@ -162,6 +172,12 @@ async function loginVerify(request, env, url, { response }) {
     "SELECT * FROM credentials WHERE id = ?",
   ).bind(String(response?.id)).first();
   if (!stored) return json({ error: "That passkey isn't recognised here." }, 400);
+  // While a recovery through Cloudflare waits for its new passkey (recover.js), the older ones can't sign in, so
+  // whoever has a lost device can't get back in and cancel it. (Once it's made, they're removed.)
+  const pending = await recovering(env.DB);
+  if (pending && stored.created_at <= pending.at) {
+    return json({ error: "Someone is getting back into your site through Cloudflare, so the passkeys from before can't sign in for the next hour." }, 403);
+  }
 
   const { verified, authenticationInfo } = await verifyAuthenticationResponse({
     response,
@@ -268,11 +284,18 @@ async function findDeviceLink(env, token) {
 
 async function startSession(env, userId, response, credentialId) {
   const token = randomToken();
-  await env.DB.batch([
+  // Not for a passkey from before a recovery through Cloudflare that's still waiting (recover.js), even if the sign-in
+  // began before it did: loginVerify's own check could be a moment too early.
+  const [, made] = await env.DB.batch([
     env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now()),
-    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, expires_at, credential_id) VALUES (?, ?, ?, ?)")
-      .bind(await sha256(token), userId, now() + SESSION_SECONDS, credentialId),
+    env.DB.prepare(`INSERT INTO sessions (token_hash, user_id, expires_at, credential_id) SELECT ?1, ?2, ?3, ?4
+      WHERE NOT EXISTS (SELECT 1 FROM settings s JOIN credentials c ON c.id = ?4 WHERE s.key = 'recovering'
+        AND json_extract(s.value, '$.until') > ?5 AND c.created_at <= json_extract(s.value, '$.at'))`)
+      .bind(await sha256(token), userId, now() + SESSION_SECONDS, credentialId, now()),
   ]);
+  if (!made.meta.changes) {
+    return json({ error: "Someone is getting back into your site through Cloudflare, so the passkeys from before can't sign in for the next hour." }, 403);
+  }
   response.headers.append("Set-Cookie",
     `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${SESSION_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   return response;

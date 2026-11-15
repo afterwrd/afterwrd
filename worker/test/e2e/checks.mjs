@@ -348,7 +348,17 @@ check("…and only of this site", (await tell({ type: "Checked", site: "http://l
   && (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
 check("a friend's site saying it checked this one is kept", (await tell({ type: "Checked", site: BASE, version: "9.9.9" })).status === 200);
 const lastLine = await textOf("/_admin/update", "#last-checked");
+check("asking a friend by hand is folded away on Update", await owner.$eval("#checks-more", (d) => !d.open)
+  && await owner.$eval("#ask-other", (d) => Boolean(d.closest("#checks-more"))));
+await owner.goto(`${BASE}/_admin/update#checking`);
+check("…and a link to something in the fold opens it", await owner.$eval("#checks-more", (d) => d.open));
+await owner.goto(`${BASE}/friend`);
+check("on Friends, checking a friend's site by hand is folded away too", await owner.$eval("#checks", (d) => d.tagName === "DETAILS" && !d.open));
+await owner.goto(`${BASE}/friend#checks`);
+check("…opened when linked to", await owner.$eval("#checks", (d) => d.open));
+await owner.goto(`${BASE}/_admin/update`);
 check("…and Update says who checked it last, and when", /^Last checked by Bob Example's site on \d{1,2} \w{3} \d{4} \(afterwrd 9\.9\.9\)\.$/.test(lastLine), lastLine);
+await owner.$eval("#checks-more", (d) => { d.open = true; }); // folded away: checks happen by themselves
 await Promise.all([owner.waitForNavigation(), owner.click("#check form button.link")]);
 const mine = await owner.$eval("#last-checked", (p) => p.textContent);
 check("the owner can say they checked it themselves, from Update", owner.url().endsWith("/_admin/update#check")

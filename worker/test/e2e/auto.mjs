@@ -325,6 +325,17 @@ s = await dailyRun();
 check("a release signed two days ago waits", cf.versions.length === 0 && s.waiting?.version === "99.0.5", JSON.stringify(s.waiting));
 await owner.goto(`${BASE}/_admin/update`);
 check("…and the Update page says when it'll install itself", /99\.0\.5 will install itself after/.test(await text("#auto")));
+// "Get updates first" (for people helping to test afterwrd): no waiting, chosen on the Update page, where it's folded away.
+check("\"Get updates first\" is folded away", await owner.$eval("#early", (d) => !d.open));
+await owner.$eval("#early", (d) => { d.open = true; });
+await Promise.all([owner.waitForNavigation(), owner.click("form[action='/_admin/update/early-on'] button")]);
+check("…and turning it on is kept, and shown", state().early === true && (await text("#early")).includes("You're getting updates first")
+  && (await text("#auto")).includes("as soon as they're signed"));
+s = await dailyRun();
+check("…then the release signed two days ago installs at once", s.last?.version === "99.0.5" && s.last?.result === "done", JSON.stringify(s.last));
+await owner.goto(`${BASE}/_admin/update`);
+await Promise.all([owner.waitForNavigation(), owner.click("form[action='/_admin/update/early-off'] button")]);
+check("…and it can be turned off again", state().early === undefined && (await text("#auto")).includes("out for three days"));
 drop("99.0.5");
 release("99.0.6", { signedAgo: 2 * 86400, securityFix: true });
 s = await dailyRun();

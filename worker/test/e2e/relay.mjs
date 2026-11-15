@@ -97,6 +97,19 @@ check("…as is one that names an earlier app", (await askedThrough({ client: "o
 check("a site from before 0.51.0, which doesn't say, is asked through the first app, as it was", (await askedThrough({})) === "old-client");
 check("an app the page doesn't know is never asked through", (await askedThrough({ client: "evil-client" })) === "old-client");
 
+// --- getting back in without a passkey (recover.js) -------------------------------------------------------------------
+cloudflare = null;
+await page.goto(out(`${SITE}/_auth/recover/done`));
+check("getting back in asks first, with the site's address, and that no one else ever needs it", await shown("#ask-recover")
+  && (await words("#recover-host")) === new URL(SITE).host && (await words("#ask-recover")).includes("nobody else, friends included, ever needs it"));
+await Promise.all([toCloudflare(), page.click("#continue-recover")]);
+check("…and asks Cloudflare for an hour's access to change Workers (nothing lasting), never the read-only access a check gets",
+  cloudflare?.searchParams.get("scope") === "workers-scripts.edit");
+await backHome();
+check("…and Cloudflare's answer goes back to the site's recovery page", backAt?.href.startsWith(`${SITE}/_auth/recover/done#`));
+await page.goto(out(`${SITE}/_auth/recover/finish`));
+check("another path under it is refused", !(await shown("#ask-recover")) && (await words("#error")).length > 0);
+
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();
 const failed = results.filter((ok) => !ok).length;

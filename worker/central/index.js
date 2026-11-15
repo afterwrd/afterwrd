@@ -310,6 +310,8 @@ function page(connected, go, error) {
   #error:empty { display: none; }
   .ready { border-top: 1px solid var(--border); margin-top: 18px; padding-top: 8px; }
   .foot { margin-top: 22px; }
+  details.more { margin-top: 10px; }
+  details.more summary { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -321,14 +323,18 @@ function page(connected, go, error) {
 <section id="start"${connected && go ? " hidden" : ""}>
   <p>Your own afterwrd site, in your own free Cloudflare account. It takes a few minutes, and works on a phone.</p>
   <h2>1. A Cloudflare account</h2>
-  <p class="meta">Make one first, and stay signed in in this browser. An email address is all it asks for; don't add a card.
-  Cloudflare emails you a link to confirm your address: open it, then come back to this page. If you already use
-  Cloudflare for other things, make a new account just for afterwrd.</p>
+  <p class="meta">Make one first, and stay signed in on this browser. It only needs an email address (no card).
+  Confirm your email when Cloudflare's message comes, then come back here. If you use Cloudflare for other things,
+  make a separate account for afterwrd.</p>
   <a class="button secondary" href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Make a free Cloudflare account</a>
-  <h2>2. Connect Cloudflare</h2>
-  <p class="meta">Cloudflare asks you to allow afterwrd to make and change Workers and databases in your account, for an
-  hour, so it can install your site. Nothing is kept afterwards.</p>
+  <h2>2. Install</h2>
+  <p class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd to set up your site. That access ends after an hour,
+  and nothing is kept.</p>
   <a class="button" id="connect" href="/connect">Connect Cloudflare and install</a>
+  <details class="meta more"><summary>What does it allow?</summary>
+  <p>For that hour, afterwrd can make and change Workers (the small programs websites run on) and databases in your
+  Cloudflare account. It uses that only to put your site there.
+  <a href="https://afterwrd.app/how-it-works/#install">More about installing</a>.</p></details>
 </section>
 
 <section id="choose" hidden>
@@ -343,7 +349,7 @@ function page(connected, go, error) {
   <p class="field"><input type="text" id="person" placeholder="e.g. Sam Taylor" autocomplete="name" autocapitalize="words" maxlength="100" aria-label="Your name"></p>
   <div id="new-address" hidden>
     <p class="meta">Your site will be at <b class="address-preview">afterwrd.<span id="preview">your-name</span>.workers.dev</b>.
-    It's how friends' sites find you, so it can't be changed later.</p>
+    Friends find you by it, so it can't be changed later.</p>
     <div id="address-box" hidden>
       <p class="meta">Choose the middle part: lowercase letters, numbers and hyphens.</p>
       <p class="field"><input type="text" id="domain" placeholder="your-name" autocomplete="off" spellcheck="false" autocapitalize="none" aria-label="Your address"></p>
@@ -367,7 +373,7 @@ function page(connected, go, error) {
 
 <section id="ready" class="ready" hidden>
   <h2>Your site is ready</h2>
-  <p>It's at <b id="address"></b>. Taking you there to make yourself its owner, with a passkey (your face, fingerprint or phone PIN).</p>
+  <p>It's at <b id="address"></b>. Next, on your site, you make a passkey to sign in with (your face, fingerprint or phone PIN).</p>
   <a class="button" id="continue" href="/">Set up my site</a>
 </section>
 
@@ -487,7 +493,7 @@ function page(connected, go, error) {
       $("naming").hidden = true;
       const ownerName = $("person").value.trim().slice(0, 100);
       $("error").textContent = "";
-      log("Checking your account and the release…");
+      log("Getting afterwrd ready…");
       let checked = await step("check", { account: account.id, name });
       while (checked.taken) {
         $("taken").textContent = checked.taken;
@@ -504,13 +510,13 @@ function page(connected, go, error) {
       }
       $("renaming").hidden = true;
       const { version, site } = checked;
-      log("Uploading afterwrd " + version + "'s site files…");
+      log("Copying afterwrd " + version + " to your account…");
       let jwt = null;
       for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await step("assets", { account: account.id, name, version }));
       if (!jwt) throw new Error("Couldn't finish uploading afterwrd's site files. Try again in a minute.");
-      log("Creating the database and installing afterwrd…");
+      log("Setting up your site…");
       const { next } = await step("deploy", { account: account.id, name, version, jwt });
-      log("Waiting for your site to start at " + new URL(site).host + "…");
+      log("Starting your site at " + new URL(site).host + "…");
       for (let i = 0; i < 90; i++) {
         if ((await step("ready", { account: account.id, name }).catch(() => ({}))).ready) break;
         await new Promise((r) => setTimeout(r, 2000));

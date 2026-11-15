@@ -189,7 +189,8 @@ ${friends.length ? html`<ul class="friend-list">
   <a class="chip primary" href="/_admin/connections">${raw(icon("connections"))}<span>Add a friend</span></a>
 </div>`}
 
-<h2 id="checks">Checking a friend's site</h2>
+<details class="checks-fold" id="checks">
+<summary><h2>Checking a friend's site</h2></summary>
 <p class="meta">When a friend on afterwrd asks you to check their site, their request shows on <a href="/">Home</a>, with a
 button that makes the link to send back to them. If someone asks by message instead, paste it, or just their site's
 address, here. They open the link and allow read-only access in Cloudflare, and your site checks theirs is exactly the
@@ -243,7 +244,12 @@ ${checks.length > 0 && html`<ul class="friend-list checks">
     setTimeout(() => { e.target.textContent = "Copy message"; }, 1500);
   });
   document.getElementById("check-done").addEventListener("click", () => location.reload());
+  // Folded away, as friends' sites check each other by themselves: opened when linked to (Forget comes back here).
+  const openChecks = () => { if (location.hash === "#checks") document.getElementById("checks").open = true; };
+  openChecks();
+  addEventListener("hashchange", openChecks);
 </script>
+</details>
 
 ${facebook.length > 0 && html`
 <h2>From your Facebook download</h2>

@@ -13,7 +13,7 @@ function connectPart(connected, back, what, background = false) {
   if (background) return `<p class="meta connected">This uses automatic updates' access, so there's no need to connect.</p>`;
   return `
 <p><a class="button" id="connect" href="${escape(connectLink(back))}">Connect Cloudflare</a>
-  <span class="meta">Cloudflare asks you to allow afterwrd ${what}, for an hour. Nothing is kept afterwards.</span></p>
+  <span class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd ${what}, for one hour. Nothing is kept.</span></p>
 <details class="other"><summary>If connecting doesn't work, use an API token</summary>
   <ol class="how">
     <li><a href="${TOKEN_URL}" target="_blank" rel="noopener">Create a token</a> in Cloudflare.
@@ -28,15 +28,15 @@ const day = (seconds) => new Date(seconds * 1000).toLocaleDateString("en-GB", { 
 
 /** Automatic updates (auto.js): on or off, what's next, what last happened, and anything that needs the owner. */
 function autoPart(auto) {
-  const last = auto.last?.result === "kept" ? `<p class="notice alert">afterwrd ${escape(auto.last.version)} failed its checks on
-    ${escape(day(auto.last.at))}, but it had already updated your site's database, which the older version can't use, so it
-    was kept. If anything isn't working, please tell whoever looks after afterwrd.</p>`
+  const last = auto.last?.result === "kept" ? `<p class="notice alert">afterwrd ${escape(auto.last.version)} didn't pass its
+    checks on ${escape(day(auto.last.at))}, but it had already updated your site's database, so it stayed. If anything isn't
+    working, please tell whoever looks after afterwrd.</p>`
     : auto.last && auto.last.result !== "done" ? `<p class="notice alert">afterwrd ${escape(auto.last.version)} didn't
-    ${auto.last.result === "unhealthy" ? "work" : "start"} on this site on ${escape(day(auto.last.at))}, so it was put back as it was.
-    It won't be tried again by itself; a later release will be.</p>`
+    ${auto.last.result === "unhealthy" ? "work" : "start"} on your site on ${escape(day(auto.last.at))}, so your site went back to
+    how it was. It'll wait for the next release.</p>`
     : auto.last ? `<p class="meta">Last updated itself to ${escape(auto.last.version)} on ${escape(day(auto.last.at))}.</p>` : "";
-  const waiting = auto.waiting?.needsHand ? `<p class="notice alert">afterwrd ${escape(auto.waiting.version)} adds a new kind of
-    store, which Cloudflare only lets you install by hand. Update to it above.</p>`
+  const waiting = auto.waiting?.needsHand ? `<p class="notice alert">afterwrd ${escape(auto.waiting.version)} has to be installed
+    by hand this time (it adds a new kind of storage, which Cloudflare won't let it add by itself). Use the button above.</p>`
     : auto.waiting?.version && auto.waiting.after ? `<p>afterwrd ${escape(auto.waiting.version)} will install itself after
     ${escape(day(auto.waiting.after))}.</p>` : "";
   const problem = auto.problem ? `<p class="notice alert">The last automatic update couldn't run: ${escape(auto.problem)}</p>` : "";
@@ -54,21 +54,31 @@ function autoPart(auto) {
   ${auto.since ? `<p class="meta" id="auto-since">On since ${escape(day(auto.since))}.${auto.refusedAt
     ? ` Cloudflare stopped allowing their access on ${escape(day(auto.refusedAt))}, so they were off until then.` : ""}</p>` : ""}
   ${running}${lastCheck}${waiting}${last}${problem}${groupsDone}
-  <p class="meta">Once a day this site looks for a new afterwrd release. It installs one only when it's signed by
-  afterwrd's own key and has been out for three days (one, for a security fix), and puts itself back as it was if the
-  new version doesn't work. Your groups follow straight after.${auto.signed ? "" : " (No release is signed yet, so it's waiting for the first.)"}</p>
+  <p class="meta">Your site installs new afterwrd releases by itself${auto.early ? ", as soon as they're signed"
+    : ", once they've been out for three days (one, for a security fix)"}. If one doesn't work, your site goes back to how it
+    was. Your groups update with it.${auto.signed ? "" : " (No release is signed yet, so it's waiting for the first.)"}
+    <a href="https://afterwrd.app/how-it-works/#install" target="_blank" rel="noopener">How it stays safe</a></p>
   <form method="post" action="/_admin/update/auto-off"><button class="link">Turn automatic updates off</button>
-    <span class="meta">Then, to be sure, remove afterwrd in Cloudflare too: My Profile → Access Management → Connected Applications.</span></form>
+    <span class="meta">(then also remove afterwrd in Cloudflare: My Profile → Access Management → Connected Applications)</span></form>
+  <details class="other" id="early"${auto.early ? " open" : ""}><summary>${auto.early ? "You're getting updates first" : "Get updates first"}</summary>
+    <p class="meta">For people helping to test afterwrd: your site installs each release as soon as it's signed, instead
+    of waiting a few days. If a release has a problem, your site has it before anyone else's (and puts itself back as it
+    was, if it can).</p>
+    <form method="post" action="/_admin/update/early-${auto.early ? "off" : "on"}"><button class="link">${auto.early
+      ? "Wait the usual few days again" : "Get updates first"}</button></form>
+  </details>
 </section>`;
   }
   return `
 <section class="card" id="auto">
   <h2>Keep afterwrd up to date by itself</h2>
-  ${problem}${auto.refusedAt ? `<p class="notice alert" id="auto-refused">They turned themselves off on ${escape(day(auto.refusedAt))}:
-    Cloudflare stopped allowing their access (removed under Connected Applications, perhaps).</p>` : ""}
-  <p>Your site can install each new afterwrd release by itself, so you never have to come here. Cloudflare will ask you to
-  allow <b>Background Access</b> to change your Workers, and nothing else: it can't touch your databases or your account's
-  settings.</p>
+  ${problem}${auto.refusedAt ? `<p class="notice alert" id="auto-refused">They turned themselves off on ${escape(day(auto.refusedAt))},
+    because Cloudflare stopped allowing them (perhaps they were removed in Cloudflare). Turn them on again below.</p>` : ""}
+  <p>Your site can install new afterwrd releases by itself, so fixes reach you without coming here. Cloudflare will ask
+  you to <b>Allow</b> it: leave <b>Background Access</b> ticked. It stays on until you turn it off here.</p>
+  <details class="other"><summary>What exactly does it allow?</summary>
+    <p class="meta">Lasting access to change your Workers, and nothing else: it can't touch your databases or your
+    account's settings. <a href="https://afterwrd.app/how-it-works/#install" target="_blank" rel="noopener">More about updates</a></p></details>
   <p><a class="button" href="/_cloudflare/auto-start">Turn on automatic updates</a></p>
 </section>`;
 }
@@ -90,28 +100,37 @@ function autoNext(auto, running) {
 <p class="error" role="alert"></p>`;
 }
 
-/** Friends' sites checking this one by themselves (friendchecks.js): allowing it, or that it's allowed. */
+/**
+ * Friends' sites checking this one by themselves (friendchecks.js): that they do, or the offer to let them, and what a
+ * check found. Everything else, done by hand or rarely, is folded away below it (see updatePage).
+ */
 function checksPart(grant, failure) {
   const found = failure ? `<div class="notice alert" id="check-failure"><p><b>${escape(failure.name)}'s site checked yours</b> on
     ${escape(day(failure.checked_at))}${failure.version ? ` (afterwrd ${escape(failure.version)})` : ""} and found something that needs a look:</p>
     <ul>${failure.problems.map((p) => `<li>${escape(p)}</li>`).join("")}</ul>
-    <p class="meta">If you didn't change anything in Cloudflare yourself, ask ${escape(failure.name)}, and see
+    <p class="meta">If you didn't change anything in Cloudflare yourself, ask ${escape(failure.name)} about it, and see
     <a href="https://afterwrd.app/check/#wrong">what to do</a>.</p></div>` : "";
-  if (grant.on) {
-    return `${found}<p id="checks-on">Your friends' sites check yours by themselves now and then, and after updates.
-  <span class="meta">Each check is read-only: your site hands a friend's site a pass to read its code for an hour.</span></p>
-  <form method="post" action="/_admin/checks/let-off" class="meta"><button class="link">Stop letting them</button>, and then,
-    to be sure, remove afterwrd in Cloudflare too: My Profile → Access Management → Connected Applications.</form>`;
-  }
+  if (grant.on) return `${found}<p id="checks-on">Your friends' sites check yours by themselves now and then, and tell you if anything's wrong.</p>`;
   return `${found}<div id="checks-off">${grant.problem ? `<p class="notice alert">Friends' sites can't check yours by themselves any more: ${escape(grant.problem)}</p>` : ""}
-  <p><b>Let your friends' sites check yours by themselves.</b> Now and then, and after each update, a friend's afterwrd site
-  checks that yours is exactly the published afterwrd, with nobody having to do anything. Cloudflare will ask you to allow
-  <b>Background Access</b> to read the code of every Worker in your Cloudflare account, and nothing else, which your site
-  hands a friend's site an hour at a time.</p>
+  <p><b>Let your friends' sites check yours by themselves.</b> Now and then, a friend's afterwrd site checks yours is the
+  genuine afterwrd, and tells you if anything's wrong. It can only look, never change anything. Cloudflare will ask you
+  to <b>Allow</b> it: leave <b>Background Access</b> ticked.</p>
+  <details class="other"><summary>What exactly does it allow?</summary>
+    <p class="meta">Lasting access to read the code of every Worker in your Cloudflare account, and nothing else. Your
+    site gives a friend's site that asks a one-hour, read-only pass from it.
+    <a href="https://afterwrd.app/how-it-works/#checks" target="_blank" rel="noopener">More about checks</a></p></details>
   <p><a class="button" href="/_cloudflare/checks-start">Let friends check it</a></p></div>`;
 }
 
-/** This site's checks of its friends' sites (friendchecks.js). */
+/** Stopping friends' sites checking this one, once they do (folded away). */
+function letOffPart(grant) {
+  return grant.on ? `<p class="meta" id="let-off">Each check is read-only: your site hands a friend's site a pass to read its code
+  for an hour.</p>
+  <form method="post" action="/_admin/checks/let-off" class="meta"><button class="link">Stop letting them</button>, and then,
+    to be sure, remove afterwrd in Cloudflare too: My Profile → Access Management → Connected Applications.</form>` : "";
+}
+
+/** This site's checks of its friends' sites (friendchecks.js), folded away. */
 function checkingPart(auto, checking, results) {
   const verdictWords = { "all good": "all good", "needs a look": "found something that needs a look", "couldn't check": "couldn't check it" };
   const list = results.length ? `<ul class="friend-checks">${results.map((r) => `<li id="friend-check-${r.id}">
@@ -126,10 +145,10 @@ function checkingPart(auto, checking, results) {
       <form method="post" action="/_admin/checks/checking-off" class="meta"><button class="link">Stop checking friends' sites</button></form>`
     : `<p class="meta">Your site doesn't check your friends' sites by itself.</p>
       <form method="post" action="/_admin/checks/checking-on" class="meta"><button class="link">Check them again</button></form>`;
-  return `<section class="card" id="checking">
-  <h2>Checking your friends' sites</h2>
+  return `<div id="checking">
+  <h3>Checking your friends' sites</h3>
   ${list}${how}
-</section>`;
+</div>`;
 }
 
 /** @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data */
@@ -146,7 +165,7 @@ export function updatePage({ owner, version: VERSION, latest, available, securit
   ${auto.on ? `<p class="meta">Automatic updates bring them up to date at the next daily look.</p>
   <p><button class="go" data-install-now${auto.running ? " disabled" : ""}>Update ${groups.length === 1 ? "it" : "them"} now</button></p>
   <ol class="log"></ol>
-  <p class="error" role="alert"></p>` : `${connectPart(connected, "/_admin/update?go=groups", "to change the groups' Workers")}
+  <p class="error" role="alert"></p>` : `${connectPart(connected, "/_admin/update?go=groups", "to update your groups")}
   <p><button id="groups-go" data-groups="${escape(JSON.stringify(groups.map((g) => ({ id: g.id, name: g.name }))))}">Update ${groups.length === 1 ? "the group" : "the groups"}</button></p>
   <ol id="group-log"></ol>
   <p id="group-error" role="alert"></p>`}
@@ -162,7 +181,7 @@ export function updatePage({ owner, version: VERSION, latest, available, securit
   const notes = latest.notes ? `<section class="card notes"><h2>What's new</h2><p>${escape(latest.notes)}</p></section>` : "";
   let body;
   if (latest.error) {
-    body = `<p>Couldn't check for a newer version: ${escape(latest.error)}</p>`;
+    body = `<p>Couldn't look for a newer version just now (${escape(latest.error)}). It'll try again later.</p>`;
   } else if (!available) {
     body = `<p>You have the latest version.</p>`;
   } else {
@@ -170,15 +189,15 @@ export function updatePage({ owner, version: VERSION, latest, available, securit
 <p><b>afterwrd ${escape(latest.version)} is available.</b> <a href="${escape(latest.page)}" target="_blank" rel="noopener">On GitHub</a></p>
 ${securityFix ? `<p class="security"><b>It fixes a security problem</b> (in ${escape(securityFix)}), so it's worth updating soon.</p>` : ""}
 ${notes}
-<p class="meta">Updating keeps everyone's access, your archive and your photos.</p>
-${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to change this site's Worker", auto.on)}
+<p class="meta">Updating keeps everything: your posts, photos, friends and devices.</p>
+${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your site", auto.on)}
 <p><button id="go" data-tag="${escape(latest.tag)}" data-version="${escape(latest.version)}">Update to ${escape(latest.version)}</button>
-  <span class="meta">Keep this page open until it says it's done: it checks the new version works, and puts the old one back if not.</span></p>
+  <span class="meta">Keep this page open until it says it's done. If the new version doesn't work, your site goes back to how it was.</span></p>
 <ol id="log"></ol>
 <p id="error" role="alert"></p>
 <section id="done" class="card" hidden>
   <p><b>Updated to ${escape(latest.version)}.</b></p>
-  <p class="meta">If a friend has afterwrd, it's worth <a href="#check">asking them to check your site</a> now.</p>
+  ${checkGrant.on ? "" : `<p class="meta">If a friend has afterwrd, it's worth <a href="#checks-more">asking them to check your site</a> now.</p>`}
   <p><a class="button" href="/_admin/update">Done</a></p>
 </section>` : autoNext(auto, auto.running)}`;
   }
@@ -203,6 +222,7 @@ ${FAVICON}
   .security { padding: 0.6rem 0.9rem; border-left: 3px solid var(--danger); border-radius: 10px; background: var(--tint-4); }
   #done[hidden], #done [hidden] { display: none; }
   .notes h2, #check h2, #auto h2 { margin: 0 0 0.4rem; font-size: 1rem; }
+  #checks-more h3 { margin: 1.2rem 0 0.4rem; font-size: 0.95rem; }
   #ask-message { width: 100%; font: inherit; padding: 0.6rem; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); }
   .notes p { margin: 0; white-space: pre-wrap; }
   .other { margin: 1rem 0; }
@@ -214,10 +234,10 @@ ${FAVICON}
 ${ownerHeader("update", me)}
 <main>
 <h1>Update afterwrd</h1>
-<p class="meta">Signed in as ${escape(owner)}. This site is afterwrd ${escape(VERSION)}.</p>
+<p class="meta">Your site is on afterwrd ${escape(VERSION)}.</p>
 ${problem ? `<p class="notice alert" id="update-problem">afterwrd ${escape(problem.version)} couldn't update your site's database on
-  ${escape(day(problem.at))}, so your site stayed on ${escape(VERSION)}, as it was. Please send this to whoever looks after
-  afterwrd: <code>${escape(problem.migration)}: ${escape(problem.error)}</code></p>` : ""}
+  ${escape(day(problem.at))}. Nothing was lost: your site stayed on ${escape(VERSION)}, as it was. Please send this to whoever
+  looks after afterwrd: <code>${escape(problem.migration)}: ${escape(problem.error)}</code></p>` : ""}
 ${body}
 ${autoPart(auto)}
 ${history.length ? `<section class="card" id="history">
@@ -225,12 +245,17 @@ ${history.length ? `<section class="card" id="history">
   <ul>${history.map((h) => `<li>${escape(day(h.at))}: afterwrd ${escape(h.version)}${h.from_version ? `, from ${escape(h.from_version)}` : ""}</li>`).join("")}</ul>
 </section>` : ""}
 <section class="card" id="check">
-  <h2>Get your site checked</h2>
+  <h2>Friends' checks</h2>
   <p id="last-checked">${checked ? escape(checkedWords(checked)) : "Your site hasn't been checked yet."}</p>
   ${checksPart(checkGrant, checkFailure)}
-  <p class="meta">${checkGrant.on ? "For a fuller check, which also reads your account's log of changes," : "Or"} a friend's afterwrd site
-  can check that yours is exactly the published afterwrd, with nothing else done in your Cloudflare account. Worth doing
-  when your site is new. Ask a friend: they'll send you a link by message. Open it and press Allow when Cloudflare asks.</p>
+  <details class="other" id="checks-more"${friendChecks.some((r) => r.verdict === "needs a look" && !r.seen_at) ? " open" : ""}>
+  <summary>More about checks</summary>
+  ${letOffPart(checkGrant)}
+  ${checkingPart(auto, checking, friendChecks)}
+  <h3>Asking a friend to check yours</h3>
+  <p class="meta">${checkGrant.on ? "For a fuller check, which also reads your account's log of changes," : "By hand,"} a friend's afterwrd site
+  can check that yours is exactly the published afterwrd, with nothing else done in your Cloudflare account. Ask a
+  friend: they'll send you a link by message. Open it and press Allow when Cloudflare asks.</p>
   ${checkWait ? `<p class="notice" id="check-wait">Your site was updated less than an hour ago. Ask for a check after
   <b>${escape(new Date(checkWait * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" }))}</b>:
   for an hour after an update, the access it used could still change your site, so a check before then can't count.</p>` : ""}
@@ -248,12 +273,21 @@ ${history.length ? `<section class="card" id="history">
   </details>
   <form method="post" action="/_admin/checks/myself?back=update" class="meta">Or <a href="https://afterwrd.app/check/">check it
     yourself</a>, and then <button class="link">say you've checked it</button>.</form>
+  </details>
 </section>
-${checkingPart(auto, checking, friendChecks)}
 ${groupsPart}
 ${forget}
 </main>
 <script>
+  // A link to something folded away (Home's "See what it found", say) opens the fold it's in.
+  const openFold = () => {
+    let target = null;
+    try { target = location.hash.length > 1 ? document.getElementById(decodeURIComponent(location.hash.slice(1))) : null; } catch {} // "#%E0"
+    const fold = target?.closest("details");
+    if (fold && !fold.open) { fold.open = true; target.scrollIntoView(); }
+  };
+  openFold();
+  addEventListener("hashchange", openFold);
   const go = document.getElementById("go");
   // Asking a friend for a check: their site is sent the request (it makes the link they send back), or, for anyone
   // else, a message to send them.
@@ -324,7 +358,7 @@ ${forget}
         log("Updating " + group.name + "…");
         let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
         for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("group-assets", { token, group: group.id }));
-        if (!jwt) throw new Error("Couldn't finish uploading the site files. Try again in a minute.");
+        if (!jwt) throw new Error("Couldn't finish copying afterwrd to your account. Try again in a minute.");
         await post("group-deploy", { token, group: group.id, jwt });
       }
       log("Done.");
@@ -344,10 +378,10 @@ ${forget}
     try {
       log("Checking your Cloudflare account…");
       const { account } = await post("check", { token, tag });
-      log("Uploading " + version + "'s site files…");
+      log("Copying afterwrd " + version + " to your account…");
       let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
       for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("assets", { token, account, tag }));
-      if (!jwt) throw new Error("Couldn't finish uploading the site files. Try again in a minute.");
+      if (!jwt) throw new Error("Couldn't finish copying afterwrd to your account. Try again in a minute.");
       log("Installing " + version + " and checking it works (this can take a few minutes)…");
       await post("deploy", { token, account, tag, jwt });
       const box = document.getElementById("token");

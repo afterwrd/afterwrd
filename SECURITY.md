@@ -27,7 +27,8 @@ Only the latest release is supported. Every site can update itself from its Upda
 releases. When a release fixes a security problem, each older site says so to its owner on Home.
 
 Sites with automatic updates turned on install a release by themselves once it has been **signed** and has been out
-for three days (one day for a security fix). Signing (`worker/scripts/sign.mjs`) happens on the maintainer's own
+for three days (one day for a security fix), or at once on a site whose owner chose *Get updates first* (for people
+helping to test afterwrd). Signing (`worker/scripts/sign.mjs`) happens on the maintainer's own
 machine, with a key that never goes near GitHub, and only after rebuilding the release from its tag and finding it
 matches what GitHub published byte for byte. The signed list of releases is
 [`signatures/index.json`](signatures/index.json): one list, signed as a whole with a number that only goes up, so a
