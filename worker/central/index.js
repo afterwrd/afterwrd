@@ -52,11 +52,10 @@ export default {
 };
 
 function headersFor({ testing, env }) {
-  // The page fetches nothing but this site, and the new site's address (to see when it's started).
-  const sites = testing && env.TEST_SITE_URL ? env.TEST_SITE_URL : "https://*.workers.dev";
+  // The page fetches nothing but this site (which looks at the new site for it, to see when it's started).
   return {
     "Cache-Control": "no-store",
-    "Content-Security-Policy": `default-src 'none'; connect-src 'self' ${sites}; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'`,
+    "Content-Security-Policy": `default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'`,
     "Strict-Transport-Security": "max-age=31536000",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -225,6 +224,18 @@ const STEPS = {
     await api(token, `/accounts/${account}/workers/scripts/${site}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }) });
     const address = siteAddress(here, site, domain);
     return { site: address, next: `${address}/_auth/setup?code=${setupCode}` };
+  },
+
+  // Whether the new site is answering yet. A new workers.dev address shows Cloudflare's "There is nothing here yet"
+  // for a while, so any answer won't do: only afterwrd's own, its version at /_version. Asked from here, where the
+  // answer can be read (the page can't read another site's), at the address worked out here, not one the page sends.
+  async ready(token, { account, name }, here) {
+    await ownAccount(token, account);
+    const domain = await workersDev(token, account);
+    if (!domain) return { ready: false };
+    const response = await fetch(`${siteAddress(here, siteName(name), domain)}/_version`, { redirect: "manual", cache: "no-store" }).catch(() => null);
+    const answer = response?.ok ? await response.json().catch(() => null) : null;
+    return { ready: typeof answer?.id === "string" && answer.id.length > 0 };
   },
 
   finish() {}, // handled in route: drops the token
@@ -503,8 +514,8 @@ with Cloudflare's own Deploy page instead</a>. <a href="https://afterwrd.app/how
       log("Creating the database and installing afterwrd…");
       const { next } = await step("deploy", { account: account.id, name, version, jwt });
       log("Waiting for your site to start at " + new URL(site).host + "…");
-      for (let i = 0; i < 60; i++) {
-        if (await fetch(site + "/_auth/login", { mode: "no-cors", cache: "no-store" }).then(() => true, () => false)) break;
+      for (let i = 0; i < 90; i++) {
+        if ((await step("ready", { account: account.id, name }).catch(() => ({}))).ready) break;
         await new Promise((r) => setTimeout(r, 2000));
       }
       tick(logList.lastElementChild);

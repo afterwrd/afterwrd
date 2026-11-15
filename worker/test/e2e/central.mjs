@@ -120,7 +120,19 @@ const server = createServer(async (req, res) => {
   send(404, { error: "no" });
 });
 await new Promise((r) => server.listen(8799, "127.0.0.1", r));
-const site = createServer((req, res) => { res.statusCode = 200; res.end("the new site"); });
+// The new site. At first its address shows Cloudflare's holding page, as a new workers.dev address does for a while;
+// then afterwrd answers.
+let versionAsks = 0;
+const site = createServer((req, res) => {
+  if (req.url.startsWith("/_version") && ++versionAsks <= 2) {
+    res.statusCode = 404;
+    res.setHeader("Content-Type", "text/html");
+    return res.end("<h1>There is nothing here yet</h1>");
+  }
+  if (req.url.startsWith("/_version")) { res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify({ id: "version-1" })); }
+  res.statusCode = 200;
+  res.end("the new site");
+});
 await new Promise((r) => site.listen(8797, "127.0.0.1", r));
 
 // --- a person installing ------------------------------------------------------------------------------------------
@@ -231,6 +243,8 @@ check("…and switched on at its workers.dev address", state["tok-fresh"].enable
 const setupCode = made?.metadata.bindings.find((b) => b.name === "SETUP_CODE")?.text;
 check("then it goes straight on to the new site's setup link, their name after the # for it", fresh.next === `${NEW_SITE}/_auth/setup?code=${setupCode}#name=Ann+Example`
   && /^[0-9a-f]{48}$/.test(setupCode ?? ""), fresh.next);
+check("it waits past Cloudflare's \"nothing here yet\" page until afterwrd itself answers", versionAsks >= 3
+  && stepCalls.filter((s) => s.step === "ready").length >= 3, `asked ${versionAsks} times`);
 check("…and the token is dropped here", !(await fresh.page.cookies(BASE)).some((c) => c.name.includes("install_token")));
 check("every file came from the release, checked", calls.some((c) => c.includes("assets/upload")) && made.modules.join() === "index.js");
 check("…every site file, a few at a time over several requests", state["tok-fresh"].uploaded?.size === MANIFEST.assets.length
@@ -290,7 +304,7 @@ const stray = await fetch(`${BASE}/done?code=stray.one-time-code&state=nope`, { 
 check("a code that this browser didn't start is refused", stray.status === 303 && (stray.headers.get("location") ?? "").includes("error=")
   && !exchanges.some((e) => e.code === "stray.one-time-code"));
 const headers = (await fetch(BASE)).headers;
-check("the page can only call this site and new sites, and can't be framed", (headers.get("content-security-policy") ?? "").includes(`connect-src 'self' ${NEW_SITE}`)
+check("the page can only call this site, and can't be framed", (headers.get("content-security-policy") ?? "").includes("connect-src 'self';")
   && headers.get("content-security-policy").includes("frame-ancestors 'none'") && headers.get("referrer-policy") === "no-referrer");
 
 check("no script errors", errors.length === 0, errors.join(" | "));
