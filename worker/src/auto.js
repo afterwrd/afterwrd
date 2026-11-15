@@ -30,7 +30,7 @@
 // kept for a later, owner-chosen restore.
 import pkg from "../package.json";
 import { exchangeCode, pkce, readCookie, RELAY, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
-import { existingDatabase, findWorker, liveVersion, loadRelease, stageVersion, switchTo, uploadAssets, useApiBase, api } from "./deploy.js";
+import { existingDatabase, FILES_AT_ONCE, findWorker, liveVersion, loadRelease, stageVersion, switchTo, uploadAssets, useApiBase, api } from "./deploy.js";
 import { isGroupWorker } from "./groupsites.js";
 import { checkNewer, ensureSchema } from "./migrate.js";
 import { releaseKey, signedList } from "./signing.js";
@@ -53,6 +53,15 @@ const GROUPS_PER_RUN = 3; // groups updated by one run of the schedule…
 const GROUPS_NOW = 8; // …or when the owner is waiting for it on the Update page
 const START_COOKIE = "cf_auto";
 const START_SECONDS = 600;
+/** A release's site files, a few per request ("assets" answers jwt null while there's more): the token deploying needs. */
+async function uploadAll(ask) {
+  for (let i = 0; i < 30; i++) {
+    const { jwt } = await ask();
+    if (jwt) return jwt;
+  }
+  throw new Error("Couldn't finish uploading the site files.");
+}
+
 /** Where a new site's setup ends, after its permissions, allowed or not (views/pages.js setupDonePage). */
 export const SETUP_DONE = "/_admin/setup/done";
 const SETTINGS_KEY = "auto_update";
@@ -265,7 +274,7 @@ async function runOnce(env, state, ownerAsked = false) {
     const { account, script } = await whichWorker(env, token, origin);
     const common = { token, account, script, version: choice.ready.version, manifestSha256: choice.ready.manifestSha256 };
     await progress(env, `Uploading afterwrd ${choice.ready.version}'s site files…`);
-    const { jwt } = await step(env, origin, { step: "assets", ...common });
+    const jwt = await uploadAll(() => step(env, origin, { step: "assets", ...common }));
     await stillOn();
     await progress(env, `Uploading afterwrd ${choice.ready.version} (not live yet)…`);
     const staged = await step(env, origin, { step: "stage", ...common, jwt });
@@ -347,7 +356,7 @@ async function runGroups(env, origin, list, limit) {
     const common = { token, group: group.id, manifestSha256: pinned };
     let result;
     try {
-      const { jwt } = await step(env, origin, { step: "group-assets", ...common });
+      const jwt = await uploadAll(() => step(env, origin, { step: "group-assets", ...common }));
       const staged = await step(env, origin, { step: "group-stage", ...common, jwt });
       result = staged.needsHand ? "needs-hand"
         : (await step(env, origin, { step: "group-switch", ...common, versionId: staged.versionId })).result;
@@ -533,7 +542,7 @@ export async function handleAutoStep(request, env, url) {
     }
     // The manifest must be the one that was signed (the run checked the signature): every file is checked against it.
     const release = await loadRelease(`${releasesBase(env, url.origin)}/v${body.version}`, body.manifestSha256);
-    if (body.step === "assets") return json({ jwt: await uploadAssets(body.token, body.account, body.script, release) });
+    if (body.step === "assets") return json({ jwt: await uploadAssets(body.token, body.account, body.script, release, { most: FILES_AT_ONCE }) });
     if (body.step === "stage") {
       const settings = await api(body.token, `/accounts/${body.account}/workers/scripts/${body.script}/settings`);
       const databaseId = existingDatabase(settings);
@@ -556,7 +565,7 @@ async function groupStep(env, origin, body) {
   if (!group || !/^[0-9a-f]{32}$/.test(group.account)) throw new Error("That group is up to date, or couldn't be reached.");
   if (!/^[0-9a-f]{64}$/.test(body.manifestSha256 ?? "")) throw new Error("Groups only get a signed release.");
   const release = await loadRelease(`${releasesBase(env, origin)}/v${VERSION}`, body.manifestSha256);
-  if (body.step === "group-assets") return { jwt: await uploadAssets(body.token, group.account, group.script, release) };
+  if (body.step === "group-assets") return { jwt: await uploadAssets(body.token, group.account, group.script, release, { most: FILES_AT_ONCE }) };
   const settings = await api(body.token, `/accounts/${group.account}/workers/scripts/${group.script}/settings`);
   if (!isGroupWorker(settings, group)) throw new Error("That Worker isn't the group's any more.");
   if (body.step === "group-stage") {

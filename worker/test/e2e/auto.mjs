@@ -25,7 +25,8 @@ const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const iso = (secondsAgo) => new Date(Date.now() - secondsAgo * 1000).toISOString().replace(/\.\d+Z$/, "Z");
 
 // --- the stand-ins -----------------------------------------------------------------------------------------------
-// Releases: version → {manifest bytes, its entry in the signed list}. Each has one module, no site files. The list is
+// Releases: version → {manifest bytes, its entry in the signed list}. Each has one module and 20 site files of its
+// own, more than one request uploads (deploy.js FILES_AT_ONCE), so an update uploads them over several. The list is
 // signed afresh whenever it changes, with the next sequence number (as scripts/sign.mjs does).
 const releases = new Map();
 const files = new Map();
@@ -36,10 +37,15 @@ const drop = (version) => { releases.delete(version); list.seq++; };
 function release(version, { signedAgo, tamper = false, newStore = false, securityFix = false }) {
   const code = Buffer.from(`export default { version: "${version}" };\n`);
   files.set(sha(code), code);
+  const assets = Array.from({ length: 20 }, (_, i) => {
+    const bytes = Buffer.from(`/* afterwrd ${version}, file ${i} */`);
+    files.set(sha(bytes), bytes);
+    return { path: `/static/f${i}.js`, type: "application/javascript", hash: sha(bytes).slice(0, 32), sha256: sha(bytes), size: bytes.length };
+  });
   const manifest = Buffer.from(JSON.stringify({
     name: "afterwrd", version, notes: `Release ${version}`, ...(securityFix ? { security_fix: version } : {}),
     main_module: "index.js", compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"],
-    modules: [{ name: "index.js", type: "application/javascript+module", sha256: sha(code), size: code.length }], assets: [],
+    modules: [{ name: "index.js", type: "application/javascript+module", sha256: sha(code), size: code.length }], assets,
     assets_config: { html_handling: "none", not_found_handling: "none", run_worker_first: true },
     durable_objects: [{ name: "MEDIA", class_name: "MediaStore" }, { name: "OUTBOX", class_name: "Outbox" }, ...(newStore ? [{ name: "NEW", class_name: "NewStore" }] : [])],
     migrations: { new_tag: newStore ? "v2" : "v1", new_sqlite_classes: ["MediaStore", "Outbox", ...(newStore ? ["NewStore"] : [])] },
@@ -50,6 +56,19 @@ function release(version, { signedAgo, tamper = false, newStore = false, securit
 const token = { exchanges: [], refreshes: [], revoked: new Set(), n: 0 };
 const cf = { schedules: [], versions: [], deployments: [], live: "11111111-1111-4111-8111-111111111111", unhealthy: new Set() };
 const asked = [];
+// Cloudflare's upload sessions, as the real one behaves: it asks only for files it hasn't got, four to a bucket, and
+// answers the token deploying needs once they're all up. Per Worker: what it has, and what its last session asked for.
+const uploads = { held: new Map(), wanted: new Map(), sessions: 0, requests: 0 };
+function uploadSession(script, body) {
+  uploads.sessions++;
+  const held = uploads.held.get(script) ?? new Set();
+  uploads.held.set(script, held);
+  const missing = [...new Set(Object.values(JSON.parse(body).manifest ?? {}).map((f) => f.hash))].filter((h) => !held.has(h));
+  uploads.wanted.set(script, new Set(missing));
+  const buckets = [];
+  for (let i = 0; i < missing.length; i += 4) buckets.push(missing.slice(i, i + 4));
+  return { success: true, result: { jwt: buckets.length ? `upload-${script}` : "assets-jwt", buckets } };
+}
 // A group this site made, in the same account (added further down): its Worker's live version, and the afterwrd
 // version its ping says it runs.
 const SITE_VERSION = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
@@ -98,7 +117,7 @@ const server = createServer(async (req, res) => {
       { type: "durable_object_namespace", name: "MEDIA", class_name: "MediaStore" }, { type: "durable_object_namespace", name: "OUTBOX", class_name: "Outbox" },
       { type: "secret_text", name: "GROUP_KEY" }, { type: "version_metadata", name: "VERSION" }] } });
   }
-  if (api === `${gat}/assets-upload-session`) return send(200, { success: true, result: { jwt: "assets-jwt", buckets: [] } });
+  if (api === `${gat}/assets-upload-session`) return send(200, uploadSession("localhost-grp", body));
   if (api === `${gat}/versions` && req.method === "POST") { const id = randomUUID(); grp.versions.push(id); return send(200, { success: true, result: { id } }); }
   if (api === `${gat}/deployments` && req.method === "GET") return send(200, { success: true, result: { deployments: [{ versions: [{ version_id: grp.live, percentage: 100 }] }] } });
   if (api === `${gat}/deployments` && req.method === "POST") {
@@ -115,7 +134,15 @@ const server = createServer(async (req, res) => {
       { type: "durable_object_namespace", name: "MEDIA", class_name: "MediaStore" }, { type: "durable_object_namespace", name: "OUTBOX", class_name: "Outbox" },
       { type: "secret_text", name: "SETUP_CODE" }, { type: "version_metadata", name: "VERSION" }] } });
   }
-  if (api === `${at}/assets-upload-session`) return send(200, { success: true, result: { jwt: "assets-jwt", buckets: [] } });
+  if (api === `${at}/assets-upload-session`) return send(200, uploadSession("localhost", body));
+  if (api === `/accounts/${ACCOUNT}/workers/assets/upload` && auth.startsWith("upload-")) {
+    uploads.requests++;
+    const script = auth.slice("upload-".length);
+    const form = await new Response(body, { headers: { "content-type": req.headers["content-type"] } }).formData();
+    for (const hash of form.keys()) uploads.held.get(script)?.add(hash);
+    const done = [...(uploads.wanted.get(script) ?? [])].every((h) => uploads.held.get(script)?.has(h));
+    return send(200, { success: true, result: { jwt: done ? "assets-jwt" : null } });
+  }
   if (api === `${at}/versions` && req.method === "POST") {
     const id = randomUUID();
     const meta = await new Response(body, { headers: { "content-type": req.headers["content-type"] } }).formData().then((f) => f.get("metadata").text()).then(JSON.parse).catch(() => null);
@@ -317,7 +344,7 @@ sql(`INSERT INTO groups (name, created_at, origin, remote_id, joined_at, role, s
   VALUES ('Book club', 1, 'http://127.0.0.1:8799/grp', 1, 1, 'owner', 'localhost-grp', '${ACCOUNT}', 'grp-db')`);
 release("99.0.10", { signedAgo: 3600 }); // signed an hour ago: by itself, it would wait three days
 const latestRow = (version) => sql(`INSERT OR REPLACE INTO settings (key, value) VALUES ('latest_release', '${JSON.stringify({ version, checked: Math.floor(Date.now() / 1000),
-  latest: { tag: `v${version}`, version, notes: `Release ${version}`, page: `https://github.com/stemill/afterwrd/releases/tag/v${version}` } })}')`);
+  latest: { tag: `v${version}`, version, notes: `Release ${version}`, page: `https://github.com/afterwrd/afterwrd/releases/tag/v${version}` } })}')`);
 latestRow("99.0.10");
 cf.versions.length = 0; cf.deployments.length = 0;
 await owner.goto(`${BASE}/_admin/update`);
@@ -332,6 +359,9 @@ check("\"Install it now\" installs it without waiting the days out", state().las
   && cf.versions.length === 1 && cf.live === cf.versions[0].id, JSON.stringify(state().last));
 check("…and the site's group follows in the same run, as signed", grp.version === SITE_VERSION && grp.deployments.length === 1
   && grp.deployments[0] === grp.versions[0], JSON.stringify(grp));
+check("…the release's site files uploaded a few at a time, over several requests, for the site and its group",
+  uploads.sessions >= 6 && uploads.held.get("localhost")?.size >= 20 && uploads.held.get("localhost-grp")?.size >= 20
+  && cf.versions[0]?.meta?.assets?.jwt === "assets-jwt", `${uploads.sessions} sessions, ${uploads.requests} uploads`);
 check("…and the page says what it did", /Installed afterwrd 99\.0\.10\. Brought Book club up to/.test(shown), shown);
 const steps = await owner.evaluate(async () => (await (await fetch("/_admin/update/progress")).json()).lines);
 check("…having noted each step as it went", steps.some((l) => l.startsWith("Switching to afterwrd 99.0.10")) && steps.some((l) => l.startsWith("Updating Book club")),

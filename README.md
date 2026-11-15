@@ -62,8 +62,8 @@ Because of that, it's built to be checked rather than trusted:
 - **How sites talk to each other is written down** in [PROTOCOL.md](PROTOCOL.md), so the design can be examined and
   criticised on its own terms.
 
-Found a problem? Please [open an issue](https://github.com/stemill/afterwrd/issues). For anything security-related,
-[report it privately](https://github.com/stemill/afterwrd/security/advisories/new) instead, so it can be fixed before
+Found a problem? Please [open an issue](https://github.com/afterwrd/afterwrd/issues). For anything security-related,
+[report it privately](https://github.com/afterwrd/afterwrd/security/advisories/new) instead, so it can be fixed before
 it's public (see [SECURITY.md](SECURITY.md)).
 
 ## Install your own
@@ -89,7 +89,7 @@ can be done any time.
    `afterwrd.<your-name>.workers.dev`. Leave *Protect with Cloudflare Access* off (afterwrd has its own
    sign-in) and press *Deploy*. The first time, Cloudflare asks you to choose `<your-name>`.
 3. **Paste in the installer.** Press *Copy installer* on the [install page](https://afterwrd.app/)
-   (or download `installer.js` from the [latest release](https://github.com/stemill/afterwrd/releases/latest) and
+   (or download `installer.js` from the [latest release](https://github.com/afterwrd/afterwrd/releases/latest) and
    copy all of it), then in the Worker press *Edit code*, select everything there, paste over it and press *Deploy*.
 4. **Run it.** Open your Worker's address. Choose your site's address, press **Connect Cloudflare** and, on
    Cloudflare's page, **Allow**: that lets the installer make your database and upload afterwrd, for an hour, and
@@ -125,7 +125,7 @@ photos and videos. To check a release for yourself, see [Check it yourself](SECU
   shows on both your Homes. Otherwise the owner's *Update* page installs a newer release, keeping
   your passkeys, connections and archive. (Pasting a newer `installer.js` over your afterwrd Worker does the same.) Home says so when an update
   fixes a security problem. To hear about every release, *Watch* the repository on GitHub (*Custom* → *Releases*) or
-  follow its [releases feed](https://github.com/stemill/afterwrd/releases.atom).
+  follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
   wasn't you, remove it in *Your devices*.
 - **Use a Cloudflare account just for afterwrd** if you use Cloudflare for anything else (see step 1).
@@ -261,7 +261,7 @@ git tag -a v<version> -m "afterwrd <version>" && git push origin v<version>
 ```
 A GitHub Action (`.github/workflows/release.yml`) builds the release from the tagged code and publishes it with
 every file attached, including `installer.js`. To build one locally instead:
-`npm run release -- --base https://github.com/stemill/afterwrd/releases/download/v<version>` in `worker/`.
+`npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v<version>` in `worker/`.
 
 **Licences.** After adding, removing or upgrading a dependency, run `npm run notices` in `worker/` and commit the
 updated `public/static/licenses.txt`, which carries the licences of everything installed with afterwrd. The release

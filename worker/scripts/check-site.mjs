@@ -29,8 +29,8 @@ const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 async function release() {
   if (manifestPath) return JSON.parse(readFileSync(manifestPath, "utf8"));
   const url = version
-    ? `https://github.com/stemill/afterwrd/releases/download/v${version}/manifest.json`
-    : "https://github.com/stemill/afterwrd/releases/latest/download/manifest.json";
+    ? `https://github.com/afterwrd/afterwrd/releases/download/v${version}/manifest.json`
+    : "https://github.com/afterwrd/afterwrd/releases/latest/download/manifest.json";
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Couldn't download the release's manifest (${response.status}).`);
   return response.json();

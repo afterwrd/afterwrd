@@ -15,7 +15,7 @@
 // Updating groups to this site's version is on the Update page (update.js), with the same connection.
 import pkg from "../package.json";
 import { tokenFor } from "./cloudflare.js";
-import { api, deployVersion, existingDatabase, findWorker, loadRelease, uploadAssets, workerSettings } from "./deploy.js";
+import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, uploadAssets, workerSettings } from "./deploy.js";
 import { claimGroup, forgetGroup } from "./membership.js";
 import { cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
 import { ownerName, siteOrigin } from "./peers.js";
@@ -85,7 +85,7 @@ async function create(request, env, url, path, body) {
   if (!ACCOUNT_RE.test(body.account ?? "") || !SCRIPT_RE.test(body.script ?? "") || !body.script.startsWith(`${own}-`)) {
     throw new Error("Unexpected details.");
   }
-  if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, body.script, await loadRelease(GROUP_RELEASE)) });
+  if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, body.script, await loadRelease(GROUP_RELEASE), { most: FILES_AT_ONCE }) });
   if (path === "/deploy") {
     const name = typeof body.name === "string" ? body.name.trim().slice(0, MAX_GROUP_NAME) : "";
     if (!name) throw new Error("Give the group a name.");

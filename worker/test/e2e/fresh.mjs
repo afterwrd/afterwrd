@@ -24,7 +24,8 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2
   hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
 const broughtLink = `http://localhost:8788/_connect/${"x".repeat(43)}`; // a friend's link, as the installer hands it on
 await page.goto(`${BASE}/_auth/setup?code=local-test-setup-code#${new URLSearchParams({ name: "New Owner", invite: broughtLink })}`);
-check("the name given to the installer is ready on the setup page", (await page.$eval("#name", (i) => i.value)) === "New Owner");
+check("the name given to the installer is shown on the setup page, not asked again", (await page.$eval("#name", (i) => i.value)) === "New Owner"
+  && (await page.$eval("#given-name", (b) => b.textContent)) === "New Owner" && await page.$eval("#name-box", (p) => p.hidden));
 // afterwrd.app's relay page, stood in for: where the new site sends the browser to ask Cloudflare for its permissions.
 let relay = null;
 await page.setRequestInterception(true);

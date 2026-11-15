@@ -16,7 +16,7 @@
 // (afterwrd.app/check/) and a friend's check (src/checks.js) are the second key.
 import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, exchangeCode, pkce, readCookie, SCOPES, testingHere } from "../src/cloudflare.js";
-import { api, databaseInUse, deployVersion, findOrCreateDatabase, loadRelease, uploadAssets, useApiBase,
+import { api, databaseInUse, deployVersion, FILES_AT_ONCE, findOrCreateDatabase, loadRelease, uploadAssets, useApiBase,
   workerSettings } from "../src/deploy.js";
 
 const REPO = pkg.afterwrd.releases;
@@ -156,8 +156,6 @@ async function workersDev(token, account) {
     throw new Error(`Couldn't read this account's workers.dev name: ${error.message.replace(/^Cloudflare said: /, "")} Try again.`);
   }
 }
-
-const FILES_AT_ONCE = 8;
 
 async function ownAccount(token, id) {
   accountId(id);

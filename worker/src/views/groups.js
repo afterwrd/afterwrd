@@ -173,7 +173,9 @@ ${domain ? html`<form class="card stack" id="start">
         log("Checking your Cloudflare account…");
         const { account, script, address } = await post("/_groups/create/check", { token: token(), name });
         log("Preparing " + address + "…");
-        const { jwt } = await post("/_groups/create/assets", { token: token(), account, script });
+        let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
+        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("/_groups/create/assets", { token: token(), account, script }));
+        if (!jwt) throw new Error("Couldn't finish uploading the group's site files. Try again in a minute.");
         log("Making the group's site…");
         made = (await post("/_groups/create/deploy", { token: token(), account, script, jwt, name, about: form.about.value })).id;
       }

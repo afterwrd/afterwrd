@@ -25,7 +25,7 @@
     "wrangler": "4.156.2"
   },
   "afterwrd": {
-    "releases": "stemill/afterwrd",
+    "releases": "afterwrd/afterwrd",
     "site": "afterwrd.app",
     "cloudflareClient": "9a89827907d5681523b116176031302e",
     "releaseKey": "jWNP4nrIYvCKiaHm2PXOy9lx2wobn4m7FjWWZARyEK8="

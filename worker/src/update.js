@@ -24,7 +24,7 @@
 // the release's manifest; as with installing, trust rests on that repository.
 import pkg from "../package.json";
 import { connectedToken, tokenFor } from "./cloudflare.js";
-import { api, deployVersion, existingDatabase, findWorker, loadRelease, stageVersion, uploadAssets } from "./deploy.js";
+import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, stageVersion, uploadAssets } from "./deploy.js";
 import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, startRunNow, switchCarefully, turnOff } from "./auto.js";
 import { checkNewer, PROBLEM_KEY } from "./migrate.js";
 import { releaseKey, signedList } from "./signing.js";
@@ -100,7 +100,7 @@ export async function handleUpdate(request, env, url, owner) {
     const pinned = background ? await signedManifest(env, url.origin, body.tag.slice(1)) : undefined;
     const release = () => loadRelease(`https://github.com/${REPO}/releases/download/${body.tag}`, pinned);
     if (path === "/check") return json({ account: (await findWorker(token, url.hostname)).account });
-    if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, script, await release()) });
+    if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, script, await release(), { most: FILES_AT_ONCE }) });
     if (path === "/deploy") {
       // A long-lived token an earlier version kept (UPDATE_TOKEN) goes now, while there's a fresh one to remove it
       // with; the update itself keeps every other secret. If it can't be removed, the page still offers Forget.
@@ -236,7 +236,7 @@ async function updateGroup(request, env, path, body) {
     const group = (await groupsBehind(env.DB)).find((g) => g.id === Number(body.group));
     if (!group || !/^[0-9a-f]{32}$/.test(group.account)) throw new Error("That group is already up to date, or couldn't be reached.");
     const release = await loadRelease(GROUP_RELEASE, background ? await signedManifest(env, url.origin, VERSION) : undefined);
-    if (path === "/group-assets") return json({ jwt: await uploadAssets(token, group.account, group.script, release) });
+    if (path === "/group-assets") return json({ jwt: await uploadAssets(token, group.account, group.script, release, { most: FILES_AT_ONCE }) });
     const settings = await api(token, `/accounts/${group.account}/workers/scripts/${group.script}/settings`);
     if (!isGroupWorker(settings, group)) throw new Error("That Worker isn't the group's any more, so it wasn't updated.");
     await deployVersion(token, group.account, group.script, release, { jwt: body.jwt, databaseId: group.database, settings });

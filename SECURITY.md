@@ -5,8 +5,8 @@ afterwrd holds people's private photos, posts and Facebook history, so security 
 ## Reporting a problem
 
 Please **don't open a public issue** for anything security-related. Report it privately instead:
-**[report a vulnerability](https://github.com/stemill/afterwrd/security/advisories/new)** (GitHub's private
-reporting; only the maintainer sees it).
+**[report a vulnerability](https://github.com/afterwrd/afterwrd/security/advisories/new)** (GitHub's private
+reporting; only the maintainer sees it), or email **security@afterwrd.app** if you'd rather not use GitHub.
 
 It helps to include what you found, which version of afterwrd (shown on its Update page), and how to reproduce it.
 You'll get a reply as soon as possible. Once a fix is released, and sites have had a chance to update, the problem
@@ -43,7 +43,7 @@ afterwrd sets it up, in the account at its address, and that every upload to its
 signed release. A finding shows on both sites' Home.
 
 To hear about every release, *Watch* this repository on GitHub (*Watch* → *Custom* → *Releases*) or follow the
-[releases feed](https://github.com/stemill/afterwrd/releases.atom). Each release's notes are what its sites show on
+[releases feed](https://github.com/afterwrd/afterwrd/releases.atom). Each release's notes are what its sites show on
 their Update page.
 
 ## What the Cloudflare permission covers
@@ -79,15 +79,15 @@ You don't have to take the published files on trust. Two independent checks:
 `git` and Node.js 22.
 
 ```sh
-git clone https://github.com/stemill/afterwrd && cd afterwrd/worker
+git clone https://github.com/afterwrd/afterwrd && cd afterwrd/worker
 git checkout v0.23.0        # the release you want to check
 npm ci --ignore-scripts
-npm run release -- --base https://github.com/stemill/afterwrd/releases/download/v0.23.0
+npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v0.23.0
 shasum -a 256 release/0.23.0/manifest.json release/0.23.0/installer.js
 ```
 
 Both fingerprints should match the files of the same name attached to [that
-release](https://github.com/stemill/afterwrd/releases); the start of the manifest's is also shown at the foot of
+release](https://github.com/afterwrd/afterwrd/releases); the start of the manifest's is also shown at the foot of
 [afterwrd.app](https://afterwrd.app/). The manifest lists the SHA-256 of every code and site file, and the installer
 and Update page refuse any file that doesn't match it, so a matching manifest covers all of those. The installer
 itself isn't in the manifest (it carries the manifest's fingerprint instead), which is why it's checked too.
@@ -97,7 +97,7 @@ by this repository's release workflow, from the tagged commit. The record is kep
 log, so it can't be quietly changed later. With the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh attestation verify manifest.json --repo stemill/afterwrd
+gh attestation verify manifest.json --repo afterwrd/afterwrd
 ```
 
 **Check what your site is running.** With a read-only API token (*Workers Scripts: Read*), download the code your

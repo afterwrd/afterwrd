@@ -86,6 +86,9 @@ export async function loadRelease(base, manifestSha256 = null) {
   };
 }
 
+/** How many site files one request uploads at most (each a download from GitHub: two or three calls of the 50). */
+export const FILES_AT_ONCE = 8;
+
 /**
  * Uploads the release's site files (unchanged ones are skipped by Cloudflare); returns the token deploying needs.
  * With `most`, it stops after the first whole bucket (Cloudflare's grouping) that takes it to that many files and

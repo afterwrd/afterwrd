@@ -53,7 +53,7 @@ jobs:
 
       # A signed record that these exact files were built here, by this workflow, from the tagged commit. It's
       # kept in Sigstore's public log, so it can't be quietly changed later. To check a release's files:
-      #   gh attestation verify manifest.json --repo stemill/afterwrd
+      #   gh attestation verify manifest.json --repo afterwrd/afterwrd
       - name: Sign the build record
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:

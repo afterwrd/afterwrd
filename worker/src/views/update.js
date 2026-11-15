@@ -322,7 +322,9 @@ ${forget}
     try {
       for (const group of JSON.parse(groupsGo.dataset.groups)) {
         log("Updating " + group.name + "…");
-        const { jwt } = await post("group-assets", { token, group: group.id });
+        let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
+        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("group-assets", { token, group: group.id }));
+        if (!jwt) throw new Error("Couldn't finish uploading the site files. Try again in a minute.");
         await post("group-deploy", { token, group: group.id, jwt });
       }
       log("Done.");
@@ -343,7 +345,9 @@ ${forget}
       log("Checking your Cloudflare account…");
       const { account } = await post("check", { token, tag });
       log("Uploading " + version + "'s site files…");
-      const { jwt } = await post("assets", { token, account, tag });
+      let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
+      for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("assets", { token, account, tag }));
+      if (!jwt) throw new Error("Couldn't finish uploading the site files. Try again in a minute.");
       log("Installing " + version + " and checking it works (this can take a few minutes)…");
       await post("deploy", { token, account, tag, jwt });
       const box = document.getElementById("token");

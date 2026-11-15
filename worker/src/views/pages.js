@@ -168,17 +168,30 @@ export function setupDonePage() {
 
 export function setupPage() {
   return page("Set up afterwrd", `
-<h1>Your archive is ready</h1>
-<p>afterwrd is installed in your Cloudflare account. Next, make yourself its owner: you'll create a passkey on
-this device, then you can import your Facebook download and invite friends.</p>
-<p><input id="name" placeholder="Your name" autocomplete="name" maxlength="100"></p>
+<h1>Your site is ready</h1>
+<p id="given" hidden>It's yours, <b id="given-name"></b> (<a href="#" id="change">change your name</a>).</p>
+<p id="name-box"><input id="name" placeholder="Your name" autocomplete="name" maxlength="100"></p>
+<p>Next, make yourself its owner with a passkey on this device: your face, fingerprint or device PIN, and no
+password. Then you can post, add photos and invite friends.</p>
 <button id="go">Continue</button>
 <p id="error" role="alert"></p>`, `
   const code = new URLSearchParams(location.search).get("code");
   keepInvite();
-  // The name they gave the installer, brought after the # (so no server saw it on the way): ready to use or correct.
+  // The name they gave the installer, brought after the # (so no server saw it on the way).
   const given = (new URLSearchParams(location.hash.slice(1)).get("name") ?? "").trim().slice(0, 100);
-  if (given) document.getElementById("name").value = given;
+  // Given already, it's shown rather than asked again, with a way to change it.
+  if (given) {
+    document.getElementById("name").value = given;
+    document.getElementById("given-name").textContent = given;
+    document.getElementById("given").hidden = false;
+    document.getElementById("name-box").hidden = true;
+    document.getElementById("change").addEventListener("click", (e) => {
+      e.preventDefault();
+      document.getElementById("given").hidden = true;
+      document.getElementById("name-box").hidden = false;
+      document.getElementById("name").focus();
+    });
+  }
   // Sent by the installer (which always brings the name): after the passkey, on to the site's lasting permissions.
   const fromInstaller = new URLSearchParams(location.hash.slice(1)).has("name");
   // Off the address bar and out of history, so an abandoned setup doesn't leave the code lying around.
