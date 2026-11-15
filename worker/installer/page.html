@@ -28,20 +28,14 @@
   ol.steps > li.optional::before { content: "+"; background: var(--surface); color: var(--text); }
   h2 { font: 900 1.2rem var(--round); margin: 2px 0 6px; }
   h2 .meta { font: 600 0.85rem system-ui, sans-serif; }
-  details.by-hand { margin-top: 14px; }
-  details.by-hand > ol { padding-left: 1.2rem; }
-  details.by-hand > ol li { margin: 6px 0; }
+  .hour { margin: 12px 0 4px; padding: 12px 14px; border-radius: 16px; background: var(--accent-soft); border-left: 4px solid var(--accent); }
+  .hour b:first-child { color: var(--accent-strong); }
   p { margin: 6px 0; }
   .meta { color: var(--muted); font-size: 0.9rem; }
   a { color: var(--accent-strong); }
   .button { display: inline-block; margin: 8px 8px 0 0; padding: 11px 20px; border-radius: 999px; border: 0;
     background: var(--raised); color: var(--text); font: 800 1rem var(--round); text-decoration: none; cursor: pointer; }
   .button.primary { background: var(--text); color: var(--on-accent); }
-  .path { font-weight: 600; }
-  details { margin-top: 10px; }
-  summary { cursor: pointer; color: var(--muted); font-size: 0.9rem; }
-  textarea { width: 100%; height: 260px; margin-top: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 10px;
-    background: var(--sunken); color: var(--text); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
   .safe { margin-top: 28px; background: var(--accent-soft); border: 0; border-radius: 22px; padding: 18px 20px; }
   .safe h2 { margin-top: 0; color: var(--accent-strong); }
   .safe ul { margin: 0; padding-left: 1.2rem; }
@@ -67,52 +61,19 @@ talks to, how signing in and friends work, and how to check all of it in the pub
     <p>An email address is all it asks for. Don't add a card; afterwrd stays within the free plan. Confirm your email
     from the message Cloudflare sends, and stay signed in.</p>
     <a class="button" href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Sign up to Cloudflare</a>
-    <p class="meta">Already have a Cloudflare account? If you use it for other things, make a new one just for afterwrd:
-    installing asks for permission over every Worker and database in the account, for an hour, so in an account of its
-    own that's only afterwrd. Otherwise, <a href="https://dash.cloudflare.com/login" target="_blank" rel="noopener">sign in</a>.</p>
+    <p class="meta">Already use Cloudflare for other things? Make a new account just for afterwrd. Otherwise,
+    <a href="https://dash.cloudflare.com/login" target="_blank" rel="noopener">sign in</a>.</p>
   </li>
   <li>
     <h2>Install</h2>
-    <p>Once you're signed in to Cloudflare in this browser, press <b>Install</b>, and on Cloudflare's page press
-    <b>Allow</b>. Give your name (your
-    address is made from it) and a couple of minutes later your site is ready: make yourself its owner with a passkey
-    (your face, fingerprint or device PIN; no password). Then you're in: write a post, add photos, and invite friends from
-    <b>Friends</b>. It all works on a phone.</p>
-    <p>Cloudflare will ask you to allow afterwrd. This first permission <b>lasts one hour</b>, only long enough to install
-    your site, and <b>nothing is kept</b>. Cloudflare's page doesn't say how long it lasts, so we're saying it here. At
-    the end, your site asks for two that last (automatic updates and friends' checks), after a page that says what each
-    can do.</p>
+    <p>Signed in to Cloudflare in this browser? Press <b>Install</b>.</p>
+    <p class="hour"><b>One hour, nothing kept.</b> Cloudflare's next page asks you to <b>Allow</b> afterwrd into your
+    account. That's only for <b>one hour</b>, just long enough to install your site, and afterwrd keeps nothing.
+    Cloudflare's page doesn't say how long, so we're saying it here.</p>
     <a class="button primary" href="https://install.afterwrd.app/connect">Install</a>
-    <p class="meta">Careful? <a href="/check/">Check your install</a> before you start: in your Cloudflare dashboard, or
-    by asking a friend with afterwrd to check it (<b>Update → Get your site checked</b>).</p>
-    <details class="by-hand" id="by-hand">
-      <summary>Prefer not to use afterwrd's installer? Use Cloudflare's own Deploy page</summary>
-      <p>This puts the installer in your own account first, so nothing of afterwrd's touches your connection to
-      Cloudflare. It's easiest on a computer.</p>
-      <ol>
-        <li><a href="__DEPLOY_LINK__" target="_blank" rel="noopener">Open Cloudflare's Deploy page</a> with afterwrd's
-          installer ready. Leave the name as it is and press <b>Deploy</b>. (If Cloudflare asks you to create an account,
-          you aren't signed in in this browser.)</li>
-        <li>Press <b>Visit</b> (on a phone, it's in the <b>⋯</b> menu at the top). The installer asks for your site's
-          address, then <b>Connect Cloudflare</b> and <b>Allow</b>, installs afterwrd and removes itself.</li>
-      </ol>
-      <details>
-        <summary>Or by hand, if the Deploy page doesn't work</summary>
-        <ol>
-          <li>Go to <a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Workers &amp; Pages</a>
-            (<span class="path">Compute → Workers &amp; Pages</span> in the left-hand menu), press <span class="path">Create application</span>,
-            then <span class="path">Start with Hello World</span>. Change the <b>Worker name</b> to <code>afterwrd</code>, leave
-            <b>Protect with Cloudflare Access</b> off and press <b>Deploy</b>.</li>
-          <li>Copy the installer, then in your new Worker press <b>Edit code</b>, select everything in the editor
-            (<kbd>⌘A</kbd> or <kbd>Ctrl+A</kbd>), paste over it and press <b>Deploy</b>. Then open the Worker's address.<br>
-            <button class="button" id="copy">Copy installer</button></li>
-        </ol>
-        <details>
-          <summary>See the installer (afterwrd __VERSION__)</summary>
-          <textarea id="installer" readonly spellcheck="false">__INSTALLER_HTML__</textarea>
-        </details>
-      </details>
-    </details>
+    <p class="meta">Then give your name, and make yourself your site's owner with a passkey (your face, fingerprint or
+    device PIN; no password). Last, your site asks to keep itself up to date and let friends' sites check it, after a page
+    that says what those allow. It all works on a phone.</p>
   </li>
   <li class="optional">
     <h2>Bring your Facebook years <span class="meta">(optional, any time)</span></h2>
@@ -135,9 +96,8 @@ talks to, how signing in and friends work, and how to check all of it in the pub
       shared until you approve, and you can check the site address first.</li>
     <li><b>Photo locations are removed</b> from photos you post, and left out of a Facebook import unless you choose to
       include them: they can show where you live.</li>
-    <li><b>Keep it up to date</b> from the <b>Update</b> page (marked when there's a new version), so security fixes
-      reach your site. Home says so when an update fixes a security problem. To hear about every release, follow the
-      <a href="__REPO_PAGE__/releases.atom">releases feed</a> or <b>Watch</b> the repository on GitHub (Custom → Releases).</li>
+    <li><b>Keep it up to date.</b> Allow automatic updates at the end of setup (or later, on the <b>Update</b> page), so
+      security fixes reach your site.</li>
     <li><b>Watch for new devices.</b> When a passkey is added, Home on your other devices says so for two weeks. If it
       wasn't you, remove it in <b>Your devices</b>.</li>
   </ul>
@@ -145,25 +105,12 @@ talks to, how signing in and friends work, and how to check all of it in the pub
 
 <footer>
   <p>The installer downloads afterwrd __VERSION__ from its <a href="__RELEASE_PAGE__">published release</a> and checks every file
-  against the fingerprint <code>__MANIFEST_SHORT__…</code> before installing anything. Connecting uses Cloudflare's own
-  sign-in for apps, for an hour at a time; what you've allowed is under My Profile → Connected Applications. <a href="__REPO_PAGE__">Source code</a>.</p>
+  against the fingerprint <code>__MANIFEST_SHORT__…</code> before installing anything. Installing uses Cloudflare's own
+  sign-in for apps, for an hour; automatic updates and friends' checks last until you turn them off. What you've allowed
+  is under My Profile → Connected Applications in Cloudflare. <a href="__REPO_PAGE__">Source code</a>.</p>
   <p>afterwrd isn't affiliated with or endorsed by Meta. It only reads the "Download your information" file Facebook gives you.
   Facebook and Meta are trademarks of Meta Platforms, Inc.</p>
 </footer>
 </main>
-<script>
-  document.getElementById("copy").addEventListener("click", async (e) => {
-    const text = document.getElementById("installer").value;
-    try {
-      await navigator.clipboard.writeText(text);
-      e.target.textContent = "Copied: now paste it into your Worker";
-    } catch {
-      const box = document.getElementById("installer");
-      box.closest("details").open = true;
-      box.select();
-      e.target.textContent = "Press ⌘C or Ctrl+C to copy";
-    }
-  });
-</script>
 </body>
 </html>

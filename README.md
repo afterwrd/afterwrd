@@ -73,8 +73,8 @@ it's public (see [SECURITY.md](SECURITY.md)).
 connects to your Cloudflare account (you press *Allow* on Cloudflare's page; it lasts an hour and nothing is kept),
 asks your name (and makes your address from it, `afterwrd.<your-name>.workers.dev`, if the account hasn't one yet), puts afterwrd there, and
 sends you straight to your new site to make yourself its owner. It runs in the
-maintainer's Cloudflare account, so it's one more thing to trust: if you'd rather not, the install page also offers
-Cloudflare's own Deploy page, which puts the installer in your account instead. By hand, the steps in full:
+maintainer's Cloudflare account, so it's one more thing to trust: if you'd rather not, put the installer in your own
+account and run it there. By hand, the steps in full:
 
 You need a free Cloudflare account and a few minutes, on a phone or a computer. Bringing your Facebook years is optional, and
 can be done any time.
@@ -88,9 +88,8 @@ can be done any time.
    like `blue-mud-43e4`) with `afterwrd`, or whatever you like: it becomes your address,
    `afterwrd.<your-name>.workers.dev`. Leave *Protect with Cloudflare Access* off (afterwrd has its own
    sign-in) and press *Deploy*. The first time, Cloudflare asks you to choose `<your-name>`.
-3. **Paste in the installer.** Press *Copy installer* on the [install page](https://afterwrd.app/)
-   (or download `installer.js` from the [latest release](https://github.com/afterwrd/afterwrd/releases/latest) and
-   copy all of it), then in the Worker press *Edit code*, select everything there, paste over it and press *Deploy*.
+3. **Paste in the installer.** Download `installer.js` from the [latest release](https://github.com/afterwrd/afterwrd/releases/latest)
+   and copy all of it, then in the Worker press *Edit code*, select everything there, paste over it and press *Deploy*.
 4. **Run it.** Open your Worker's address. Choose your site's address, press **Connect Cloudflare** and, on
    Cloudflare's page, **Allow**: that lets the installer make your database and upload afterwrd, for an hour, and
    nothing is kept afterwards. (If connecting doesn't work, the installer can use an API token you make instead.)

@@ -156,17 +156,22 @@ export function donePage(finishPath, { carryOn = null } = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <link rel="icon" href="data:,">
-<title>Connecting to Cloudflare</title>
+<title>One moment · afterwrd</title>
 <style>
-  body { margin: 0; padding: 24px; background: #16201b; color: #ede6da; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 480px; margin: 48px auto; }
+  /* The same card as afterwrd.app's Connect page, which comes just before: passing through, it reads as one page. */
+  body { margin: 0; padding: 16px; background: #16201b; color: #ede6da; font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 480px; margin: 48px auto; background: #1f2b25; border-radius: 24px; padding: 28px; }
+  .brand { display: flex; align-items: center; font: 900 1.35rem/1 ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif; margin: 0 0 18px; letter-spacing: -0.02em; }
+  .brand .o { width: 0.82em; height: 0.82em; color: #ff8a3d; margin: 0 0.02em; }
+  p { margin: 8px 0; }
   a { color: #ffab73; }
   #error:empty { display: none; }
 </style>
 </head>
 <body>
 <main>
-<p id="status">Finishing connecting to Cloudflare…</p>
+<p class="brand" aria-label="afterwrd">afterw<svg class="o" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</p>
+<p id="status">One moment…</p>
 <p id="error" role="alert"></p>
 <p id="carry-on" hidden><a href="${carryOn ?? "/"}">Carry on to your site</a>. You can turn this on later on its Update page.</p>
 </main>

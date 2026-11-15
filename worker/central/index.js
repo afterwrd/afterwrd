@@ -372,8 +372,7 @@ function page(connected, go, error) {
 </section>
 
 <p class="meta foot">This installer is part of afterwrd and its code is public:
-<a href="https://github.com/${REPO}">github.com/${REPO}</a>. Prefer not to use it? <a href="https://afterwrd.app/#by-hand">Install
-with Cloudflare's own Deploy page instead</a>. <a href="https://afterwrd.app/how-it-works/">How it works</a>.</p>
+<a href="https://github.com/${REPO}">github.com/${REPO}</a>. <a href="https://afterwrd.app/how-it-works/">How it works</a>.</p>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);

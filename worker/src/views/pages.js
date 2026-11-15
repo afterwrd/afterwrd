@@ -31,6 +31,7 @@ const STYLE = `
   button:disabled { opacity: 0.6; cursor: default; }
   :focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; }
   #error { color: var(--danger); margin: 12px 0 0; min-height: 1.5em; }
+  .small { font-size: 0.9rem; }
   input { width: 100%; font: inherit; min-height: 3rem; padding: 11px 18px; border: 1px solid var(--border); border-radius: 999px;
           background: var(--sunken); color: var(--text); }
 `;
@@ -160,9 +161,8 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
 
 /** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */
 export function setupDonePage() {
-  return page("Your site is ready", `
-<h1>Your site is ready</h1>
-<p id="status">Taking you to it…</p>`, `
+  return page("One moment", `
+<p id="status">One moment…</p>`, `
   afterPasskey(false);`);
 }
 
@@ -173,6 +173,8 @@ export function setupPage() {
 <p id="name-box"><input id="name" placeholder="Your name" autocomplete="name" maxlength="100"></p>
 <p>Next, make yourself its owner with a passkey on this device: your face, fingerprint or device PIN, and no
 password. Then you can post, add photos and invite friends.</p>
+<p id="hour-over" class="small" hidden>The one-hour permission you gave the installer runs out by itself, and it kept
+nothing.</p>
 <button id="go">Continue</button>
 <p id="error" role="alert"></p>`, `
   const code = new URLSearchParams(location.search).get("code");
@@ -194,6 +196,7 @@ password. Then you can post, add photos and invite friends.</p>
   }
   // Sent by the installer (which always brings the name): after the passkey, on to the site's lasting permissions.
   const fromInstaller = new URLSearchParams(location.hash.slice(1)).has("name");
+  if (fromInstaller) document.getElementById("hour-over").hidden = false;
   // Off the address bar and out of history, so an abandoned setup doesn't leave the code lying around.
   history.replaceState(null, "", "/_auth/setup");
   run(document.getElementById("go"), async () => {

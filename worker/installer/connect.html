@@ -41,7 +41,7 @@
 <body>
 <main>
 <p class="brand" aria-label="afterwrd">afterw<svg class="o" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</p>
-<p id="status">Connecting to Cloudflare…</p>
+<p id="status">One moment…</p>
 <section id="ask" hidden>
   <p>Connect this afterwrd site to Cloudflare?</p>
   <p id="host"></p>
@@ -64,6 +64,7 @@
 <section id="ask-both" hidden>
   <p><b>Two permissions from Cloudflare, so your site looks after itself</b></p>
   <p id="both-host"></p>
+  <p class="meta">Unlike the one-hour permission that installed afterwrd, these last until you turn them off.</p>
   <table class="grants">
     <thead><tr><th></th><th>What it can do</th><th>How long</th></tr></thead>
     <tbody>
@@ -173,7 +174,7 @@
         let shown = null;
         try { shown = JSON.parse(sessionStorage.getItem(BOTH_KEY) || "null"); sessionStorage.removeItem(BOTH_KEY); } catch {}
         if (site.pathname === "/_cloudflare/checks-done" && shown?.host === site.host && Date.now() - shown.at < BOTH_FOR_MS) {
-          status.textContent = "Next, friends' checks…";
+          status.textContent = "One moment…";
           toCloudflare();
         } else {
           // The one place the person can see which site is being connected, so it asks before going on.
@@ -209,7 +210,7 @@
     } else if (params.has("error")) {
       location.replace(site.href + "#error=" + encodeURIComponent(params.get("error")));
     } else {
-      status.textContent = "Back to " + site.host + "…";
+      status.textContent = "One moment…";
       const back = new URLSearchParams({ code: params.get("code"), state: started.state });
       location.replace(site.href + "#" + back.toString());
     }
