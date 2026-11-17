@@ -1,6 +1,7 @@
 // Passkey sign-in, for the owner only. Your devices (or setup, or scripts/owner.mjs) makes a one-time link; opening
 // it registers a passkey on that device, which then signs in. Nothing here
 // needs a password or email.
+import { selfHosted, serverCommand } from "./hosting.js";
 import {
   generateAuthenticationOptions,
   generateRegistrationOptions,
@@ -38,7 +39,9 @@ export async function handleAuth(request, env, url) {
     ? await request.json().catch(() => ({}))
     : {};
   try {
-    if (route === "GET /_auth/login") return html(loginPage(safeNext(url.searchParams.get("next"), url)));
+    if (route === "GET /_auth/login") {
+      return html(loginPage(safeNext(url.searchParams.get("next"), url), { recoverCommand: selfHosted(env) ? serverCommand("recover") : null }));
+    }
     // Signing out is a form post, so another site can't sign people out by linking here.
     if (route === "GET /_auth/logout") return html(signOutPage());
     if (route === "POST /_auth/logout") return await logout(request, env);
@@ -176,7 +179,7 @@ async function loginVerify(request, env, url, { response }) {
   // whoever has a lost device can't get back in and cancel it. (Once it's made, they're removed.)
   const pending = await recovering(env.DB);
   if (pending && stored.created_at <= pending.at) {
-    return json({ error: "Someone is getting back into your site through Cloudflare, so the passkeys from before can't sign in for the next hour." }, 403);
+    return json({ error: "Someone is getting back into your site without a passkey, so the passkeys from before can't sign in for the next hour." }, 403);
   }
 
   const { verified, authenticationInfo } = await verifyAuthenticationResponse({
@@ -294,7 +297,7 @@ async function startSession(env, userId, response, credentialId) {
       .bind(await sha256(token), userId, now() + SESSION_SECONDS, credentialId, now()),
   ]);
   if (!made.meta.changes) {
-    return json({ error: "Someone is getting back into your site through Cloudflare, so the passkeys from before can't sign in for the next hour." }, 403);
+    return json({ error: "Someone is getting back into your site without a passkey, so the passkeys from before can't sign in for the next hour." }, 403);
   }
   response.headers.append("Set-Cookie",
     `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${SESSION_SECONDS}; HttpOnly; Secure; SameSite=Lax`);

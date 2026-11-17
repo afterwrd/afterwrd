@@ -120,13 +120,20 @@ ${script && `<script>${CLIENT}\n${script}</script>`}
 </html>`;
 }
 
-export function loginPage(next) {
+/**
+ * Signing in. Lost every device: on Cloudflare, back in through the account the site is in (recover.js); on a
+ * self-hosted site (hosting.js), a link from a command on the server.
+ */
+export function loginPage(next, { recoverCommand = null } = {}) {
   return page("Sign in", `
 <h1>Sign in</h1>
 <p>This is a private afterwrd site. Sign in with your passkey.</p>
 <button id="go">Sign in with a passkey</button>
 <p id="error" role="alert"></p>
-<p class="small"><a href="/_auth/recover">Lost your device?</a></p>`, `
+${recoverCommand ? `<details class="small" id="recover"><summary>Lost your device?</summary>
+<p>On your server, run <code>${escape(recoverCommand)}</code> and open the link it gives you on this phone or computer.
+Every device is signed out, and you make a new passkey here.</p></details>`
+  : `<p class="small"><a href="/_auth/recover">Lost your device?</a></p>`}`, `
   // Words kept on this device while they were being written (ui.js) go once it's signed out, however that happened:
   // Sign out here, from another device, or the session running out. This may be a shared phone or computer.
   try { Object.keys(localStorage).filter((k) => k.startsWith("afterwrd-draft:")).forEach((k) => localStorage.removeItem(k)); } catch {}

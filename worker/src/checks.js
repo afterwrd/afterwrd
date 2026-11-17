@@ -38,6 +38,7 @@ import { callSite, ownerName, siteOrigin } from "./peers.js";
 import { knownLatest, newer } from "./update.js";
 import { laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
 import { signedList } from "./signing.js";
+import { onCloudflare } from "./hosting.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 
 const REPO = pkg.afterwrd.releases;
@@ -143,10 +144,13 @@ export async function makeCheckLink(env, origin, { connection = null, site: past
     if (!friend) throw new Refusal("That isn't one of your friends.", 404);
     const asked = await env.DB.prepare("SELECT 1 FROM check_requests WHERE connection_id = ?").bind(friend.id).first();
     if (!asked) throw new Refusal(`${friend.name} hasn't asked for a check. They can, from their site's Update page.`, 409);
+    if (!onCloudflare(friend.origin, env)) throw new Refusal(SELF_HOSTED, 409);
     site = friend.origin;
   } else if (typeof pasted === "string" && pasted.trim()) {
     site = siteIn(pasted, env, origin);
+    if (!site && elsewhere(pasted, env)) throw new Refusal(SELF_HOSTED, 400);
     if (!site) throw new Refusal("Couldn't find an afterwrd site's address (something.their-name.workers.dev) in that.", 400);
+    if (!onCloudflare(site, env)) throw new Refusal(SELF_HOSTED, 400);
     friend = await env.DB.prepare("SELECT id FROM connections WHERE origin = ? AND approved_at IS NOT NULL").bind(site).first();
   }
   const token = randomToken();
@@ -200,6 +204,16 @@ export async function handleCheck(request, env, url) {
   }
   if (request.method === "POST" && match[2]) return start(env, url, check, token, await request.json().catch(() => ({})));
   return new Response("Not found", { status: 404 });
+}
+
+const SELF_HOSTED = "That site isn't on Cloudflare, so it can't be checked: a self-hosted afterwrd site runs on its owner's own "
+  + "server, and nothing outside it can say what's running there.";
+
+/** Whether `text` is just a web address that isn't on Cloudflare (hosting.js): a self-hosted site, perhaps. */
+function elsewhere(text, env) {
+  const typed = String(text ?? "").trim();
+  const origin = siteOrigin(/^https?:\/\//i.test(typed) ? typed : `https://${typed}`, env);
+  return Boolean(origin && !onCloudflare(origin, env));
 }
 
 /**
@@ -602,6 +616,7 @@ export async function askForCheck(env, connection) {
   const friend = Number.isInteger(connection) && await env.DB.prepare(`SELECT name, origin, their_key FROM connections WHERE id = ?
     AND connected_at IS NOT NULL AND approved_at IS NOT NULL AND their_key IS NOT NULL`).bind(connection).first();
   if (!friend) throw new Refusal("That isn't one of your friends.", 404);
+  if (!onCloudflare(friend.origin, env)) throw new Refusal(`${friend.name}'s site is self-hosted, so it can't check sites.`, 409);
   try {
     await callSite(friend.origin, "/_peer/check-request", { key: friend.their_key, body: { type: "CheckRequest" } });
   } catch (error) {

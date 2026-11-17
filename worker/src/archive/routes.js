@@ -22,6 +22,7 @@ import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
 import { autoState } from "../auto.js";
 import { checkGrant, friendCheckAlerts, lastFailure, lookAfterReminder } from "../friendchecks.js";
+import { onCloudflare, selfHosted, serverCommand } from "../hosting.js";
 import { now, pageData, withoutKeys } from "../util.js";
 import { safeNext } from "../auth.js";
 import { fmtDate, fmtMonth } from "../views/format.js";
@@ -610,6 +611,11 @@ async function home(ctx, params) {
     all(db, `${INTRODUCTIONS_SQL} LIMIT 3`, [now() - INTRODUCTION_DAYS * 86400]),
     recoveredHere(db, ctx.user), // got back in through Cloudflare, on this device (recover.js)
   ]);
+  // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
+  if (selfHosted(ctx.env)) {
+    return { own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions };
+  }
   return {
     own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered,
@@ -662,6 +668,8 @@ async function fromFriend(ctx, id, load) {
   const connection = await connectionById(ctx.db, id);
   if (!connection) return null;
   connection.facebook = await facebookSelf(ctx.db, connection);
+  // A self-hosted friend's site can't be checked (hosting.js): their page says so.
+  connection.selfHosted = !onCloudflare(connection.origin, ctx.env);
   try {
     const data = await load(connection);
     await noteAnswer(ctx.db, connection).run();
@@ -879,8 +887,10 @@ async function eventsIndex(ctx, params) {
   };
 }
 
-/** Starting a group: its own Worker, made in the owner's Cloudflare account (groupsites.js). */
+/** Starting a group: its own Worker, made in the owner's Cloudflare account (groupsites.js), or on their own server. */
 async function groupNew(ctx) {
+  // Self-hosted (hosting.js): a group's site made on the server by a command, then claimed here.
+  if (selfHosted(ctx.env)) return { selfHosted: true, command: serverCommand("new-group"), maxPhotos: MAX_GROUP_PHOTOS };
   let address = null;
   try {
     address = whereAmI(ctx.url);
@@ -978,6 +988,8 @@ async function groupEventFile(ctx, params, id, postId) {
 async function groupMembers(ctx, params, id) {
   return fromGroup(ctx, id, async (g) => ({
     ...await groups.loadMembers(ctx.env, g), max: MAX_MEMBERS, connected: ctx.connected,
+    // Self-hosted, its data stays on the server until a command removes it (hosting.js).
+    deleteCommand: selfHosted(ctx.env) && g.role === "owner" ? serverCommand(`delete-group ${new URL(g.origin).host}`) : null,
     // Where the owner stands with each member, to offer asking them to be friends (connect.js).
     friends: await all(ctx.db, "SELECT id, origin, approved_at, reached_at, invited_as FROM connections WHERE connected_at IS NOT NULL"),
   }));

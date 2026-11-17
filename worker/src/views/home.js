@@ -77,7 +77,7 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
       <a id="look-after-go" href="${lookAfter.auto ? (lookAfter.checks ? "/_cloudflare/auto-start?then=checks" : "/_cloudflare/auto-start") : "/_cloudflare/checks-start"}">Set it up</a>
       <button class="link">Not now</button></form>`}
     ${recovered && html`<form class="notice alert" id="recovered" method="post" action="/_admin/devices/recovered-seen" data-region="" data-inplace="remove">
-      You got back into your site through Cloudflare on ${fmtDate(recovered)}. Every other device was signed out and its
+      You got back into your site on ${fmtDate(recovered)}, without a passkey. Every other device was signed out and its
       passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in
       <a href="/_admin">Your devices</a>. <button class="link">Done</button></form>`}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">

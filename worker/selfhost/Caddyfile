@@ -1,0 +1,9 @@
+# Caddy gets and renews an HTTPS certificate for each address by itself. List your site's address, and each group's
+# after making it (docker compose exec afterwrd new-group walkers.example.com), then: docker compose restart caddy
+me.example.com {
+	reverse_proxy afterwrd:8080
+}
+
+# walkers.example.com {
+# 	reverse_proxy afterwrd:8080
+# }

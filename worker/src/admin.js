@@ -55,7 +55,7 @@ export async function handleAdmin(request, env, url, owner) {
   // While a recovery through Cloudflare waits for its new passkey (recover.js), a session that slipped in from before
   // it can't make a way in of its own, or cancel the recovery's link.
   if (/^\/_admin\/devices\/(link|cancel-links)$/.test(url.pathname) && await recovering(env.DB)) {
-    return json({ error: "Someone is getting back into your site through Cloudflare: finish that first." }, 409);
+    return json({ error: "Someone is getting back into your site without a passkey: finish that first." }, 409);
   }
   const action = /^\/_admin\/devices\/(link|cancel-links|sign-out|delete-passkey|seen|recovered-seen)$/.exec(url.pathname)?.[1];
   try {

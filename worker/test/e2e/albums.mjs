@@ -1,10 +1,8 @@
 // Albums, photos and profile pictures on a fresh site (SETUP_CODE=local-test-setup-code):
 //   node albums.mjs <fixtures dir>
-import { execFileSync } from "node:child_process";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled } from "./helpers.mjs";
-const WORKER = fileURLToPath(new URL("../../", import.meta.url));
+import { settled, siteSql } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -160,8 +158,7 @@ check("photo tools need the owner", ![200, 201].includes((await fetch(`${BASE}/_
 await owner.goto(BASE + photoHrefs[2]);
 const third = await owner.$eval(".stage img", (i) => i.getAttribute("src").split("/files/")[1]);
 await Promise.all([owner.waitForNavigation(), owner.click(".photo-tools button.danger")]);
-const stillUsed = JSON.parse(execFileSync("./node_modules/.bin/wrangler", ["d1", "execute", "afterwrd", "--local", "--json", "--command",
-  `SELECT COUNT(*) AS n FROM media WHERE hash = '${third}'`], { cwd: WORKER, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))[0].results[0].n;
+const stillUsed = siteSql(null, `SELECT COUNT(*) AS n FROM media WHERE hash = '${third}'`)[0].n;
 check("deleting a photo removes it, and its file unless another photo uses it", (await tiles()) === 2
   && (await fileStatus(third)) === (stillUsed ? 200 : 404), `${stillUsed} other use(s)`);
 await owner.goto(BASE + albumPath);
