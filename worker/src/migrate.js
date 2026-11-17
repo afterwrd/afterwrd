@@ -60,6 +60,8 @@ const MIGRATIONS = [
   ["0021_mentions.sql", m0021],
 ];
 const VERSION = pkg.version;
+/** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */
+export const DATABASE = MIGRATIONS.at(-1)[0];
 // A migration that failed, kept so the version left running can say so (the Update page): {version, migration, error, at}.
 export const PROBLEM_KEY = "update_problem";
 

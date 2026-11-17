@@ -23,6 +23,10 @@ It's yours to keep, move or read with other tools.</p>
 the open format the fediverse uses, and everything has a permanent address. So when two friends both download,
 a comment one of you left on the other's post has the same address in both, and your conversations can be put
 back together. A README in the zip explains the files.</p>
+<p class="meta">Moving to another afterwrd site (one on your own server, say)? Download everything here, with photos and
+videos, then choose the zip on the new site's Import page, under Bring everything over.</p>
+<p class="meta"><strong>Keep the download as safe as your site.</strong> It's all of your site in one file: anyone who gets
+it could read everything, or set up a copy of your site under another address.</p>
 
 <form class="card" id="export">
   <label class="check"><input type="checkbox" name="media" checked>

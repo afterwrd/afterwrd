@@ -3,13 +3,17 @@
 // side only hands over rows, a page at a time:
 //   GET /_admin/export                         the page
 //   GET /_admin/export/rows?table=<t>&after=<n>  up to 1000 rows of one table, after rowid n
+//   GET /_admin/export/about                   which site and database version the download comes from
 // Keys and anything to do with signing in never leave: connections give only who and where, users only names.
+// The rows also go into the zip as they are (site/), so another afterwrd site can take them in (move.js).
+import pkg from "../package.json";
+import { DATABASE } from "./migrate.js";
 import { html, json, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
 import { exportPage } from "./views/export.js";
 
 const PAGE = 1000;
-const TABLES = {
+export const TABLES = {
   // The rest of settings are the site's own keys.
   settings: { columns: "key, value", where: "key IN ('sections', 'profile_hash', 'cover_hash')" },
   // Posts, photos and albums, made on afterwrd and from the Facebook download (`source` says which).
@@ -48,6 +52,9 @@ const TABLES = {
 export async function handleExport(request, env, url, owner) {
   if (request.method !== "GET") return new Response("Not found", { status: 404 });
   if (url.pathname === "/_admin/export") return html(exportPage(pageData(env, { me: await headerMe(env.DB, owner) })));
+  if (url.pathname === "/_admin/export/about") {
+    return json({ format: 1, site: url.origin, version: pkg.version, database: DATABASE, tables: Object.keys(TABLES) });
+  }
   if (url.pathname === "/_admin/export/rows") {
     const table = url.searchParams.get("table");
     if (!Object.hasOwn(TABLES, table)) return json({ error: "Unknown table." }, 400);

@@ -29,6 +29,18 @@ You need:
 
 That's it. Bringing your Facebook years, friends and everything else work as on any afterwrd site.
 
+## Moving from a site on Cloudflare
+
+Your posts, photos, comments, polls, events and Facebook years can come with you:
+
+1. Update your old site, and run the same version here (`docker compose pull && docker compose up -d`).
+2. On your old site, *Download everything*, with *Include photos and videos* ticked.
+3. On this one, before you post or import anything: *Import* → *Bring everything over*, and choose that zip.
+
+Friends and groups don't come with it: the keys that let their sites know it's you never leave your old site. Add your
+friends again from *Friends*, and ask your groups to invite your new address. Your old site keeps working until you
+delete it.
+
 ## Day to day
 
 | | |

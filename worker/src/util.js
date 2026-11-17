@@ -5,7 +5,8 @@ export const now = () => Math.floor(Date.now() / 1000);
 /** A reply to another site: its JSON body and HTTP status, for json(). @typedef {[object, number]} Answer */
 
 export function json(data, status = 200) {
-  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
+  // Never kept by a cache in between (a self-hosted site may have a proxy in front): much of it is the owner's alone.
+  return new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
 
 export function html(body, status = 200) {

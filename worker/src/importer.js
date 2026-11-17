@@ -5,12 +5,14 @@
 //   POST /_admin/import/missing    {hashes} -> which files aren't stored yet
 //   PUT  /_admin/import/files/<sha256>   one photo, video or thumbnail
 //   POST /_admin/import/finish     {sections}: swap every _next table in at once, then delete unused files
+// /_admin/import/move is the other kind of import: a whole afterwrd site from its Download everything (move.js).
 // Visitors keep seeing the previous import until finish swaps the tables in one transaction. Posts, photos and albums
 // made on afterwrd share their tables with Facebook's (schema.js `merged`) and are never touched by an import.
 import { POST_KEY_RE } from "../public/static/activity.js";
 import { ARCHIVE, createTable, MAX_FILE, SERVABLE_TYPES } from "../public/static/import/schema.js";
 import { SECTIONS } from "../public/static/import/select.js";
 import { importPage } from "./views/import.js";
+import { handleMove } from "./move.js";
 import { HASH_RE, mediaStore } from "./media.js";
 import { html, json, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
@@ -22,6 +24,7 @@ const SHARDS = [..."0123456789abcdef"];
 
 export async function handleImport(request, env, url, owner) {
   const path = url.pathname.slice("/_admin/import".length);
+  if (path === "/move" || path.startsWith("/move/")) return handleMove(request, env, url, owner);
   if (request.method === "GET" && path === "") return html(importPage(pageData(env, { owner: owner.name, me: await headerMe(env.DB, owner) })));
 
   const file = /^\/files\/([0-9a-f]{64})$/.exec(path);
@@ -61,11 +64,17 @@ async function rows(env, { table, rows: list }) {
     }
     return `(${columns.map((c) => literal(checked(table, c, spec.columns[c], row[c]))).join(", ")})`;
   });
+  await env.DB.batch(insertStatements(`${table}_next`, columns, tuples).map((s) => env.DB.prepare(s)));
+  return json({ ok: true });
+}
+
+/** INSERTs of these value tuples ("(1, 'a')"), as few as D1's statement size allows; also used by move.js. */
+export function insertStatements(into, columns, tuples) {
   const statements = [];
   let batch = [];
   let chars = 0;
   const flush = () => {
-    if (batch.length) statements.push(`INSERT INTO ${table}_next (${columns.join(", ")}) VALUES ${batch.join(", ")}`);
+    if (batch.length) statements.push(`INSERT INTO ${into} (${columns.join(", ")}) VALUES ${batch.join(", ")}`);
     batch = [];
     chars = 0;
   };
@@ -76,8 +85,7 @@ async function rows(env, { table, rows: list }) {
   }
   flush();
   if (statements.length > 40) throw new Error("Too many rows in one request.");
-  await env.DB.batch(statements.map((s) => env.DB.prepare(s)));
-  return json({ ok: true });
+  return statements;
 }
 
 // Every value must suit its column, so nothing unexpected (markup in a number, a fake file address) can reach
@@ -98,7 +106,7 @@ function checked(table, column, type, value) {
   return value;
 }
 
-function literal(value) {
+export function literal(value) {
   if (value === null || value === undefined) return "NULL";
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "string") return `'${value.replaceAll("'", "''")}'`;

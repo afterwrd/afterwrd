@@ -51,6 +51,7 @@ ${FAVICON}
 ${ownerHeader("import", me)}
 <main>
 <h1>Import your Facebook archive</h1>
+<p class="meta">Moving here from another afterwrd site? <a href="/_admin/import/move">Bring everything over</a> instead.</p>
 <p class="meta">Signed in as ${escape(owner)}. Choose the download Facebook gave you, in JSON format.
 Your browser reads it on this computer and uploads only the sections you tick below. Importing replaces
 what you imported before (never what you've posted on afterwrd); the old version stays until the new one is complete.</p>
@@ -92,6 +93,71 @@ what you imported before (never what you've posted on afterwrd); the old version
 </main>
 <script src="/static/vendor/zip-2.24.0.min.js"></script>
 <script type="module" src="${asset("/static/import/main.js")}"></script>
+</body>
+</html>`;
+}
+
+// Moving a whole afterwrd site here (src/move.js): the work happens in the browser (public/static/import/move.js).
+export function movePage({ me = null, site }) {
+  return `<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Move here · afterwrd</title>
+<link rel="stylesheet" href="${asset("/static/style.css")}">
+${FAVICON}
+<style>
+  .picker { display: block; background: var(--surface); border: 1px dashed var(--border); border-radius: 18px;
+    padding: 0.9rem 1rem; margin: 1rem 0; cursor: pointer; }
+  .picker:hover { border-color: var(--accent); }
+  .picker strong { display: block; }
+  .picker input { margin-top: 0.5rem; max-width: 100%; }
+  #go { font: inherit; font-weight: 600; padding: 0.6rem 1.2rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); cursor: pointer; }
+  #go:disabled { opacity: 0.6; cursor: default; }
+  #progress[hidden] { display: none; }
+  #progress progress { width: 100%; height: 0.7rem; margin: 0.5rem 0; }
+  #steps { padding-left: 1.2rem; margin: 0.5rem 0; }
+  #steps li { margin: 0.2rem 0; }
+  #steps li.done { color: var(--muted); }
+  #error { color: var(--danger); }
+  #error:empty { display: none; }
+</style>
+</head>
+<body>
+${ownerHeader("import", me)}
+<main>
+<h1>Move here from another afterwrd site</h1>
+<p>Bring everything from your old site to this one (${escape(new URL(site).host)}): your posts, photos and videos,
+albums, comments (yours and friends'), polls, events, and your Facebook archive.</p>
+<ol>
+  <li>Make sure both sites run the same version of afterwrd: update whichever is older.</li>
+  <li>On your old site, open <strong>Download everything</strong>, leave <strong>Include photos and videos</strong> ticked,
+    and download.</li>
+  <li>Choose that zip file here.</li>
+</ol>
+<p class="meta">Only a new site can take a move: one with nothing posted, imported or connected yet.</p>
+<p class="meta"><strong>Friends and groups don't come with it.</strong> The keys that let friends' sites and groups know
+it's you never leave your old site, so your download hasn't got them. Once you've moved, add your friends again from
+Friends, and ask your groups to invite this site. Your old site keeps working until you delete it.</p>
+<p class="meta">Your events come, but not who was invited to them, so only you see them until you invite people again.</p>
+<p class="meta"><strong>Only move your own download.</strong> Whatever is in the zip becomes this site's, comments
+in friends' names included, so a file someone sent you could put words in other people's mouths.</p>
+
+<label class="picker"><strong>Your Download everything zip</strong>
+  <input type="file" id="zip" accept=".zip,application/zip"></label>
+
+<button id="go" disabled>Move everything here</button>
+<p id="error" role="alert"></p>
+
+<section id="progress" hidden>
+  <ol id="steps"></ol>
+  <progress id="bar" max="1" value="0"></progress>
+  <p id="status" class="meta"></p>
+</section>
+</main>
+<script src="/static/vendor/zip-2.24.0.min.js"></script>
+<script type="module" src="${asset("/static/import/move.js")}"></script>
 </body>
 </html>`;
 }

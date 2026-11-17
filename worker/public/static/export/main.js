@@ -1,6 +1,7 @@
 // Download everything (src/export.js): reads every table a page at a time, turns it into ActivityStreams
 // documents (../activity.js), and writes them and every photo and video into a zip, straight to a file where
-// the browser allows it (Chrome, Edge) and in memory otherwise.
+// the browser allows it (Chrome, Edge) and in memory otherwise. The rows themselves go in too (site/), with the
+// thumbnails, so another afterwrd site can take the whole site in (src/move.js, ../import/move.js).
 /* global zip */
 import {
   actorId, commentAuthor, commentId, commentNote, CONTEXT, editedFields, groupId, groupPostId, iso, mediaObject, postId, targetId, tidy,
@@ -36,6 +37,8 @@ async function rows(table) {
 
 const unique = (media) => [...new Map(media.filter((m) => m.hash).map((m) => [m.hash, m])).values()];
 const fileFor = (m) => `media/${m.hash}${EXTENSIONS[m.type] ?? ""}`;
+// Thumbnails, which only a move needs: the media rows name them (thumb_hash), and the extension says their type.
+const thumbsOf = (media) => [...new Set(media.map((m) => m.thumb_hash).filter(Boolean))];
 const megabytes = (n) => `${(n / 1e6).toLocaleString("en-GB", { maximumFractionDigits: n < 1e7 ? 1 : 0 })} MB`;
 
 // Sizes for the label, and a note where the download has to fit in memory.
@@ -285,7 +288,8 @@ fediverse uses. afterwrd's own extra terms start "afterwrd:" (https://afterwrd.a
   facebook-likes.json        your likes and reactions on Facebook
   facebook-tagged.json       photos of you on Facebook (links only: Facebook doesn't include the images)
   facebook-people.json       people named in your Facebook download
-${withMedia ? "  media/                     every photo and video, named by its SHA-256 fingerprint\n" : ""}
+${withMedia ? "  media/                     every photo and video, named by its SHA-256 fingerprint\n" : ""}  site/                      the site's own rows, for moving it to another afterwrd site (Import, Bring everything over)
+
 Addresses. Everything has a permanent address on the site it belongs to:
   the site's owner     https://<site>/
   a post               https://<site>/posts/<post key>
@@ -325,6 +329,9 @@ form.addEventListener("submit", async (event) => {
   button.disabled = true;
   try {
     status.textContent = "Reading the site…";
+    const response = await fetch("/_admin/export/about");
+    if (!response.ok) throw new Error(`Couldn't read the site (it said ${response.status}).`);
+    const about = await response.json();
     const t = {};
     for (const table of TABLES) t[table] = await rows(table);
 
@@ -334,6 +341,11 @@ form.addEventListener("submit", async (event) => {
     for (const [file, doc] of Object.entries(documents(t))) {
       await writer.add(`${name}/${file}`, new zip.TextReader(JSON.stringify(tidy(doc), null, 2)));
     }
+    await writer.add(`${name}/site/about.json`, new zip.TextReader(JSON.stringify({ ...about, media: withMedia, made: new Date().toISOString() }, null, 2)));
+    for (const table of about.tables) {
+      const list = t[table] ?? await rows(table);
+      await writer.add(`${name}/site/${table}.json`, new zip.TextReader(JSON.stringify(list.map(({ _rowid, ...row }) => row))));
+    }
     if (withMedia) {
       const files = unique(t.media);
       for (const [i, m] of files.entries()) {
@@ -341,6 +353,14 @@ form.addEventListener("submit", async (event) => {
         const response = await fetch(`/files/${m.hash}`);
         if (!response.ok) throw new Error(`Couldn't fetch a photo (the site said ${response.status}).`);
         await writer.add(`${name}/${fileFor(m)}`, new zip.BlobReader(await response.blob()), { level: 0 });
+      }
+      const thumbs = thumbsOf(t.media);
+      for (const [i, hash] of thumbs.entries()) {
+        status.textContent = `Adding thumbnails: ${i + 1} of ${thumbs.length}…`;
+        const response = await fetch(`/files/${hash}`);
+        if (!response.ok) throw new Error(`Couldn't fetch a thumbnail (the site said ${response.status}).`);
+        const blob = await response.blob();
+        await writer.add(`${name}/site/thumbs/${hash}${EXTENSIONS[blob.type] ?? ""}`, new zip.BlobReader(blob), { level: 0 });
       }
     }
     status.textContent = "Finishing…";

@@ -2,7 +2,7 @@
 # afterwrd's end-to-end tests: real local copies of the site (wrangler dev) driven by Chrome, with a virtual
 # passkey authenticator. See README.md.
 #   npm run test:e2e                     everything except upgrade
-#   npm run test:e2e -- <suite>…         some: core fresh albums update feed groups selfhosted checks recover central forged
+#   npm run test:e2e -- <suite>…         some: core fresh albums update feed move groups selfhosted checks recover central forged
 #   npm run test:e2e -- upgrade v0.17.0  an older release's site (0.17.0 or later), upgraded in place to this code
 set -uo pipefail
 
@@ -108,6 +108,7 @@ three_sites() { # $1: the suite, run against three sites, each with its own data
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 2
 }
 run_feed() { three_sites feed.mjs; }
+run_move() { three_sites move.mjs; } # a whole site moved to a new one (src/move.js)
 run_selfhosted() { # a self-hosted site (A, HOSTING=self: src/hosting.js) next to one on Cloudflare (B), and a group's site
   EXTRA_A="--var HOSTING:self" EXTRA_B="--var TEST_SELF_HOSTED:http://localhost:8787" three_sites selfhosted.mjs group
 }
@@ -189,10 +190,10 @@ run_upgrade() { # $1: an older release tag
   git -C "$WORKER" worktree remove --force "$OUT/old"
 }
 
-if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed groups polls mentions events selfhosted checks recover central forged; fi
+if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions events selfhosted checks recover central forged; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    core|fresh|albums|update|auto|friendchecks|feed|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|events|selfhosted) "run_$1" ;;
+    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|events|selfhosted) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;
   esac
