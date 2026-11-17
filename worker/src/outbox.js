@@ -8,8 +8,16 @@
 // Notes hold the connection or member, not its key: the key is looked up in D1 when sending, so a disconnect (or a
 // member leaving) stops them at once. The same alarm also fetches friends' newest posts again for Home, with whatever
 // calls the notes leave (feed.js refreshCopies).
+//
+// One more object of this class, named "site", holds the site's whole database and answers its requests, right next
+// to the data (docs/site-object-plan.md). The other objects reach that database through it (sqlite.js remote).
 import { DurableObject } from "cloudflare:workers";
+import { handle, HEADERS } from "./app.js";
 import { refreshCopies } from "./feed.js";
+import { ensureSchema } from "./migrate.js";
+import { copyOnce } from "./sitecopy.js";
+import { local, oldDatabase, remote, runStatements, ZONE_HEADER } from "./sqlite.js";
+import { messagePage } from "./views/pages.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
@@ -30,10 +38,30 @@ const KINDS = {
 // waiting in them goes, unsent.
 const GONE = ["messages", "group_messages", "member_messages"];
 
+/** While the site's database is being moved into its object (sitecopy.js): a page or a JSON error, and nothing done. */
+function moving(request) {
+  const message = "This site is moving to faster storage. Try again in a minute.";
+  const headers = { ...HEADERS, "Retry-After": "60", "Cache-Control": "no-store" };
+  if ((request.headers.get("Accept") ?? "").includes("text/html")) {
+    return new Response(messagePage(message, { href: "/", label: "Try again" }), {
+      status: 503, headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
+  }
+  return new Response(JSON.stringify({ error: message }), { status: 503, headers: { ...headers, "Content-Type": "application/json" } });
+}
+
 export class Outbox extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    // The site's own object keeps only the site's tables (migrate.js makes them), and its env.DB is them. The database
+    // the site used before is copied in once (sitecopy.js), and kept here only for that.
+    if (ctx.id.name === "site") {
+      this.old = oldDatabase(env);
+      this.env = { ...env, DB: local(ctx.storage) };
+      return;
+    }
+    // Every other object reaches the site's database in the site's object.
+    this.env = { ...env, DB: remote(env) };
     for (const table of GONE) this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
     for (const [table, { column, more = "" }] of Object.entries(KINDS)) {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (
@@ -48,6 +76,56 @@ export class Outbox extends DurableObject {
     this.sql.exec("CREATE TABLE IF NOT EXISTS vault (name TEXT PRIMARY KEY, value TEXT NOT NULL)");
     // Friends whose newest posts are to be fetched again for Home (feed.js refreshCopies), each once however often asked.
     this.sql.exec("CREATE TABLE IF NOT EXISTS refreshes (connection_id INTEGER PRIMARY KEY, due INTEGER NOT NULL)");
+  }
+
+  /**
+   * In the "site" object: one request to the site, handed on by the Worker (index.js) and answered here with the
+   * database next to it (app.js). The visitor's time zone comes in ZONE_HEADER, which the Worker always sets.
+   */
+  async fetch(request) {
+    if (!this.isSite()) return new Response("Not found", { status: 404 });
+    if (!(await this.ready())) return moving(request);
+    const zone = request.headers.get(ZONE_HEADER) ?? "";
+    const headers = new Headers(request.headers);
+    headers.delete(ZONE_HEADER);
+    return handle(new Request(request, { headers, cf: zone ? { timezone: zone } : {} }), this.env,
+      { waitUntil: (promise) => this.ctx.waitUntil(promise) });
+  }
+
+  /** In the "site" object: statements from another object or the Worker, run on the database here (sqlite.js remote). */
+  async query(statements, together) {
+    if (!this.isSite()) throw new Error("Only the site's own object has its database.");
+    if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
+    return runStatements(this.ctx.storage, statements, together);
+  }
+
+  /** Whether this is the site's own object (the others are the outbox and the vault). */
+  isSite() {
+    return this.ctx.id.name === "site";
+  }
+
+  /**
+   * In the "site" object: whether its database is ready, having copied in the one the site used before if it hasn't
+   * yet (sitecopy.js). Everything else waits while it copies. A copy that can't finish this time says why, and the
+   * next request tries again.
+   */
+  async ready() {
+    if (!this.isSite()) return false;
+    this.copying ??= this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        await copyOnce(this.ctx.storage, this.old);
+      } catch (error) {
+        console.error("Moving the database:", error.message);
+        return false;
+      }
+      // The tables, before anything is answered (migrate.js), so no request finds them half-made. If a migration
+      // fails, the request that follows says so as it always has (app.js), rather than "moving".
+      await ensureSchema(this.env).catch(() => {});
+      return true;
+    });
+    const done = await this.copying;
+    if (!done) this.copying = null;
+    return done;
   }
 
   /** Has these friends' newest posts fetched again soon, in the background, for Home (feed.js). */

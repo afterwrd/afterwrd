@@ -38,7 +38,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null }) {
+export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false }) {
   const stream = [
     ...own.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
@@ -76,6 +76,9 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
         ${lookAfter.attempts.length === 1 ? "site has" : "sites have"} already tried to check it.`}
       <a id="look-after-go" href="${lookAfter.auto ? (lookAfter.checks ? "/_cloudflare/auto-start?then=checks" : "/_cloudflare/auto-start") : "/_cloudflare/checks-start"}">Set it up</a>
       <button class="link">Not now</button></form>`}
+    ${archiveDropped && html`<p class="notice" id="archive-dropped">Your site moved to faster storage, but your Facebook
+      download was too big to move with it in one day, so it was left out. Your own posts, photos, friends and groups all
+      came. To have your Facebook years back, <a href="/_admin/import">import your download again</a>.</p>`}
     ${recovered && html`<form class="notice alert" id="recovered" method="post" action="/_admin/devices/recovered-seen" data-region="" data-inplace="remove">
       You got back into your site on ${fmtDate(recovered)}, without a passkey. Every other device was signed out and its
       passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in

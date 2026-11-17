@@ -90,9 +90,9 @@ class Statement {
  * env.DB for a site whose database is the Database Durable Object in `namespace`. The object is looked up for each
  * call: a stub made while answering one request can't be used while answering another.
  */
-export function d1(namespace) {
+export function d1(namespace, name = "db") {
   const db = {
-    send: (statements, together) => namespace.get(namespace.idFromName("db")).query(statements, together),
+    send: (statements, together) => namespace.get(namespace.idFromName(name)).query(statements, together),
     prepare: (sql) => new Statement(db, sql),
     async batch(statements) {
       if (!statements.length) return [];

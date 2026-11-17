@@ -60,7 +60,7 @@ restore() {
 trap restore EXIT
 
 # Every page's data is checked as it's made (src/util.js pageData): plain, and never carrying a key.
-CHECKS="--var CHECK_PAGE_DATA:1"
+CHECKS="--var CHECK_PAGE_DATA:1 ${TEST_VARS:-}" # TEST_VARS: settings for every test site, e.g. "--var TEST_DB_DELAY:15"
 wait_for() { for _ in $(seq 1 90); do curl -s -o /dev/null "http://localhost:$1/_auth/login" && return 0; sleep 1; done; echo "Site on $1 didn't start" >&2; return 1; }
 start() { # [code dir] [extra wrangler args…] — one fresh site on 8787
   local dir="$WORKER"
@@ -115,6 +115,9 @@ run_selfhosted() { # a self-hosted site (A, HOSTING=self: src/hosting.js) next t
 run_notifications() { # notifications on the owner's devices (src/push.js), their encryption (src/webpush.js), the app
   echo "== webpush"
   (cd "$WORKER" && node test/webpush.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  echo "== sqlite" # the database layer's whole numbers (src/sqlite.js), and the one-off move into the site's object
+  (cd "$WORKER" && node test/sqlite.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  (cd "$WORKER" && node --no-warnings test/sitecopy.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   three_sites notifications.mjs
 }
 run_groups() { three_sites groups.mjs group; }

@@ -56,6 +56,10 @@ installer or your site gets a token that lasts **one hour**. Nothing is kept aft
 - making, changing and deleting **D1 databases**,
 - reading the account's basic settings (its workers.dev name).
 
+Since 0.57.0 your site keeps everything in its own Durable Object. Unlike a D1 database, Cloudflare's API has no way
+to query it from outside: reaching it means deploying code to your site, which friends' checks look at. The D1 permission remains for the database sites kept everything
+in before then (left as it was, a safety copy), and for groups, until a later version stops needing it.
+
 Automatic updates, if turned on, ask once for **Background Access** with *Workers Editor* only: changing (not making)
 Workers, nothing else. It lasts until turned off on the Update page or revoked under *Connected Applications*. The
 refresh token is kept in the site's own Durable Object storage, never in its database or downloads. afterwrd never

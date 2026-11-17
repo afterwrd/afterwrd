@@ -4,10 +4,13 @@
 // everything made on afterwrd is still there at the same addresses, the comments on imported things are gone (only
 // what's made on afterwrd takes comments now), and the album tools work.
 //   node upgrade.mjs before|after <fixtures> <zip>
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { settled } from "./helpers.mjs";
+import { MOVED } from "../../src/sitecopy.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const [stage, fixtures, zipPath] = process.argv.slice(2);
@@ -140,6 +143,19 @@ if (stage === "before") {
   await Promise.all([settled(page), page.click("main article.card .comment div.edit button")]);
   check("a comment from before the upgrade can be changed", (await said("main article.card")).join() === "Still here, after the upgrade"
     && (await page.$eval("main article.card .comment details.edited", (d) => d.textContent).catch(() => "")).includes("Still here?"));
+
+  // The site moved into its own object (src/sitecopy.js): its old D1 database is kept, marked moved, so an older
+  // version would say the site is being updated rather than carry on with it.
+  const d1 = join(OUT, "stateU", "v3", "d1", "miniflare-D1DatabaseObject");
+  const file = readdirSync(d1).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
+  const old = new DatabaseSync(join(d1, file), { readOnly: true });
+  try {
+    check("the old database is kept, marked moved, with the posts from before still in it",
+      Boolean(old.prepare(`SELECT 1 FROM d1_migrations WHERE name = '${MOVED}'`).get())
+      && Boolean(old.prepare("SELECT 1 FROM posts WHERE text = 'Before the upgrade'").get()));
+  } finally {
+    old.close();
+  }
 }
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();

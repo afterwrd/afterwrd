@@ -1,8 +1,8 @@
 // The server's own tools (afterwrd.mjs, run with `docker compose exec afterwrd …`): making the owner, a link to add a
 // device, and getting back in after losing every device. It listens only inside the container (config.mjs), and
-// works on each site's database through that site's own database object (d1.js), as the site itself does, rather
-// than opening the file behind the site's back.
-//   env.SITES  {"<host>": ["<database binding>", "<site binding>"]} for each person's site: its Database, and the site
+// works on each site's database through the object that holds it (the site's Outbox named "site", with d1.js's
+// client), as the site itself does, rather than opening the file behind the site's back.
+//   env.SITES  {"<host>": ["<object binding>", "<site binding>"]} for each person's site: its objects, and the site
 //   POST /owner   {host, name?}  makes `name` the owner of a new site, or (no name) a link for another device
 //   POST /recover {host}         signs every device out; the link it gives makes a passkey that replaces the others
 //   GET  /sites                  the sites this server runs now
@@ -39,7 +39,8 @@ export default {
     const [database, site] = sites[host];
     // A visit first, so a brand-new site has made its tables (migrate.js runs on every site's first request).
     await (await env[site].fetch(`https://${host}/_version`)).body?.cancel();
-    const db = d1(env[database]);
+    // The site's database is in its own object (an Outbox named "site": src/sqlite.js), which answers statements.
+    const db = d1(env[database], "site");
     const owner = await db.prepare("SELECT id, name FROM users LIMIT 1").first();
 
     if (url.pathname === "/owner") {

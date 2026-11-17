@@ -1,5 +1,7 @@
-// The site's owner, from the terminal, for sites deployed with wrangler rather than the installer (and for tests).
-// Runs SQL against the Worker's D1 database through wrangler.
+// The site's owner, from the terminal, for a site on this computer (`npm run dev`) and for tests. It writes to the
+// site's database file directly (in the site's object: src/sqlite.js), or through wrangler for a site from before that.
+// A deployed site's database is in its own object, which wrangler can't reach (docs/site-object-plan.md): there, use
+// Your devices on a signed-in device, or get back in through Cloudflare from the sign-in page.
 //
 //   npm run owner -- "Your Name"     makes you the owner of a new site, and prints a link to add your first device
 //   npm run owner                    a new link to add another device, once you're the owner
@@ -21,6 +23,13 @@ const local = take("--local");
 const siteUrl = (option("--url") ?? process.env.AFTERWRD_URL ?? (local ? "http://localhost:8787" : "")).replace(/\/$/, "");
 const [name] = args;
 const now = Math.floor(Date.now() / 1000);
+// Tests only: a local site's database, in its object (src/sqlite.js), or (self-hosted) the site object's file.
+const objectDatabase = local || process.env.AFTERWRD_SELFHOST ? (await import("../test/e2e/helpers.mjs")).objectFile(process.env.AFTERWRD_SELFHOST
+  ? join(process.env.AFTERWRD_SELFHOST, "outbox") : join(process.cwd(), ".wrangler", "state", "v3", "do")) : null;
+if (!local && !process.env.AFTERWRD_SELFHOST) {
+  fail("A deployed site keeps its database in its own object now, which this can't reach. To add a device, use Your devices "
+    + "on a phone or computer that's signed in; to get back in without one, use the sign-in page's way back in through Cloudflare.");
+}
 if (!siteUrl) fail("Where is the site? Pass --url https://afterwrd.<you>.workers.dev or set AFTERWRD_URL.");
 
 const [owner] = sql("SELECT id, name FROM users LIMIT 1");
@@ -35,6 +44,7 @@ console.log(`Device link for ${user.name} (works once, for one hour, and gives o
 console.log("Open it only on your own phone or computer; whoever opens it first gets in.");
 
 function sql(command) {
+  if (objectDatabase) return objectSql(command);
   if (process.env.AFTERWRD_SELFHOST) return selfhostSql(process.env.AFTERWRD_SELFHOST, command);
   const result = spawnSync("npx", ["wrangler", "d1", "execute", "afterwrd", local ? "--local" : "--remote", "--json",
     "--command", command], { encoding: "utf8" });
@@ -48,6 +58,16 @@ function selfhostSql(data, command) {
   const name = existsSync(dir) && readdirSync(dir).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
   if (!name) fail(`No site database in ${dir}. Has the site been opened once?`);
   const db = new DatabaseSync(join(dir, name));
+  try {
+    return db.prepare(command).all();
+  } finally {
+    db.close();
+  }
+}
+
+function objectSql(command) {
+  if (!objectDatabase) fail("No site database in the site's object. Has the site been opened once?");
+  const db = new DatabaseSync(objectDatabase);
   try {
     return db.prepare(command).all();
   } finally {

@@ -177,6 +177,8 @@ async function finish(env, { sections }) {
     ...statements.map((s) => db.prepare(s)),
     ...unlinked.map((s) => db.prepare(s)),
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', ?)").bind(JSON.stringify(sections)),
+    // Imported again: Home stops asking for it (sitecopy.js, when the archive was too big to move).
+    db.prepare("DELETE FROM settings WHERE key = 'archive_dropped'"),
   ]);
 
   const { results } = await env.DB.prepare(`

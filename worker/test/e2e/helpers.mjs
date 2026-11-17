@@ -61,11 +61,35 @@ const WORKER = fileURLToPath(new URL("../..", import.meta.url));
  */
 function databaseFile(state) {
   const selfhost = process.env.AFTERWRD_SELFHOST;
+  // In the site's object (src/sqlite.js), or, for a site from before that (the upgrade test), D1 or the Database object.
+  const inObject = objectFile(selfhost ? join(state ?? selfhost, "outbox") : join(state ?? join(WORKER, ".wrangler", "state"), "v3", "do"));
+  if (inObject) return inObject;
   const dir = selfhost ? join(state ?? selfhost, "database")
     : join(state ?? join(WORKER, ".wrangler", "state"), "v3", "d1", "miniflare-D1DatabaseObject");
   if (!existsSync(dir)) return null;
   const name = readdirSync(dir).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
   return name ? join(dir, name) : null;
+}
+
+/**
+ * The SQLite file of the site's object (src/sqlite.js): the Outbox object that has the site's tables (the others hold
+ * the outbox and the vault), or null if it hasn't made them yet. Exported for scripts/owner.mjs.
+ * @param {string} dir a local site's v3/do folder (its objects are in *-Outbox), or a self-hosted site's outbox folder
+ */
+export function objectFile(dir) {
+  if (!existsSync(dir)) return null;
+  const folders = [".", ...readdirSync(dir).filter((f) => f.endsWith("-Outbox"))];
+  for (const folder of folders) {
+    for (const name of readdirSync(join(dir, folder)).filter((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite")) {
+      const db = new DatabaseSync(join(dir, folder, name), { readOnly: true });
+      try {
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'users'").get()) return join(dir, folder, name);
+      } finally {
+        db.close();
+      }
+    }
+  }
+  return null;
 }
 
 /**

@@ -622,7 +622,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped] = await Promise.all([
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
     onThisDay(ctx, 2),
@@ -641,11 +641,13 @@ async function home(ctx, params) {
     all(db, `${INTRODUCTIONS_SQL} LIMIT 3`, [now() - INTRODUCTION_DAYS * 86400]),
     recoveredHere(db, ctx.user), // got back in through Cloudflare, on this device (recover.js)
     selfHosted(ctx.env) ? null : lookAfterFacts(db),
+    // The Facebook archive was too big to move into the site's own object (sitecopy.js): import it again.
+    first(db, "SELECT 1 AS dropped FROM settings WHERE key = 'archive_dropped'").then((row) => Boolean(row)),
   ]);
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped };
   }
   return {
     own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
@@ -658,7 +660,7 @@ async function home(ctx, params) {
     checkGrant: checkGrantState, // a problem with it, if there is one
     // The one reminder that the site can look after itself (keep up to date, let friends' sites check it), if it can't yet.
     lookAfter: await lookAfterReminder(db, auto, checkGrantState, lookAfterFound),
-    asking, introductions,
+    asking, introductions, archiveDropped,
   };
 }
 

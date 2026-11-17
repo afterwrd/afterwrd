@@ -61,7 +61,7 @@ export function writeConfig(build, sites, { router = null, tools = null } = {}) 
   if (tools && people.length) {
     services.push(`(name = "tools", worker = ${worker(meta, [esm("tools.js"), esm("d1.js")], [
       `(name = "SITES", json = ${text(JSON.stringify(Object.fromEntries(people.map((s) => [s.host, [`D_${s.id}`, `S_${s.id}`]]))))})`,
-      ...people.map((s) => `(name = "D_${s.id}", durableObjectNamespace = (className = "Database", serviceName = "site-${s.id}"))`),
+      ...people.map((s) => `(name = "D_${s.id}", durableObjectNamespace = (className = "Outbox", serviceName = "site-${s.id}"))`),
       ...people.map((s) => `(name = "S_${s.id}", service = "site-${s.id}")`)])})`);
     sockets.push(`(name = "tools", address = ${text(tools)}, http = (), service = "tools")`);
   }

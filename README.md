@@ -141,10 +141,12 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
 ## Using your site
 
 `worker/` is the Worker that runs your site; only you sign in, with a passkey. You import from a page on the site
-itself: your browser reads the Facebook download and uploads only the sections you choose. Posts, people and the rest
-go into D1, photos and videos into Durable Objects, and the Worker builds pages from them, with search and filters.
-Cloudflare's free plan covers
-it with no card needed: Workers, D1 and SQLite-backed Durable Objects only, no R2 or Zero Trust.
+itself: your browser reads the Facebook download and uploads only the sections you choose. Everything goes into your
+site's own Durable Objects (SQLite inside each): the posts, people and the rest into the site's own object, which
+builds its pages right next to them, and photos and videos into a set of their own. Cloudflare's free plan covers it
+with no card needed: Workers and SQLite-backed Durable Objects only, no R2 or Zero Trust. (A site still gets a D1
+database, which sites from before 0.57.0 kept everything in; it's left as it was, a safety copy, and a later version
+stops making it.)
 
 Once it's installed, nothing needs the terminal:
 
