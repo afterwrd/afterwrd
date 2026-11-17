@@ -29,6 +29,7 @@
 // on afterwrd; friend pages (posts, albums, photos) also show the parts of the Facebook archive the owner has chosen to
 // share (share.js), and nothing else, even to a friend who knows a photo's fingerprint. Plus the helpers for calling
 // other sites.
+import { onCloudflare } from "./hosting.js";
 import { commentId, CONTEXT, POST_KEY_RE, postId, tidy } from "../public/static/activity.js";
 import { commentable, findTarget, MAX_COMMENT } from "./archive/comments.js";
 import { editComment, versionsGone } from "./edits.js";
@@ -182,6 +183,11 @@ export async function handlePeer(request, env, url, work) {
   if (route === "POST /_peer/introduce") {
     const [body, status] = await receiveIntroduction(env, url, peer, await request.json().catch(() => ({})));
     return json(body, status);
+  }
+  // Checks only ever run between sites on Cloudflare (hosting.js), so a check call from a self-hosted friend can only
+  // be made up: it gets nothing (no token, no "checked", no request or attempt shown here), as if there were no such call.
+  if (/^POST \/_peer\/(check-request|check-token|check-soon|check-failed|checked)$/.test(route) && !onCloudflare(peer.origin, env)) {
+    return json({ error: "Not found." }, 404);
   }
   if (route === "POST /_peer/check-request") {
     const [body, status] = await receiveCheckRequest(env, peer, await request.json().catch(() => ({})));

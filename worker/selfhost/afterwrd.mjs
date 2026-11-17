@@ -15,7 +15,7 @@ import { rmSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { DATA, HOST_RE, readSites, saveSites, TOOLS } from "./serve.mjs";
+import { changeSites, DATA, HOST_RE, readSites, TOOLS_SOCKET } from "./serve.mjs";
 
 const args = process.argv.slice(2);
 const siteFlag = args.indexOf("--site");
@@ -27,12 +27,23 @@ const fail = (message) => {
   process.exit(1);
 };
 
-/** Asks the tools inside the container (tools.js). */
+/** Asks the tools inside the container (tools.js), on their socket. */
 async function tools(path, body) {
-  const res = await fetch(`http://${TOOLS}${path}`, body ? { method: "POST", body: JSON.stringify(body) } : {}).catch(() => null);
-  if (!res) fail("Couldn't reach afterwrd in this container. Is it running? (docker compose ps)");
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) fail(data.error ?? `Something went wrong (${res.status}).`);
+  const answer = await new Promise((done) => {
+    const req = request({ socketPath: TOOLS_SOCKET, path, method: body ? "POST" : "GET", headers: { Host: "tools" }, timeout: 30_000 }, (res) => {
+      let text = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { text += chunk; });
+      res.on("end", () => done({ status: res.statusCode, text }));
+    });
+    req.on("error", () => done(null));
+    req.on("timeout", () => { req.destroy(); done(null); });
+    req.end(body ? JSON.stringify(body) : undefined);
+  });
+  if (!answer) fail("Couldn't reach afterwrd in this container. Is it running? (docker compose ps)");
+  let data = {};
+  try { data = JSON.parse(answer.text); } catch {}
+  if (answer.status !== 200) fail(data.error ?? `Something went wrong (${answer.status}).`);
   return data;
 }
 
@@ -91,7 +102,14 @@ if (command === "owner") {
   const host = address(rest[0]);
   if (sites.some((s) => s.host === host)) fail(`There's already a site at ${host} on this server.`);
   const key = randomBytes(32).toString("base64url");
-  saveSites([...sites, { host, group: true, key }]);
+  try {
+    changeSites((now) => {
+      if (now.some((s) => s.host === host)) throw new Error(`There's already a site at ${host} on this server.`);
+      return [...now, { host, group: true, key }];
+    });
+  } catch (error) {
+    fail(error.message);
+  }
   console.log(`Starting the group's site at https://${host}…`);
   await waitFor(async () => (await groupStatus(host)) === 200, "start the group's site");
   console.log(`\nIts setup code:\n\n  ${key}\n`);
@@ -108,7 +126,11 @@ if (command === "owner") {
     ask.close();
     if (typed.trim().toLowerCase() !== host) fail("Nothing was removed.");
   }
-  saveSites(sites.filter((s) => s.host !== host));
+  try {
+    changeSites((now) => now.filter((s) => s.host !== host));
+  } catch (error) {
+    fail(error.message);
+  }
   // Gone once workerd is running again without it: only then is its folder unused.
   await waitFor(async () => (await groupStatus(host)) === 404, "stop the group's site");
   rmSync(join(DATA, "sites", host), { recursive: true, force: true });

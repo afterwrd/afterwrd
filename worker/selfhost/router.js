@@ -6,7 +6,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const host = url.hostname.toLowerCase();
-    const binding = env.SITES[host];
+    // Only the sites listed, never an inherited name like "__proto__".
+    const binding = Object.hasOwn(env.SITES, host) ? env.SITES[host] : null;
     if (!binding) return new Response("There's no afterwrd site at this address on this server.", { status: 404 });
     return env[binding].fetch(new Request(`https://${host}${url.pathname}${url.search}`, request));
   },

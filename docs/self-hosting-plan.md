@@ -1,7 +1,7 @@
 # Self-hosting plan
 
 17 Nov 2026. How to run afterwrd on your own server with Docker, without Cloudflare. Work through it in order.
-Steps 1 to 5 are built, on the local branch `self-hosting`; what's left is under Steps.
+Built and merged into main for 0.53.0 (17 Nov 2026); what's left is under Steps.
 
 ## Why, and for whom
 
@@ -141,8 +141,9 @@ Stays (tests use them): `scripts/owner.mjs`, `scripts/deploy.mjs` and `wrangler 
    with Caddy on a real address and a phone; the signed-list check at start-up; perhaps a smaller image.
 6. **Tests.** The suites run against workerd by hand (scratch scripts). Still to do: a `run.sh` way to run them on
    workerd, and the server pieces (router, outbound, tools, commands) tested automatically.
-7. **Docs.** `worker/selfhost/README.md` written. Still to do: a Self-hosting section in the README, a line in
-   PROTOCOL.md, and the do-it-yourself Cloudflare tidy-up.
+7. **Docs and tidy-up.** Done: `worker/selfhost/README.md`; the README's install section (the install page, or your
+   own server); a line in PROTOCOL.md (section 3); the by-hand `installer.js` (and building it in releases), the
+   pasted-token fallback, `scripts/deploy.mjs` and `npm run deploy` removed; SECURITY.md and How it works updated.
 
 ## Trial notes
 

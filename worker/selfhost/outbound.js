@@ -7,7 +7,8 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const binding = url.protocol === "https:" && !url.port ? env.SITES[url.hostname.toLowerCase()] : null;
+    const host = url.hostname.toLowerCase();
+    const binding = url.protocol === "https:" && !url.port && Object.hasOwn(env.SITES, host) ? env.SITES[host] : null;
     return binding ? env[binding].fetch(request) : env.INTERNET.fetch(request);
   },
 };

@@ -58,9 +58,12 @@ async function create(request, env, url, path, body) {
     const origin = siteOrigin(body.origin, env);
     const testing = env.ALLOW_LOCAL_SITES === "1" && origin?.startsWith("http://");
     if (!testing && !(selfHosted(env) && origin?.startsWith("https://"))) return json({ error: "Not found." }, 404);
+    // A plain address (letters, numbers, dots and dashes): it's shown in a command to run on the server.
+    if (!/^[a-z0-9.-]+$/.test(new URL(origin).hostname)) throw new Error("That doesn't look like a group's address.");
     if (origin === url.origin) throw new Error("That's your own site's address. Use the group's.");
-    // One waiting at a time for an address: a setup code mistyped before doesn't leave a row behind.
-    await db.prepare("DELETE FROM groups WHERE origin = ? AND joined_at IS NULL AND script = ''").bind(origin).run();
+    // One waiting at a time for an address, and none left for long (a page closed part-way through).
+    await db.prepare("DELETE FROM groups WHERE joined_at IS NULL AND script = '' AND (origin = ? OR created_at < ?)")
+      .bind(origin, now() - 86400).run();
     return json({ id: await waitingRow(db, { origin, setup: body.setup, name: body.name, about: body.about }) });
   }
   // Self-hosted, there's no Cloudflare account to make a group's site in (hosting.js).
@@ -76,9 +79,12 @@ async function create(request, env, url, path, body) {
     try {
       return json({ id: await claimGroup(env, url, body.id) });
     } catch (error) {
-      // A group's site made elsewhere (/local: no Worker of this site's to finish): what was noted goes, so a mistyped
-      // setup code can simply be typed again.
-      await db.prepare("DELETE FROM groups WHERE id = ? AND joined_at IS NULL AND script = ''").bind(Number(body.id)).run();
+      // A group's site made elsewhere (/local: no Worker of this site's to finish) that said no (a mistyped setup
+      // code, say): what was noted goes, so it can simply be typed again. Not when there was no clear answer: the
+      // group may have taken the claim.
+      if ([400, 401, 403].includes(error.status)) {
+        await db.prepare("DELETE FROM groups WHERE id = ? AND joined_at IS NULL AND script = ''").bind(Number(body.id)).run();
+      }
       throw error;
     }
   }

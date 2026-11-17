@@ -1,7 +1,8 @@
 # The self-hosted image (worker/selfhost/), built from each release's tag and published to GitHub's container
 # registry as ghcr.io/afterwrd/afterwrd:<version> and :latest, for x86 and ARM servers (a Raspberry Pi, say).
-# Each kind is built on its own kind of runner, with the Docker already there (no other actions), then the two are
-# put together under one name.
+# Each kind is built on its own kind of runner, with the Docker already there, then the two are put together under one
+# name, with a signed record of the build (as releases have: release.yml). To check an image:
+#   gh attestation verify oci://ghcr.io/afterwrd/afterwrd:<version> --repo afterwrd/afterwrd
 name: Image
 
 on:
@@ -11,6 +12,8 @@ on:
 permissions:
   contents: read
   packages: write # publish the image
+  id-token: write # sign the build record (Sigstore issues a short-lived certificate for this workflow run)
+  attestations: write # store the build record with the repository
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -55,6 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: One image for both kinds of server
+        id: publish
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -62,3 +66,14 @@ jobs:
           image="$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')"
           version="${GITHUB_REF_NAME#v}"
           docker buildx imagetools create -t "$image:$version" -t "$image:latest" "$image:$version-amd64" "$image:$version-arm64"
+          echo "name=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$(docker buildx imagetools inspect "$image:$version" --format '{{json .Manifest}}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+
+      # A signed record that this image was built here, by this workflow, from the tagged commit, kept in Sigstore's
+      # public log and beside the image in the registry.
+      - name: Sign the build record
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.publish.outputs.name }}
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true

@@ -58,8 +58,10 @@ To delete a group, delete it on your site first (its members are told), then rem
   self-hosted site can't be checked, and friends' sites say so. Keeping it safe is up to you: keep the server updated,
   and keep who can get into it to yourself.
 - **No automatic updates.** Pull the new image when your site says there's one.
-- **Calls out go to public addresses only.** Your site never connects to your home network or the server itself,
-  whatever address a friend's site gives it, as on Cloudflare.
+- **Calls out go to public addresses only.** Your site never connects to your home network, the server's own local
+  addresses or a cloud server's metadata address, whatever address a friend's site gives it, as on Cloudflare.
+- **Keep afterwrd's container to itself.** Don't publish its port 8080, or run it with `network_mode: host` or in a
+  shared network namespace: only Caddy (or your tunnel) should reach it, over the compose network.
 - **Photos are limited by your disk**, not by Cloudflare's free 5 GB.
 
 ## Building the image yourself

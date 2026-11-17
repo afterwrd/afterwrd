@@ -23,8 +23,10 @@ RUN useradd --create-home --uid 10001 afterwrd \
        chmod +x "/usr/local/bin/$tool"; \
      done
 COPY --from=build /app/workerd /usr/local/bin/workerd
-COPY --from=build --chown=afterwrd /app/build /app/build
+COPY --from=build /app/build /app/build
 COPY selfhost/serve.mjs selfhost/config.mjs selfhost/afterwrd.mjs /app/selfhost/
+# The code stays root's: afterwrd may only rewrite workerd's config (serve.mjs writes it beside the code it names).
+RUN touch /app/build/config.capnp && chown afterwrd /app/build/config.capnp
 USER afterwrd
 ENV AFTERWRD_DATA=/data AFTERWRD_BUILD=/app/build WORKERD=/usr/local/bin/workerd
 VOLUME /data

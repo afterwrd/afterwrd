@@ -5,9 +5,9 @@
 // have hers check his. Ann starts a group from an address and a setup code, as a command on her server gives them.
 //   node selfhosted.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
-import { count as n } from "./helpers.mjs";
+import { count as n, siteSql as sql } from "./helpers.mjs";
 
-const [, , stateA, , , stateG] = process.argv.slice(2);
+const [, , stateA, stateB, , stateG] = process.argv.slice(2);
 const A = "http://localhost:8787";
 const B = "http://localhost:8788";
 const G = "http://localhost:8790";
@@ -115,6 +115,21 @@ const link = await post(bob, "/_admin/checks/new", { site: A });
 check("a check link for Ann's site is refused", link.status === 400 && /isn't on Cloudflare/.test(link.error ?? ""), JSON.stringify(link));
 const pasted = await post(bob, "/_admin/checks/new", { site: "walkers.example.com" });
 check("…as is one for any address not on Cloudflare", pasted.status === 400 && /isn't on Cloudflare/.test(pasted.error ?? ""), JSON.stringify(pasted));
+
+// Checks only run between sites on Cloudflare, so a check call from Ann's site can only be made up: Bob's site gives it
+// nothing, even with Ann's real key.
+const annKey = sql(stateA, `SELECT their_key FROM connections WHERE origin = '${B}'`)[0]?.their_key;
+const fromAnn = async (path, body) => (await fetch(`${B}${path}`, { method: "POST", redirect: "manual",
+  headers: { Authorization: `Bearer ${annKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) })).status;
+const madeUp = {
+  "check-token": await fromAnn("/_peer/check-token", { type: "CheckToken" }),
+  "checked": await fromAnn("/_peer/checked", { type: "Checked", site: A, version: "0.0.1" }),
+  "check-request": await fromAnn("/_peer/check-request", { type: "CheckRequest" }),
+};
+check("Bob's site refuses check calls from Ann's self-hosted site", Boolean(annKey) && Object.values(madeUp).every((s) => s === 404),
+  JSON.stringify(madeUp));
+check("…and notes no attempt to check it", sql(stateB, "SELECT COUNT(*) AS n FROM settings WHERE key = 'check_attempts'")[0].n === 0);
+check("…while Ann's key still works for everything else", (await fetch(`${B}/_peer/feed`, { headers: { Authorization: `Bearer ${annKey}` } })).status === 200);
 
 // --- a group, made on the server, claimed here ------------------------------------------------------------------
 await ann.goto(`${A}/groups/new`);

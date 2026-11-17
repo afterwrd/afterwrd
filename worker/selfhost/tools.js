@@ -35,7 +35,7 @@ export default {
     if (request.method !== "POST") return json({ error: "Not found." }, 404);
     const body = await request.json().catch(() => ({}));
     const host = String(body.host ?? "").toLowerCase();
-    if (!sites[host]) return json({ error: `There's no person's site at ${host || "that address"} on this server.` }, 404);
+    if (!Object.hasOwn(sites, host)) return json({ error: `There's no person's site at ${host || "that address"} on this server.` }, 404);
     const [database, site] = sites[host];
     // A visit first, so a brand-new site has made its tables (migrate.js runs on every site's first request).
     await (await env[site].fetch(`https://${host}/_version`)).body?.cancel();
@@ -46,6 +46,12 @@ export default {
       const name = typeof body.name === "string" ? body.name.trim().slice(0, 100) : "";
       if (name && owner) return json({ error: `This site already has an owner, ${owner.name}. For another device, leave out the name.` }, 409);
       if (!name && !owner) return json({ error: "No owner yet. Give your name." }, 409);
+      // Not while getting back in waits for its new passkey (as admin.js refuses): a link made now would skip "the new
+      // passkey replaces all the others".
+      const waiting = owner && await db.prepare("SELECT value FROM settings WHERE key = 'recovering'").first();
+      if (waiting && JSON.parse(waiting.value).until > now()) {
+        return json({ error: "Someone is getting back into your site without a passkey: use the link recover gave, or run recover again." }, 409);
+      }
       const user = owner ?? await db.prepare("INSERT INTO users (name, created_at) VALUES (?, ?) RETURNING id, name").bind(name, now()).first();
       const [link] = await deviceLink(db, host, user.id);
       return json({ name: user.name, link, minutes: LINK_SECONDS / 60 });
@@ -61,6 +67,7 @@ export default {
         db.prepare("DELETE FROM sessions WHERE user_id = ?").bind(owner.id),
         db.prepare("DELETE FROM push_devices"),
         db.prepare("DELETE FROM device_links WHERE user_id = ? AND used_at IS NULL AND token_hash != ?").bind(owner.id, hash),
+        db.prepare("UPDATE settings SET value = json_remove(value, '$.early') WHERE key = 'auto_update'"),
         db.prepare("INSERT INTO settings (key, value) VALUES ('recovering', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1")
           .bind(JSON.stringify({ link: hash, at: now(), until: now() + LINK_SECONDS })),
       ]);

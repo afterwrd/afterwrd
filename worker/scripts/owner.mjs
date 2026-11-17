@@ -4,8 +4,9 @@
 //   npm run owner -- "Your Name"     makes you the owner of a new site, and prints a link to add your first device
 //   npm run owner                    a new link to add another device, once you're the owner
 //
-// Add --local to work against `npm run dev` instead of the deployed site. With AFTERWRD_SELFHOST set to a
-// self-hosted site's data folder (selfhost/), it writes to that site's database file instead. Links use the site address from --url,
+// Add --local to work against `npm run dev` instead of the deployed site. Tests only: with AFTERWRD_SELFHOST set to a
+// self-hosted test site's data folder, it writes to that site's database file directly, as the tests' own helpers do.
+// (A real self-hosted server uses its own command, selfhost/afterwrd.mjs, which goes through the site.) Links use the site address from --url,
 // or AFTERWRD_URL, or http://localhost:8787 with --local. Day to day, Your devices (/_admin) does the same.
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";

@@ -3,3 +3,6 @@ node_modules
 .wrangler
 release
 test/e2e/out
+generated
+.dev.vars*
+.env*

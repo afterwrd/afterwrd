@@ -9,13 +9,17 @@
 //   AFTERWRD_ADDRESS  your site's address, the first time
 //   AFTERWRD_LISTEN   where visits come in, from Caddy or a tunnel (default *:8080)
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unwatchFile, watchFile, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeConfig } from "./config.mjs";
 
 export const DATA = process.env.AFTERWRD_DATA ?? "/data";
 export const SITES_FILE = join(DATA, "sites.json");
-export const TOOLS = "127.0.0.1:8081";
+// The tools (tools.js) listen on a Unix socket in a folder only this user can open, never on a network address: they
+// hand out owner links, so nothing but a command run in this container as afterwrd may reach them, even if the
+// container shares a network with something else.
+export const TOOLS_DIR = process.env.AFTERWRD_RUN ?? "/tmp/afterwrd";
+export const TOOLS_SOCKET = join(TOOLS_DIR, "tools.sock");
 const BUILD = process.env.AFTERWRD_BUILD ?? "/app/build";
 const LISTEN = process.env.AFTERWRD_LISTEN ?? "*:8080";
 const WORKERD = process.env.WORKERD ?? "workerd";
@@ -25,14 +29,40 @@ export const HOST_RE = /^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[
 export function readSites() {
   const { sites } = JSON.parse(readFileSync(SITES_FILE, "utf8"));
   if (!Array.isArray(sites) || !sites.length) throw new Error(`${SITES_FILE} lists no sites.`);
+  const seen = new Set();
   for (const site of sites) {
     if (!HOST_RE.test(site.host ?? "")) throw new Error(`${SITES_FILE}: "${site.host}" isn't an address like me.example.com.`);
+    if (seen.has(site.host)) throw new Error(`${SITES_FILE} lists ${site.host} twice.`);
+    seen.add(site.host);
     if (site.group && !/^[\w-]{32,}$/.test(site.key ?? "")) throw new Error(`${SITES_FILE}: the group at ${site.host} has no key.`);
   }
   return sites;
 }
 
-/** Saves the list of sites, all at once (serve.mjs notices, and starts workerd again). */
+/**
+ * Changes the list of sites: `change` gets the list and returns the new one, which is saved all at once (serve.mjs
+ * notices, and starts workerd again). One change at a time, so two commands run together can't lose one's site.
+ */
+export function changeSites(change) {
+  const lock = `${SITES_FILE}.lock`;
+  let fd;
+  for (let i = 0; fd === undefined; i++) {
+    try {
+      fd = openSync(lock, "wx");
+    } catch (error) {
+      if (error.code !== "EEXIST" || i > 100) throw new Error(`Another command is changing the sites (or ${lock} was left behind: remove it).`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+  }
+  try {
+    saveSites(change(readSites()));
+  } finally {
+    closeSync(fd);
+    rmSync(lock, { force: true });
+  }
+}
+
+/** Saves the list of sites, all at once. */
 export function saveSites(sites) {
   mkdirSync(DATA, { recursive: true });
   writeFileSync(`${SITES_FILE}.new`, `${JSON.stringify({ sites }, null, 2)}\n`);
@@ -66,16 +96,21 @@ function start() {
   const run = () => {
     const sites = readSites();
     listed = JSON.stringify(sites);
-    const config = writeConfig(BUILD, forConfig(sites), { router: LISTEN, tools: TOOLS });
+    mkdirSync(TOOLS_DIR, { recursive: true, mode: 0o700 });
+    chmodSync(TOOLS_DIR, 0o700);
+    rmSync(TOOLS_SOCKET, { force: true });
+    const config = writeConfig(BUILD, forConfig(sites), { router: LISTEN, tools: `unix:${TOOLS_SOCKET}` });
     console.log(`Starting ${sites.map((s) => `${s.group ? "group " : ""}https://${s.host}`).join(", ")}`);
     workerd = spawn(WORKERD, ["serve", config, "--experimental"], { stdio: "inherit" });
     workerd.on("exit", (code, signal) => {
       workerd = null;
       if (stopping) return;
       const planned = restarting;
-      restarting = false;
       if (!planned) console.error(`workerd stopped (${signal ?? code}); starting it again in 5 seconds.`);
-      setTimeout(run, planned ? 0 : 5000);
+      setTimeout(() => {
+        restarting = false;
+        run();
+      }, planned ? 0 : 5000);
     });
   };
   run();

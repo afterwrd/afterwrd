@@ -13,7 +13,7 @@
 //   group   a group's site (no owner, no tools)
 //   local   tests only: it may call addresses on this computer, where the other test sites are
 //   listen  tests only: its own address to listen on (127.0.0.1:8787), instead of coming through the router
-// Options: router (where the router listens, e.g. "*:8080"), tools (where tools.js listens: "127.0.0.1:8081").
+// Options: router (where the router listens, e.g. "*:8080"), tools (where tools.js listens: "unix:/tmp/afterwrd/tools.sock").
 //
 // For tests: node selfhost/config.mjs <build dir> <sites.json>  (sites.json: a list of sites as above)
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -41,7 +41,8 @@ export function writeConfig(build, sites, { router = null, tools = null } = {}) 
   const services = [
     `(name = "files-disk", disk = (path = ${text(join(build, "public"))}, writable = false))`,
     `(name = "files", worker = ${worker(meta, [esm("files.js")], [`(name = "DISK", service = "files-disk")`])})`,
-    `(name = "internet", network = (allow = ["public"], tlsOptions = (trustBrowserCas = true)))`,
+    // Public addresses only. NAT64 and 6to4 addresses count as public, but can lead back to private ones: refused too.
+    `(name = "internet", network = (allow = ["public"], deny = ["64:ff9b::/96", "64:ff9b:1::/48", "2002::/16"], tlsOptions = (trustBrowserCas = true)))`,
   ];
   if (sites.some((s) => s.local)) {
     services.push(`(name = "internet-local", network = (allow = ["public", "private", "local"], tlsOptions = (trustBrowserCas = true)))`);
