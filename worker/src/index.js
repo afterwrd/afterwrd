@@ -27,6 +27,7 @@ import { handlePush } from "./push.js";
 import { autoState, handleAutoConnect, handleAutoStep, health, runAuto } from "./auto.js";
 import { handleChecksConnect, runFriendChecks } from "./friendchecks.js";
 import { selfHosted } from "./hosting.js";
+import { measure, measured, showTiming, timingHeader } from "./timing.js";
 
 export { MediaStore } from "./media.js";
 export { Outbox } from "./outbox.js";
@@ -49,7 +50,10 @@ const HEADERS = {
 const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_peer\/(check-request|check-token|check-soon|check-failed|checked)$/;
 
 export default {
-  async fetch(request, env, work) {
+  // Each request is timed (timing.js): the signed-in owner's replies say how long went on the database and on other
+  // sites, and how many calls out were made, in a Server-Timing header.
+  fetch: (request, env, work) => measure(async () => {
+    env = measured(env);
     let response;
     try {
       response = await route(request, env, work);
@@ -60,8 +64,10 @@ export default {
     }
     const headers = new Headers(response.headers);
     for (const [name, value] of Object.entries(HEADERS)) headers.set(name, value);
+    const timing = timingHeader();
+    if (timing) headers.set("Server-Timing", timing);
     return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-  },
+  }),
   // The daily run of automatic updates (auto.js), at the time set when they were turned on. Group Workers have none.
   // Then this site's checks of its friends' sites that are due (friendchecks.js).
   async scheduled(event, env, work) {
@@ -136,6 +142,7 @@ async function route(request, env, work) {
   // Every signed-in form and action is checked here, once: only this site's own pages may send them. (A browser always
   // says which site a POST, PUT or DELETE comes from, in Origin.) So no handler below needs to, or can forget to.
   if (!reading && request.headers.get("Origin") !== url.origin) return fromElsewhere(request);
+  showTiming();
   return redrawn(request, env, url, user, work, await ownerRoute(request, env, url, user, work));
 }
 
