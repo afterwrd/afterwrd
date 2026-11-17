@@ -9,12 +9,20 @@ const sha256 = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("S
   .map((b) => b.toString(16).padStart(2, "0")).join("");
 
 export async function serveStatic(request, env, hashes = HASHES) {
-  const { pathname } = new URL(request.url);
+  const url = new URL(request.url);
+  const { pathname } = url;
   const expected = Object.hasOwn(hashes, pathname) ? hashes[pathname] : null;
   if (!expected) return new Response("Not found", { status: 404 });
+  // Asked for by its fingerprint (views/nav.js asset), the file can be kept for good: that address only ever has
+  // these contents, checked below before they're sent. Any other address is checked by the browser each time.
+  const pinned = url.searchParams.get("v") === expected.slice(0, 16);
+  // The fonts are named in the stylesheet, so their addresses can't carry a fingerprint: they're kept a week. (Give a
+  // font a new file name if it ever changes, or browsers may show the old one for up to a week.)
+  const font = pathname.startsWith("/static/fonts/");
   // The file's own hash is its ETag. A browser asking whether its copy (checked when it was sent) is still current
   // gets an answer without the file being read again.
-  const headers = { "Cache-Control": "private, no-cache", ETag: `"${expected}"` };
+  const headers = { "Cache-Control": pinned ? "private, max-age=31536000, immutable" : font ? "private, max-age=604800" : "private, no-cache",
+    ETag: `"${expected}"` };
   const asked = (request.headers.get("If-None-Match") ?? "").split(",").map((t) => t.trim().replace(/^W\//, ""));
   if (asked.includes(`"${expected}"`)) return new Response(null, { status: 304, headers });
 

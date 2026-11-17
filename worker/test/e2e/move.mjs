@@ -223,7 +223,11 @@ await ann2.goto(`${C}/posts`);
 const posts = await ann2.$eval("main", (m) => m.innerText);
 const missing = ["Moving day soon", "Which cake?", "Good luck with the move!", "Thanks, all!"].filter((t) => !posts.includes(t));
 check("Ann's posts show on the new site, with both comments", !missing.length, missing.join(", "));
-check("…photos load", await ann2.$$eval("main article.card img", (l) => l.length > 0 && l.every((i) => i.complete && i.naturalWidth > 0)));
+// Photos further down load lazily, as they're scrolled to: scroll to each, and give them a moment.
+await ann2.$$eval("main article.card img", (l) => l.forEach((i) => i.scrollIntoView()));
+await ann2.waitForFunction(() => [...document.querySelectorAll("main article.card img")].every((i) => i.complete), { timeout: 10_000 }).catch(() => {});
+const notLoaded = await ann2.$$eval("main article.card img", (l) => l.length ? l.filter((i) => !(i.complete && i.naturalWidth > 0)).map((i) => i.getAttribute("src")) : ["no images"]);
+check("…photos load", !notLoaded.length, notLoaded.join(" "));
 await ann2.goto(`${C}/posts/${picnic.key}`);
 check("an event shows", (await ann2.$eval("main", (m) => m.innerText)).includes("The park"));
 await ann2.goto(`${C}/posts/${cake.key}`);

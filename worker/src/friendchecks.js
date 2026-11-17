@@ -157,15 +157,25 @@ export async function checkAttempts(db) {
 const REMIND_AFTER_DAYS = 3;
 
 /** What Home's reminder offers: {auto, checks, attempts} for the ones not allowed yet, or null for no reminder. */
-export async function lookAfterReminder(db, auto, grant) {
+export async function lookAfterReminder(db, auto, grant, facts = null) {
   if ((auto.on || auto.problem) && (grant.on || grant.problem)) return null;
+  const { seen, since } = facts ?? await lookAfterFacts(db);
+  if (seen || !since || since > now() - REMIND_AFTER_DAYS * 86400) return null;
+  return { auto: !auto.on && !auto.problem, checks: !grant.on && !grant.problem, attempts: grant.on ? [] : await checkAttempts(db) };
+}
+
+/**
+ * What the reminder goes on, besides auto and grant: whether it's been put off, and when the first passkey was made.
+ * Home looks it up alongside everything else rather than after.
+ * @returns {Promise<{ seen: boolean, since: number | null }>}
+ */
+export async function lookAfterFacts(db) {
   const [seen, first] = await db.batch([
     db.prepare("SELECT 1 FROM settings WHERE key = 'look_after_reminded'"),
     db.prepare("SELECT MIN(created_at) AS at FROM credentials"),
   ]);
-  const since = /** @type {{ at: number | null } | undefined} */ (first.results?.[0])?.at;
-  if (seen.results?.length || !since || since > now() - REMIND_AFTER_DAYS * 86400) return null;
-  return { auto: !auto.on && !auto.problem, checks: !grant.on && !grant.problem, attempts: grant.on ? [] : await checkAttempts(db) };
+  const since = /** @type {{ at: number | null } | undefined} */ (first.results?.[0])?.at ?? null;
+  return { seen: Boolean(seen.results?.length), since };
 }
 
 /** "Not now" on Home's reminder: it isn't shown again. */

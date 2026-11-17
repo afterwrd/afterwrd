@@ -27,7 +27,7 @@ import { handlePush } from "./push.js";
 import { autoState, handleAutoConnect, handleAutoStep, health, runAuto } from "./auto.js";
 import { handleChecksConnect, runFriendChecks } from "./friendchecks.js";
 import { selfHosted } from "./hosting.js";
-import { measure, measured, showTiming, timingHeader } from "./timing.js";
+import { measure, measured, showTiming, testDelays, timingHeader } from "./timing.js";
 
 export { MediaStore } from "./media.js";
 export { Outbox } from "./outbox.js";
@@ -54,6 +54,7 @@ export default {
   // sites, and how many calls out were made, in a Server-Timing header.
   fetch: (request, env, work) => measure(async () => {
     env = measured(env);
+    testDelays(env);
     let response;
     try {
       response = await route(request, env, work);

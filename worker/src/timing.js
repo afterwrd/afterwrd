@@ -4,7 +4,10 @@
 // signed out never see it.
 //
 // - db: time with at least one query waiting, and how many statements ran (a batch counts each of its statements).
-//   On Cloudflare there's a cap of about 1,000 a request.
+//   On Cloudflare there's a cap of about 1,000 a request. Rounds: how many times the page waited for the database
+//   afresh (queries sent side by side are one round). On Cloudflare each round costs 10–15 ms, so fewer is quicker.
+// - sql: of that, the time D1 says it spent running them, and the rows they read (from each result's meta; not for
+//   raw()). A lot of rows read means a query looking through a whole table.
 // - sites: time with at least one call to another site waiting (friends' sites, groups, GitHub), and how many.
 // - calls: every call out this request has made so far, other sites and Durable Objects (photos, the Outbox)
 //   together. The free plan allows 50 a request. Calls made after the reply has gone (work.waitUntil) also count
@@ -16,13 +19,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 /**
- * @typedef {{ n: number, ms: number, active: number, since: number }} Clock
- * @typedef {{ start: number, db: Clock, sites: Clock, objects: number, show: boolean }} Timing
+ * @typedef {{ n: number, ms: number, active: number, since: number, rounds: number }} Clock
+ * @typedef {{ start: number, db: Clock, sites: Clock, objects: number, show: boolean, delays: { db: number, sites: number },
+ *   sql: { ms: number, rows: number } }} Timing
  */
 
 /** @type {AsyncLocalStorage<Timing>} */
 const current = new AsyncLocalStorage();
-const clock = () => ({ n: 0, ms: 0, active: 0, since: 0 });
+const clock = () => ({ n: 0, ms: 0, active: 0, since: 0, rounds: 0 });
 /** Calls out a free-plan request may make (docs/speed-and-scale-plan.md). */
 export const CALLS_ALLOWED = 50;
 
@@ -40,8 +44,13 @@ async function timed(which, count, work) {
   if (!timing) return work();
   const c = timing[which];
   c.n += count;
-  if (c.active++ === 0) c.since = Date.now();
+  if (c.active++ === 0) {
+    c.since = Date.now();
+    c.rounds++;
+  }
   try {
+    const delay = timing.delays[which];
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
     return await work();
   } finally {
     if (--c.active === 0) c.ms += Date.now() - c.since;
@@ -58,7 +67,19 @@ globalThis.fetch = (...args) => timed("sites", 1, () => original(...args));
  * @param {() => Promise<T>} answer
  */
 export function measure(answer) {
-  return current.run({ start: Date.now(), db: clock(), sites: clock(), objects: 0, show: false }, answer);
+  return current.run({ start: Date.now(), db: clock(), sites: clock(), objects: 0, show: false, delays: { db: 0, sites: 0 },
+    sql: { ms: 0, rows: 0 } }, answer);
+}
+
+/**
+ * Test sites only (ALLOW_LOCAL_SITES): each query waits TEST_DB_DELAY ms first, and each call to another site
+ * TEST_SITE_DELAY ms, so a site on this computer is as slow as one on Cloudflare, where a query takes 10–15 ms and a
+ * friend's site 0.5–0.7 s (measured 17 Nov 2026). Then chains of queries that wait on each other show up in tests.
+ */
+export function testDelays(env) {
+  const timing = current.getStore();
+  if (!timing || !env.ALLOW_LOCAL_SITES) return;
+  timing.delays = { db: Number(env.TEST_DB_DELAY) || 0, sites: Number(env.TEST_SITE_DELAY) || 0 };
 }
 
 /** This request's reply should carry the timing header: the owner is signed in (index.js). */
@@ -71,9 +92,10 @@ export function showTiming() {
 export function timingHeader() {
   const timing = current.getStore();
   if (!timing?.show) return null;
-  const { db, sites, objects, start } = timing;
+  const { db, sites, objects, start, sql } = timing;
   return [
-    `db;dur=${db.ms};desc="Database: ${db.n} ${db.n === 1 ? "query" : "queries"}"`,
+    `db;dur=${db.ms};desc="Database: ${db.n} ${db.n === 1 ? "query" : "queries"} in ${db.rounds} ${db.rounds === 1 ? "round" : "rounds"}"`,
+    `sql;dur=${Math.round(sql.ms * 10) / 10};desc="Running them: ${sql.rows} rows read"`,
     `sites;dur=${sites.ms};desc="Other sites: ${sites.n} ${sites.n === 1 ? "call" : "calls"}"`,
     `calls;desc="Calls out: ${sites.n + objects} of ${CALLS_ALLOWED}"`,
     `total;dur=${Date.now() - start}`,
@@ -100,19 +122,35 @@ export function measured(env) {
   return full;
 }
 
+/** Adds what D1 says a result took to run, and the rows it read, to this request's figures. */
+function ran(results) {
+  const timing = current.getStore();
+  if (timing) for (const r of [results].flat()) {
+    timing.sql.ms += Number(r?.meta?.duration) || 0;
+    timing.sql.rows += Number(r?.meta?.rows_read) || 0;
+  }
+  return results;
+}
+
 /** D1 (or the self-hosted stand-in), with each statement's wait timed. */
 function timedDatabase(db) {
   const statement = (s) => ({
     bind: (...values) => statement(s.bind(...values)),
-    first: (...args) => timed("db", 1, () => s.first(...args)),
-    all: () => timed("db", 1, () => s.all()),
-    run: () => timed("db", 1, () => s.run()),
+    // first() through all(), as D1's own does, so its meta (time and rows read) is there too.
+    first: (column) => timed("db", 1, () => s.all()).then(ran).then(({ results: [row] }) => {
+      if (!row) return null;
+      if (column === undefined) return row;
+      if (!(column in row)) throw new Error(`D1_COLUMN_NOTFOUND: Column not found (${column})`);
+      return row[column];
+    }),
+    all: () => timed("db", 1, () => s.all()).then(ran),
+    run: () => timed("db", 1, () => s.run()).then(ran),
     raw: (...args) => timed("db", 1, () => s.raw(...args)),
     unwrapped: s,
   });
   return {
     prepare: (sql) => statement(db.prepare(sql)),
-    batch: (statements) => timed("db", statements.length, () => db.batch(statements.map((s) => s.unwrapped ?? s))),
+    batch: (statements) => timed("db", statements.length, () => db.batch(statements.map((s) => s.unwrapped ?? s))).then(ran),
     exec: (sql) => timed("db", 1, () => db.exec(sql)),
     dump: () => db.dump(),
   };

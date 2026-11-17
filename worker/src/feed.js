@@ -227,9 +227,15 @@ export async function refreshCopies(env, ids) {
 /** Home's friends' posts: from the copies kept here, asking only the friends with none that can be shown (see above). */
 export async function loadFeed(db, ownOrigin, env = null) {
   const at = now();
-  /** @type {{ results: (Row<"connections"> & { avatar?: { thumbSrc: string } | null })[] }} */
-  const { results: connections } = await db.prepare(`SELECT * FROM connections WHERE connected_at IS NOT NULL
-    AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE`).all();
+  // Friends, and the newest posts from the copies that can be shown, at once (see `usable`, which the SQL matches).
+  // Read again below if a friend's site is asked while Home waits, as that gives them a copy that can be shown.
+  /** @type {[{ results: (Row<"connections"> & { avatar?: { thumbSrc: string } | null })[] }, { results: Pick<Row<"friend_posts">, "connection_id" | "data">[] }]} */
+  const [{ results: connections }, copies] = await Promise.all([
+    db.prepare(`SELECT * FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE`).all(),
+    db.prepare(`SELECT connection_id, data FROM friend_posts WHERE connection_id IN (SELECT id FROM connections
+      WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL AND COALESCE(copied_at, 0) != 0 AND COALESCE(copy_until, 0) > ?1
+      AND said_no = 0) ORDER BY created_at DESC LIMIT ?2`).bind(at + MARGIN_SECONDS, HOME_POSTS).all(),
+  ]);
   // A copy of a site that's said this one isn't connected any more isn't shown, however recent.
   const usable = (c) => Boolean(c.copied_at) && (c.copy_until ?? 0) > at + MARGIN_SECONDS && !c.said_no;
   const replies = await askSites(db, await sitesToAsk(db, connections.filter((c) => !usable(c))), env);
@@ -238,14 +244,15 @@ export async function loadFeed(db, ownOrigin, env = null) {
   const asked = new Set(replies.map((r) => r.connection));
   const old = connections.filter((c) => !asked.has(c) && (!usable(c) || c.copied_at < at - FRESH_SECONDS)
     && (!gone(c, at) || (c.feed_checked_at ?? 0) <= at - QUIET_ASK_SECONDS));
-  if (old.length && env?.OUTBOX) await outbox(env).refresh(old.map((c) => c.id)).catch((error) => console.error("Refreshing copies:", error.message));
+  // Handed over while the rest is read, and waited for at the end.
+  const refreshing = old.length && env?.OUTBOX ? outbox(env).refresh(old.map((c) => c.id)).catch((error) => console.error("Refreshing copies:", error.message)) : null;
   // What Home shows, with each friend as it's shown: without the keys to their site (util.js pageData), and with the
   // picture last remembered for them.
   for (const c of connections) c.avatar = c.avatar_url && c.avatar_exp > at ? { thumbSrc: c.avatar_url } : null;
   const shown = new Map(connections.map((c) => [c.id, withoutKeys(c)]));
   const showing = connections.filter(usable).map((c) => c.id);
   /** @type {{ results: Pick<Row<"friend_posts">, "connection_id" | "data">[] }} */
-  const { results: rows } = showing.length ? await db.prepare(`SELECT connection_id, data FROM friend_posts
+  const { results: rows } = !replies.length ? copies : showing.length ? await db.prepare(`SELECT connection_id, data FROM friend_posts
     WHERE connection_id IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC LIMIT ?`).bind(JSON.stringify(showing), HOME_POSTS).all()
     : { results: [] };
   const theirs = rows.map((r) => ({ id: r.connection_id, p: JSON.parse(r.data) }));
@@ -256,6 +263,7 @@ export async function loadFeed(db, ownOrigin, env = null) {
   // Home only mentions a friend's site that's just stopped answering; one that's gone quiet is on Friends instead.
   const unreachable = replies.filter((r) => r.error && !gone(r.connection, at))
     .map((r) => ({ connection: shown.get(r.connection.id), error: r.error.message }));
+  await refreshing;
   return { posts, connections: [...shown.values()], unreachable };
 }
 

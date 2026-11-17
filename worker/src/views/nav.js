@@ -2,10 +2,32 @@
 // and the person's picture, behind which sits everything else (profile, Memories, the owner's tools, Sign out).
 // Icons are inline SVG so nothing is fetched.
 import pkg from "../../package.json";
+import HASHES from "../../generated/asset-hashes.json";
 import { escape, now } from "../util.js";
 
-// Site files are fetched by a versioned address, so a browser holding an old copy fetches each release's afresh.
-export const asset = (path) => `${path}?v=${pkg.version}`;
+/**
+ * A site file's address with its fingerprint (the start of its SHA-256), which static.js serves to be kept for good:
+ * a changed file has a new address, so a browser never asks about a file it already has. A file the release doesn't
+ * list keeps the version instead, and is checked each time.
+ */
+export const asset = (path) => `${path}?v=${Object.hasOwn(HASHES, path) ? HASHES[path].slice(0, 16) : pkg.version}`;
+
+// The scripts' own imports (./ui/menus.js and the like) by their fingerprinted addresses too: an import map, before
+// any module script. (The service worker isn't imported, and keeps its own address.)
+// Prefetch on tap (Chrome, Edge; others ignore it): a link to one of the owner's own pages starts loading when the
+// pointer goes down on it (or rests on it, with a mouse), which saves 100–300 ms. Only pages that just read this site:
+// not Home (it can ask friends' sites whose copies have run out), Events (it asks groups' sites), friends' or groups'
+// pages, Notifications (opening it marks things seen), or anything under /_ (actions, sign-in).
+const OWN_PAGES = ["/posts", "/posts/*", "/photos", "/photos/*", "/memories", "/friend", "/timeline", "/overview",
+  "/comments", "/likes", "/friends", "/people/*"];
+const PREFETCH = `<script type="speculationrules">${JSON.stringify({ prefetch: [{
+  where: { and: [{ or: OWN_PAGES.map((page) => ({ href_matches: page })) }, { not: { href_matches: "/*.ics" } }] },
+  eagerness: "moderate",
+}] })}</script>`;
+
+const IMPORT_MAP = `<script type="importmap">${JSON.stringify({ imports: Object.fromEntries(Object.keys(HASHES)
+  .filter((path) => path.endsWith(".js") && !path.startsWith("/static/vendor/") && !path.startsWith("/static/app/"))
+  .map((path) => [path, asset(path)])) })}</script>`;
 
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
@@ -113,6 +135,8 @@ export function siteHeader({ main, menu, current, face = {}, updateKnown = true 
     </div>
   </details>
 </div></header>
+${IMPORT_MAP}
+${PREFETCH}
 <script src="${asset("/static/live.js")}" defer></script>
 ${UI_PRELOAD}
 <script type="module" src="${asset("/static/ui/main.js")}"></script>
@@ -150,7 +174,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
 const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "arriving", "search", "mentions", "app"];
-const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="/static/ui/${part}.js">`).join("\n");
+const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */
 export const initial = (name) => [...String(name).trim()][0]?.toUpperCase() ?? "?";

@@ -141,10 +141,25 @@ await bob.goto(`${B}/`);
 const friendPage = await ann.goto(`${A}/friend/${sql(stateA, "SELECT id FROM connections")[0].id}/posts`);
 const timing = friendPage.headers()["server-timing"] ?? "";
 check("A friend's page says how long it waited on the database and their site, and the calls out used",
-  /db;dur=\d+;desc="Database: [1-9]\d* quer/.test(timing) && /sites;dur=\d+;desc="Other sites: [1-9]\d* call/.test(timing)
+  /db;dur=\d+;desc="Database: [1-9]\d* quer\w+ in [1-9]\d* rounds?"/.test(timing) && /sql;dur=[\d.]+;desc="Running them: [1-9]\d* rows read"/.test(timing)
+  && /sites;dur=\d+;desc="Other sites: [1-9]\d* call/.test(timing)
   && /calls;desc="Calls out: [1-9]\d* of 50"/.test(timing) && /total;dur=\d+/.test(timing), timing);
 const others = await Promise.all([fetch(`${A}/_auth/login`), fetch(`${A}/_peer/feed`, { headers: { Authorization: `Bearer ${keyBobHolds}` } })]);
 check("…but not signed out, nor in answer to a friend's site", others[1].status === 200 && others.every((r) => !r.headers.has("server-timing")));
+// Site files by their fingerprint are kept for good; by any other address they're checked each time (static.js, nav.js).
+const css = await ann.$eval('link[rel=stylesheet][href^="/static/style.css"]', (l) => l.getAttribute("href"));
+const kept = await ann.evaluate((pinned) => Promise.all([pinned, "/static/style.css", "/static/style.css?v=0000000000000000"]
+  .map((u) => fetch(u).then((r) => r.headers.get("cache-control")))), css);
+check("The stylesheet is fetched by its fingerprint and kept for good; any other address is checked each time",
+  /^\/static\/style\.css\?v=[0-9a-f]{16}$/.test(css) && kept[0] === "private, max-age=31536000, immutable"
+  && kept.slice(1).every((c) => c === "private, no-cache"), JSON.stringify([css, ...kept]));
+const mapped = await ann.$eval("script[type=importmap]", (s) => JSON.parse(s.textContent).imports["/static/ui/menus.js"]).catch(() => "");
+check("…and the scripts' own imports go by their fingerprints too", /^\/static\/ui\/menus\.js\?v=[0-9a-f]{16}$/.test(mapped), mapped);
+// Prefetch on tap (views/nav.js): the owner's own pages that only read this site.
+const prefetched = await ann.$eval("script[type=speculationrules]", (s) => JSON.parse(s.textContent).prefetch[0].where.and[0].or.map((r) => r.href_matches)).catch(() => []);
+check("Prefetch on tap covers the owner's own pages, not Home, Events, friends', groups' or Notifications",
+  ["/posts/*", "/photos", "/memories"].every((p) => prefetched.includes(p))
+  && !prefetched.some((p) => p === "/" || /^\/(friend\/|groups|events|activity|_)/.test(p)), JSON.stringify(prefetched));
 
 // Each sees the other's new posts, and only those.
 let bobFeed = await feedCards(bob);

@@ -21,7 +21,7 @@ import { newPushDevices, pushKey } from "../push.js";
 import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
 import { autoState } from "../auto.js";
-import { checkGrant, friendCheckAlerts, lastFailure, lookAfterReminder } from "../friendchecks.js";
+import { checkGrant, friendCheckAlerts, lastFailure, lookAfterFacts, lookAfterReminder } from "../friendchecks.js";
 import { onCloudflare, selfHosted, serverCommand } from "../hosting.js";
 import { now, pageData, withoutKeys } from "../util.js";
 import { safeNext } from "../auth.js";
@@ -71,7 +71,8 @@ const ROUTES = [
   [/^\/memories$/, null, memories, views.memoriesPage],
   [/^\/timeline$/, "timeline", timeline, views.timelinePage],
   [/^\/posts$/, "posts", posts, views.postsPage],
-  [/^\/posts\/(post-\d+-[0-9a-f]{8})$/, ["posts", "timeline", "friends"], post, views.postPage],
+  // (Always shown: Posts is always published, for posts written here. So it can start alongside the header.)
+  [/^\/posts\/(post-\d+-[0-9a-f]{8})$/, null, post, views.postPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event$/, null, ownEventEdit, views.ownEventEditPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event\.ics$/, null, ownEventFile, null],
   [/^\/comments$/, "comments", comments, views.commentsPage],
@@ -117,30 +118,41 @@ class Problem extends Error {
 
 export async function renderArchive(request, env, url, user, work) {
   const db = env.DB;
-  const [settings, me] = await db.batch([
+  const ctx = {
+    env, db, url, user,
+    zone: request.cf?.timezone ?? "Europe/London", // where the reader is, as near as Cloudflare can tell
+    connected: Boolean(connectedToken(request)), // an hour's Cloudflare token from Connect (cloudflare.js), for groups
+  };
+  const framing = db.batch([
     db.prepare("SELECT value FROM settings WHERE key = 'sections'"),
     db.prepare(`SELECT p.*, pm.hash AS profile_hash, cm.hash AS cover_hash FROM facebook_people p
       LEFT JOIN media pm ON pm.id = p.profile_media_id
       LEFT JOIN media cm ON cm.id = p.cover_media_id
       WHERE p.is_me = 1`),
   ]);
-  // `chosen` is what the owner published from Facebook. Posts and Photos are always there, for posts written on
-  // afterwrd, even before anything is imported; without their sections they show only those.
-  const chosen = settings.results[0] ? JSON.parse(settings.results[0].value) : [];
-  const sections = [...new Set([...chosen, "posts", "photos"])];
+  // `chosen` is what the owner published from Facebook: until it's known, a loader waits for it (await ctx.chosen).
+  ctx.chosen = framing.then(([settings]) => settings.results[0] ? JSON.parse(settings.results[0].value) : []);
+  ctx.chosen.catch(() => {}); // a failure comes through `framing` below
+  // A page shown whatever's published needs nothing else the header looks up, so its own lookups start now,
+  // alongside the header's, instead of after them: on Cloudflare each wait for the database costs 10–15 ms.
+  const route = ROUTES.find(([pattern]) => pattern.test(url.pathname));
+  const early = route && (!route[1] || [route[1]].flat().some((s) => ALWAYS_SHOWN.includes(s))) ? loaded(route, ctx) : null;
   // The header's own lookups, all at once (each would otherwise wait for the one before).
-  const [newComments, requests, newRelease, name, profile, faces] = await Promise.all([
-    newCount(db, user),
-    first(db, "SELECT COUNT(*) AS n FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL"),
-    waitingRelease(env, work),
-    ownerName(db),
-    profilePictures(db),
-    friendFaces(db),
+  const [[settings, me], [newComments, requests, newRelease, name, profile, faces]] = await Promise.all([
+    framing,
+    Promise.all([
+      newCount(db, user),
+      first(db, "SELECT COUNT(*) AS n FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL"),
+      waitingRelease(env, work),
+      ownerName(db),
+      profilePictures(db),
+      friendFaces(db),
+    ]),
   ]);
-  const ctx = {
-    env, db, url, user, chosen, sections, newComments,
-    zone: request.cf?.timezone ?? "Europe/London", // where the reader is, as near as Cloudflare can tell
-    connected: Boolean(connectedToken(request)), // an hour's Cloudflare token from Connect (cloudflare.js), for groups
+  const chosen = settings.results[0] ? JSON.parse(settings.results[0].value) : [];
+  const sections = [...new Set([...chosen, ...ALWAYS_SHOWN])];
+  Object.assign(ctx, {
+    chosen, sections, newComments,
     requests: requests.n,
     newRelease, // the newer afterwrd that's out, if any
     me: me.results[0] ?? { id: -1, name, is_me: 1 },
@@ -148,23 +160,20 @@ export async function renderArchive(request, env, url, user, work) {
     profile,
     friendFaces: faces.faces,
     people: faces.people, // friends to mention (ui/mentions.js)
-  };
+  });
   ctx.updateWaiting = Boolean(ctx.newRelease);
   // A profile picture or cover chosen here takes over from Facebook's.
   if (ctx.profile.profile) Object.assign(ctx.me, { profile_hash: ctx.profile.profile.hash, profile_media_id: ctx.profile.profile.id });
   if (ctx.profile.cover) Object.assign(ctx.me, { cover_hash: ctx.profile.cover.hash, cover_media_id: ctx.profile.cover.id });
 
-  for (const [pattern, section, load, view] of ROUTES) {
-    const match = pattern.exec(url.pathname);
-    if (!match || (section && ![section].flat().some((s) => sections.includes(s)))) continue;
-    let data;
-    let show = view;
-    try {
-      data = await load(ctx, url.searchParams, ...match.slice(1));
-    } catch (error) {
-      if (!(error instanceof Problem)) throw error;
-      [show, data] = [error.view, error.data];
-    }
+  for (const r of ROUTES) {
+    const [pattern, section, , view] = r;
+    if (!pattern.test(url.pathname) || (section && ![section].flat().some((s) => sections.includes(s)))) continue;
+    const outcome = await (r === route && early ? early : loaded(r, ctx));
+    if (outcome.error && !(outcome.error instanceof Problem)) throw outcome.error;
+    const [show, data] = outcome.error ? [outcome.error.view, outcome.error.data] : [view, outcome.data];
+    // The Notifications page has been seen: nothing new on its menu item now.
+    if (ctx.activitySeen) ctx.newComments = 0;
     if (data instanceof Response) return data;
     if (!data) break;
     const shown = pageData(env, data);
@@ -178,6 +187,20 @@ export async function renderArchive(request, env, url, user, work) {
     }
   }
   return new Response("Not found", { status: 404 });
+}
+
+// Posts and Photos are always there, for posts written on afterwrd, even before anything is imported; without their
+// sections published from Facebook they show only those.
+const ALWAYS_SHOWN = ["posts", "photos"];
+
+/**
+ * A route's loader run on `ctx`: { data } or { error }, never a rejection (it may be waited for later).
+ * @param {typeof ROUTES[number]} route
+ * @returns {Promise<{ data?: any, error?: any }>}
+ */
+function loaded([pattern, , load], ctx) {
+  const match = pattern.exec(ctx.url.pathname);
+  return Promise.resolve().then(() => load(ctx, ctx.url.searchParams, ...match.slice(1))).then((data) => ({ data }), (error) => ({ error }));
 }
 
 /**
@@ -243,11 +266,12 @@ async function withMedia(db, rows, column) {
  * undefined without threads, null for a post that takes no comments (Facebook's, for now), else its comments.
  */
 async function loadPosts(db, rows, { threads = true } = {}) {
-  const posts = await withMedia(db, rows, "post_id");
-  if (!posts.length) return posts;
-  const ids = posts.map((p) => p.id);
-  const own = posts.filter((p) => p.source === "afterwrd");
-  const [tags, comments, polls, earlier, editable, events] = await Promise.all([
+  if (!rows.length) return rows;
+  const ids = rows.map((p) => p.id);
+  const own = rows.filter((p) => p.source === "afterwrd");
+  // All at once: none needs another's answer.
+  const [posts, tags, comments, polls, earlier, editable, events] = await Promise.all([
+    withMedia(db, rows, "post_id"),
     all(db, `SELECT t.post_id, p.id, p.name FROM facebook_post_tags t JOIN facebook_people p ON p.id = t.person_id
       WHERE t.post_id IN (${marks(ids)})`, ids),
     threads ? loadThreads(db, own.map((p) => p.key)) : null,
@@ -342,19 +366,21 @@ async function timeline(ctx, params) {
 async function posts(ctx, params) {
   const { db } = ctx;
   const [q, year, kind] = ["q", "year", "kind"].map((k) => params.get(k) ?? "");
+  const chosen = await ctx.chosen;
   const f = new Filters();
-  if (!ctx.chosen.includes("posts")) f.add("p.source = 'afterwrd'");
+  if (!chosen.includes("posts")) f.add("p.source = 'afterwrd'");
   if (q) f.add("(p.text LIKE ? OR p.title LIKE ? OR p.link_url LIKE ?)", ...Array(3).fill(`%${q}%`));
   if (year) f.add("strftime('%Y', p.created_at, 'unixepoch') = ?", year);
   // Facebook's kinds, or AFTERWRD_KIND for posts written here (which have none).
   if (kind === AFTERWRD_KIND) f.add("p.source = 'afterwrd'");
   else if (kind) f.add("p.kind = ?", kind);
-  const { rows, paging } = await paginate(db, `${POST_SQL} ${f.sql} ORDER BY p.created_at DESC`, f.params, pageNumber(params));
-  const own = ctx.chosen.includes("posts") ? "" : "WHERE source = 'afterwrd'";
-  const kinds = (await all(db, `SELECT COALESCE(kind, '${AFTERWRD_KIND}') AS kind FROM posts ${own} GROUP BY 1 ORDER BY COUNT(*) DESC`))
-    .map((r) => r.kind);
-  const postYears = (await all(db, `SELECT DISTINCT strftime('%Y', created_at, 'unixepoch') AS y FROM posts ${own} ORDER BY y DESC`))
-    .map((r) => r.y);
+  const own = chosen.includes("posts") ? "" : "WHERE source = 'afterwrd'";
+  // All at once: none needs another's answer.
+  const [{ rows, paging }, kinds, postYears] = await Promise.all([
+    paginate(db, `${POST_SQL} ${f.sql} ORDER BY p.created_at DESC`, f.params, pageNumber(params)),
+    all(db, `SELECT COALESCE(kind, '${AFTERWRD_KIND}') AS kind FROM posts ${own} GROUP BY 1 ORDER BY COUNT(*) DESC`).then((r) => r.map((k) => k.kind)),
+    all(db, `SELECT DISTINCT strftime('%Y', created_at, 'unixepoch') AS y FROM posts ${own} ORDER BY y DESC`).then((r) => r.map((y) => y.y)),
+  ]);
   return { posts: await loadPosts(db, rows), paging, q, year, kind, years: postYears, kinds };
 }
 
@@ -365,12 +391,13 @@ async function comments(ctx, params) {
   if (q) f.add("(c.text LIKE ? OR o.name LIKE ? OR c.group_name LIKE ?)", ...Array(3).fill(`%${q}%`));
   if (year) f.add("strftime('%Y', c.created_at, 'unixepoch') = ?", year);
   if (kind) f.add("c.target_kind = ?", kind);
-  const { rows, paging } = await paginate(db, `${COMMENT_SQL} ${f.sql} ORDER BY c.created_at DESC`, f.params, pageNumber(params));
-  const kinds = (await all(db, `SELECT target_kind FROM facebook_comments WHERE target_kind IS NOT NULL
-    GROUP BY target_kind ORDER BY COUNT(*) DESC`)).map((r) => r.target_kind);
-  return {
-    comments: await loadComments(db, rows), paging, q, year, kind, years: await years(db, "facebook_comments"), kinds,
-  };
+  const [{ rows, paging }, kinds, commentYears] = await Promise.all([
+    paginate(db, `${COMMENT_SQL} ${f.sql} ORDER BY c.created_at DESC`, f.params, pageNumber(params)),
+    all(db, `SELECT target_kind FROM facebook_comments WHERE target_kind IS NOT NULL
+      GROUP BY target_kind ORDER BY COUNT(*) DESC`).then((r) => r.map((k) => k.target_kind)),
+    years(db, "facebook_comments"),
+  ]);
+  return { comments: await loadComments(db, rows), paging, q, year, kind, years: commentYears, kinds };
 }
 
 async function likes(ctx, params) {
@@ -380,10 +407,12 @@ async function likes(ctx, params) {
   if (q) f.add("(o.name LIKE ? OR r.group_name LIKE ?)", ...Array(2).fill(`%${q}%`));
   if (year) f.add("strftime('%Y', r.created_at, 'unixepoch') = ?", year);
   if (reaction) f.add("r.reaction = ?", reaction);
-  const { rows, paging } = await paginate(db, `${REACTION_SQL} ${f.sql} ORDER BY r.created_at DESC`, f.params, pageNumber(params));
-  const reactionTypes = (await all(db, "SELECT reaction FROM facebook_reactions GROUP BY reaction ORDER BY COUNT(*) DESC"))
-    .map((r) => r.reaction);
-  return { reactions: rows, paging, q, year, reaction, years: await years(db, "facebook_reactions"), reactionTypes };
+  const [{ rows, paging }, reactionTypes, reactionYears] = await Promise.all([
+    paginate(db, `${REACTION_SQL} ${f.sql} ORDER BY r.created_at DESC`, f.params, pageNumber(params)),
+    all(db, "SELECT reaction FROM facebook_reactions GROUP BY reaction ORDER BY COUNT(*) DESC").then((r) => r.map((k) => k.reaction)),
+    years(db, "facebook_reactions"),
+  ]);
+  return { reactions: rows, paging, q, year, reaction, years: reactionYears, reactionTypes };
 }
 
 /**
@@ -402,7 +431,7 @@ const setStats = (db, where, params) => first(db,
 
 async function photos(ctx) {
   const { db } = ctx;
-  const imported = ctx.chosen.includes("photos");
+  const imported = (await ctx.chosen).includes("photos");
   const albums = await all(db, `
     SELECT a.id, a.name, m.hash, m.thumb_hash, m.kind, m.width, m.height,
       COUNT(x.id) AS count, MIN(x.created_at) AS first_ts, MAX(x.created_at) AS last_ts
@@ -436,7 +465,7 @@ async function album(ctx, params, key) {
     title = info.name;
   }
   // Facebook's albums only if Photos was published from the download.
-  if (info?.source !== "afterwrd" && !ctx.chosen.includes("photos")) return null;
+  if (info?.source !== "afterwrd" && !(await ctx.chosen).includes("photos")) return null;
   const stats = await setStats(db, set.where, set.params);
   const { rows, paging } = await paginate(db, `SELECT * FROM media WHERE ${set.where} ${MEDIA_ORDER}`, set.params,
     pageNumber(params), PHOTO_PAGE_SIZE);
@@ -447,7 +476,7 @@ async function album(ctx, params, key) {
 }
 
 async function tagged(ctx, params) {
-  if (!ctx.chosen.includes("photos")) return null;
+  if (!(await ctx.chosen).includes("photos")) return null;
   const { rows, paging } = await paginate(ctx.db, `
     SELECT t.*, p.name AS owner_name FROM facebook_tagged_photos t LEFT JOIN facebook_people p ON p.id = t.owner_id
     ORDER BY t.created_at DESC`, [], pageNumber(params));
@@ -532,13 +561,14 @@ async function person(ctx, params, id) {
 }
 
 async function post(ctx, params, key) {
-  const found = await findTarget(ctx.db, key);
-  if (!found) return null;
-  const [p] = await loadPosts(ctx.db, await all(ctx.db, `${POST_SQL} WHERE p.id = ?`, [found.post.id]));
+  const [row] = await all(ctx.db, `${POST_SQL} WHERE p.key = ?`, [key]);
+  if (!row) return null;
+  // Friends who could be invited are looked up alongside, in case it's an event.
+  const [[p], friends] = await Promise.all([loadPosts(ctx.db, [row]), invitable(ctx.db)]);
   if (p.event) {
     // Friends who could still be invited.
     const asked = new Set([...p.event.going, ...p.event.maybe, ...p.event.cantGo, ...p.event.waiting].map((g) => g.id));
-    p.invitable = (await invitable(ctx.db)).filter((f) => !asked.has(f.id)).map(({ id, name }) => ({ id, name }));
+    p.invitable = friends.filter((f) => !asked.has(f.id)).map(({ id, name }) => ({ id, name }));
   }
   return { post: p };
 }
@@ -571,7 +601,7 @@ async function activity(ctx, params) {
   const seen = user.activity_seen_at ?? 0;
   if (paging.page === 1) {
     await db.prepare("UPDATE users SET activity_seen_at = ? WHERE id = ?").bind(now(), user.id).run();
-    ctx.newComments = 0;
+    ctx.activitySeen = true;
   }
   const items = rows.map((c) => ({ ...c, on: c.source === "here" ? targets.get(c.target) : null,
     isNew: c.created_at > seen && (c.source === "friend" || c.author_id !== user.id) }));
@@ -592,7 +622,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound] = await Promise.all([
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
     onThisDay(ctx, 2),
@@ -610,6 +640,7 @@ async function home(ctx, params) {
     // Friends introducing the owner to someone: asked (or not) from Home too.
     all(db, `${INTRODUCTIONS_SQL} LIMIT 3`, [now() - INTRODUCTION_DAYS * 86400]),
     recoveredHere(db, ctx.user), // got back in through Cloudflare, on this device (recover.js)
+    selfHosted(ctx.env) ? null : lookAfterFacts(db),
   ]);
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
@@ -626,7 +657,7 @@ async function home(ctx, params) {
     checkFailure, friendChecks,
     checkGrant: checkGrantState, // a problem with it, if there is one
     // The one reminder that the site can look after itself (keep up to date, let friends' sites check it), if it can't yet.
-    lookAfter: await lookAfterReminder(db, auto, checkGrantState),
+    lookAfter: await lookAfterReminder(db, auto, checkGrantState, lookAfterFound),
     asking, introductions,
   };
 }
@@ -639,8 +670,9 @@ async function memories(ctx) {
 async function onThisDay(ctx, limit) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" })
     .formatToParts(new Date()).map(({ type, value }) => [type, value]));
+  // Before this year (in UTC, as the day is), by the posts_day index (migrations/0022): the same expression exactly.
   const rows = await all(ctx.db, `${POST_SQL} WHERE strftime('%m-%d', p.created_at, 'unixepoch') = ?
-    AND strftime('%Y', p.created_at, 'unixepoch') < ? ORDER BY p.created_at DESC LIMIT ?`, [`${parts.month}-${parts.day}`, parts.year, limit]);
+    AND p.created_at < ? ORDER BY p.created_at DESC LIMIT ?`, [`${parts.month}-${parts.day}`, Date.UTC(Number(parts.year), 0, 1) / 1000, limit]);
   return loadPosts(ctx.db, rows, { threads: false });
 }
 
@@ -667,14 +699,18 @@ async function fromFriend(ctx, id, load) {
   /** @type {(Row<"connections"> & Record<string, any>) | null} the row, and what the page adds to it (facebook, avatar…) */
   const connection = await connectionById(ctx.db, id);
   if (!connection) return null;
-  connection.facebook = await facebookSelf(ctx.db, connection);
+  // Who they are in the Facebook download is looked up while their site is asked (nothing there needs it).
+  const facebook = facebookSelf(ctx.db, connection);
+  facebook.catch(() => {}); // waited for below, either way
   // A self-hosted friend's site can't be checked (hosting.js): their page says so.
   connection.selfHosted = !onCloudflare(connection.origin, ctx.env);
   try {
     const data = await load(connection);
+    connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection).run();
     return { ...data, friend: withoutKeys(connection) };
   } catch (error) {
+    connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection, error).run();
     throw new Problem(views.friendProblem, { friend: withoutKeys(connection), message: error.message });
   }
@@ -733,10 +769,12 @@ async function friendPosts(ctx, params, id) {
   return fromFriend(ctx, id, async (c) => {
     const { posts, paging, avatar, cover } = await friend.friendPosts(c, pageNumber(params), ctx.env);
     Object.assign(c, { avatar, cover });
-    if (avatar) await rememberPicture(ctx.db, c, avatar)?.run();
-    const marked = await markAllMine(ctx.db, posts.map((p) => ({ connectionId: c.id, target: p.key, comments: p.comments })), ctx.url.origin);
+    const [, marked] = await Promise.all([
+      avatar ? rememberPicture(ctx.db, c, avatar)?.run() : null,
+      markAllMine(ctx.db, posts.map((p) => ({ connectionId: c.id, target: p.key, comments: p.comments })), ctx.url.origin),
+      keepFriendEvents(ctx.db, c, posts),
+    ]);
     posts.forEach((p, i) => { p.comments = marked[i]; });
-    await keepFriendEvents(ctx.db, c, posts);
     return { posts, paging };
   });
 }
@@ -750,8 +788,7 @@ async function friendPost(ctx, params, id, key) {
       await ctx.db.prepare("DELETE FROM events_elsewhere WHERE connection_id = ? AND post_key = ?").bind(c.id, key).run();
       throw new Error("That post isn't there any more.");
     }
-    p.comments = await markMine(ctx.db, c.id, p.key, p.comments, ctx.url.origin);
-    await keepFriendEvents(ctx.db, c, [p]);
+    [p.comments] = await Promise.all([markMine(ctx.db, c.id, p.key, p.comments, ctx.url.origin), keepFriendEvents(ctx.db, c, [p])]);
     return { post: p };
   });
 }
