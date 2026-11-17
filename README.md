@@ -2,8 +2,9 @@
 
 A small, private social network of your own, with your Facebook years brought along. Post and share photos, comment,
 make events, and connect with friends who have their own afterwrd site; your Facebook download (posts, photos, comments, likes,
-friends) comes too, under *Memories*. Only you sign in to your site; friends see it from their own. It runs in your own free Cloudflare account,
-so no one else holds your data, and setting it up needs no terminal, no GitHub account and no card.
+friends) comes too, under *Memories*. Only you sign in to your site; friends see it from their own. It runs in your own
+free Cloudflare account (or on a server of your own), so no one else holds your data. Setting it up on Cloudflare needs
+no terminal, no GitHub account and no card.
 
 afterwrd isn't affiliated with or endorsed by Meta. It only reads the "Download your information" file Facebook
 gives you; it never signs in to Facebook or fetches anything from it.
@@ -15,14 +16,14 @@ gives you; it never signs in to Facebook or fetches anything from it.
 
 **The app, and events on your phone.** Add afterwrd to your phone's home screen and it opens like an app. Turn on
 notifications on the *Events* page and it can tell you, even with the phone locked, when a friend invites you to an
-event, or one you haven't said no to changes or is called off. That's all afterwrd ever notifies you about: never
-posts, comments or likes. (There are no messages between friends: WhatsApp, Signal and the like do that better.) The
+event, or one you haven't said no to changes or is called off, and when someone mentions you (each phone can turn
+mentions off). Nothing else: never posts, comments or likes. (There are no messages between friends: WhatsApp, Signal and the like do that better.) The
 notification is encrypted for your phone by your own site, so the phone's push service (Apple's or Google's) passes it
 on without being able to read it; there's no afterwrd server in between.
 
 ## What it looks like
 
-Home, with your posts and friends' together (friends' posts come straight from their own sites):
+Home, with your posts and friends' together (friends' posts come from their own sites):
 
 <img src="docs/screenshots/home-desktop.png" alt="Home: a post with a photo of a birthday cake and friends' comments, beside a list of friends" width="760">
 
@@ -36,8 +37,9 @@ A friend's page, read from their site; a group with its events; and on a phone, 
 
 ## How sites talk to each other
 
-Each site is its own: friends' and groups' sites ask it for what their owner may see, when they look, with a key
-for that one friendship, and nothing is copied. [PROTOCOL.md](PROTOCOL.md) describes the requests and what's sent,
+Each site is its own: friends' and groups' sites ask it for what their owner may see, with a key for that one
+friendship. To keep Home quick, a site keeps a short-lived copy of each friend's newest posts; everything else is read
+when you look. [PROTOCOL.md](PROTOCOL.md) describes the requests and what's sent,
 for anyone curious or wanting to build something that talks to afterwrd.
 
 ## How afterwrd is made
@@ -45,7 +47,7 @@ for anyone curious or wanting to build something that talks to afterwrd.
 afterwrd is written using an AI coding assistant (Anthropic's Claude), which has written all of its code. The
 direction, and the decisions that shape it, are carefully considered human ones:
 - what afterwrd is for, and what it deliberately isn't;
-- keeping it private by default, with nothing copied to anyone else's site;
+- keeping it private by default: friends see only what you share, from their own sites;
 - one person per site, free to run, with no server to look after;
 - calm, with no nudges or "X is going" notifications;
 - every feature, and every one left out.
@@ -54,7 +56,7 @@ Because of that, it's built to be checked rather than trusted:
 
 - **All the code is public**, under the GNU Affero General Public License, and every release is built from a tagged
   commit.
-- **About 400 automated checks** run real copies of afterwrd on one computer, talking to each other as friends' sites
+- **More than 1,200 automated checks** run real copies of afterwrd on one computer, talking to each other as friends' sites
   and groups do, including deliberately forged and hostile requests. They run before every release.
 - **Security reviews at each major step,** by separate AI agents reading the code without having written it. Every
   real finding has been fixed. There hasn't yet been a review by a human security expert, and one would be very
@@ -85,13 +87,15 @@ and can be done any time.
    an hour and nothing is kept), asks your name (and makes your address from it, `afterwrd.<your-name>.workers.dev`,
    if the account hasn't one yet), and puts afterwrd there.
 3. **Make yourself the owner.** The installer sends you straight to your new site: give your name and create a
-   passkey (your face, fingerprint or device PIN; there's no password). Then write a post, add photos, and connect
-   with friends from *Friends*.
-4. **Optional: bring your Facebook years.** On Facebook: Settings → *Download your information* → choose your
+   passkey (your face, fingerprint or device PIN; there's no password). It then asks whether your site may keep
+   itself up to date and let friends' sites check it's genuine. Then write a post, add photos, and connect with friends
+   from *Friends*.
+4. **Optional: bring your Facebook years.** On Facebook's *Download your information* page, choose your
    profile, *All available information*, format **JSON**, media quality *High*. Facebook emails you when it's
    ready (from minutes to a day). Then choose *Import* in afterwrd's menu, pick the zip file(s), tick what to
-   bring and press *Import and publish*. Your browser reads the download; only what you tick is uploaded. Your
-   Facebook friends then appear on *Friends*, each with an *Invite* button that makes a message to send them.
+   bring and press *Import and publish*. Your browser reads the download; only what you tick is uploaded. If you tick
+   *Friends*, your Facebook friends then appear on *Friends*, each with an *Invite* button that makes a message to send
+   them.
 
 Connecting uses Cloudflare's own sign-in for apps: afterwrd is a registered app there, and you can see or revoke what
 you've allowed under *My Profile* → *Connected Applications*. The installer runs in the maintainer's Cloudflare account,
@@ -117,13 +121,14 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
   shared until you approve the request on *Friends*.
 - **Photo locations are removed** from photos you post, and left out of a Facebook import unless you tick *Photo
   locations*; they can show where you live.
-- **Keep it up to date.** Turn on automatic updates (one *Allow*, on the *Update* page) and the site installs each
-  signed release by itself after a few days, or straight away with *Install it now*, its groups following.
+- **Keep it up to date.** With automatic updates on (asked when you set up, or turned on from the *Update* page, one
+  *Allow*), the site installs each signed release by itself after a few days, or straight away with *Install it now*,
+  its groups following. Otherwise the *Update* page installs a newer release, keeping your passkeys, friends and
+  archive. Home says so when an update fixes a security problem. To hear about every release, *Watch* the repository
+  on GitHub (*Custom* → *Releases*) or follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
 - **Let your friends' sites check it.** One more *Allow* (read-only), and a few times a week a friend's afterwrd site
   checks yours is exactly a signed release, with nothing else uploaded in its place since the last check. A finding
-  shows on both your Homes. Otherwise the owner's *Update* page installs a newer release, keeping
-  your passkeys, connections and archive. Home says so when an update fixes a security problem. To hear about every release, *Watch* the repository on GitHub (*Custom* → *Releases*) or
-  follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
+  shows on both your Homes.
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
   wasn't you, remove it in *Your devices*.
 - **Lost every device you sign in with?** *Lost your device?* on the sign-in page gets you back in, as long as you
@@ -135,10 +140,10 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
 
 ## Using your site
 
-`worker/` is a Cloudflare Worker that shows your archive only to people who've signed in with a passkey.
-You import from a page on the site itself: your browser reads the Facebook download and uploads only the
-sections you choose. Posts, people and the rest go into D1, photos and videos into Durable Objects, and the
-Worker builds pages from them, so search and filters work as they do locally. Cloudflare's free plan covers
+`worker/` is the Worker that runs your site; only you sign in, with a passkey. You import from a page on the site
+itself: your browser reads the Facebook download and uploads only the sections you choose. Posts, people and the rest
+go into D1, photos and videos into Durable Objects, and the Worker builds pages from them, with search and filters.
+Cloudflare's free plan covers
 it with no card needed: Workers, D1 and SQLite-backed Durable Objects only, no R2 or Zero Trust.
 
 Once it's installed, nothing needs the terminal:
@@ -150,11 +155,12 @@ Once it's installed, nothing needs the terminal:
   last one) and signs out everywhere. Only the owner signs in; there's no inviting others to your site, because
   friends see it from their own.
 - **Photos and albums.** *Add photos* (on Photos) puts photos into a new or existing album, optionally shared
-  as a post so friends see them in Feed. Albums you make can be renamed, described or deleted, and photos added
+  as a post so friends see them on their Home. Albums you make can be renamed, described or deleted, and photos added
   here can be deleted. Any photo can be made your profile picture or cover, or upload one for it; they head
-  your Posts page, and friends see your picture beside your posts.
-- **New posts.** The owner can write posts on the site, with up to 20 photos, from the box at the top of
-  *Posts*. Photos are resized to at most 2560px in the browser before uploading, which also removes the
+  your profile, and friends see your picture beside your posts.
+- **New posts.** Write posts with up to 20 photos from the box on *Home* (or your profile). A post can carry a poll,
+  mention friends by typing @, and be shown to all your friends or only those you choose. You can change a post or
+  comment for 15 minutes, until someone else replies; it's marked *Edited*, with what it said before. Photos are resized to at most 2560px in the browser before uploading, which also removes the
   details phones hide in them (such as where a photo was taken), and they're collected in a *Posted on
   afterwrd* album. Importing again keeps them; deleting a post deletes its photos and comments.
 - **Update** (marked when a new version is out) shows what's new and installs it: press *Connect Cloudflare*,
@@ -164,11 +170,14 @@ Once it's installed, nothing needs the terminal:
   and what your site's checks of your friends' sites found. The connection lasts an hour and nothing is kept; sites updated
   from versions before 0.20.0 are offered *Forget it* for the token they used to remember.
 - **Download everything** (the download icon) saves the whole site as one zip: posts, photos and videos,
-  albums, comments (those written here, and yours on friends' sites), likes, friends and connections, as
+  albums, comments (those written here, and yours on friends' sites), polls, events, earlier versions of edited posts
+  and comments, likes, friends and connections, as
   [ActivityStreams](https://www.w3.org/TR/activitystreams-core/) JSON, the open format the fediverse uses, with
   every photo and video. Everything has a permanent address (`https://<site>/posts/<key>`,
   `…/photos/sha256/<fingerprint>`, `…#c<n>` for a comment), so two friends' downloads agree on which comment
-  replied to which post. The README inside explains the files. Keys and sign-in details are never included.
+  replied to which post. The README inside explains the files. Keys and sign-in details are never included. The zip
+  also moves your site: *Import* → *Bring everything over* on a new site (one on your own server, say) takes it all
+  in, apart from friends and groups, which you add again.
 - **Friends** (the owner's alone) is one list: friends on afterwrd first, each with their posts and photos, then
   everyone from the Facebook download, marked *on afterwrd*, *invited*, or with an *Invite* button. Invite makes a
   friend link for that person (it lasts 30 days) and a message to send; when it's used you'll see who the invite
@@ -180,11 +189,11 @@ Once it's installed, nothing needs the terminal:
   asked checks with the group that you're in it). *Introduce* on a friend's card tells them and another friend about
   each other, with a note if you like; each sees it on *Home* and *Friends* and can ask. Someone you decline or remove can't ask again
   this way (you still can). There's no "people you may know": it would reveal who your friends' friends are.
-- **Feed and connections.** *Friends → Add a friend* makes a one-time friend link (30 days) inside a message to
+- **Adding friends.** *Friends → Add a friend* makes a one-time friend link (30 days) inside a message to
   send. Someone with an afterwrd site pastes it into *Add a friend* on their own site (or opens it and says where their site is), and confirms there. Someone without one
   presses *Set up your own afterwrd*: the installer carries the link along (after the `#`, so no server sees it),
-  and their new site asks them to confirm as soon as they've made their passkey. Then you approve their request. Connections are mutual, and make you friends: *Feed* (only the owner sees it) shows the newest posts written on
-  each connected site, and either of you can read the other's posts and photos (everything they've published)
+  and their new site asks them to confirm as soon as they've made their passkey. Then you approve their request. Connections are mutual, and make you friends: *Home* shows the newest posts written
+  on each friend's site, and either of you can read the other's posts and photos (everything they've published)
   without leaving your own site: press their name. Comments you make are stored on your friend's site, with a
   copy kept on yours. Their photos and videos load straight from their site through links it signs, which last
   an hour or two. Sites exchange posts and comments as ActivityStreams too. Friends see what you've
@@ -199,8 +208,8 @@ Once it's installed, nothing needs the terminal:
   can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 40 besides its
   owner). The owner can make members admins, and admins can remove people and delete anything in the group.
   Members read the group from their own sites when they open it, and can post (with up to 8 photos, which are copied
-  to the group) and comment; a copy of their own words stays on their site. Nothing is sent round when someone posts:
-  a comment sends a quiet note only to the people who wrote that post or commented on it, which shows in their
+  to the group) and comment; a copy of their own words stays on their site. Nothing is sent round when someone posts,
+  unless it mentions someone (and *@here*, for the group's admins, tells everyone): a comment sends a quiet note only to the people who wrote that post or commented on it, which shows in their
   *Notifications*. Each group has a *Calendar*: any member can add an event, and members say whether they're
   going. Adding one sends nothing to anyone; if you've said you're going, or might, you're told when its time, place
   or name changes or it's called off, and it's on your *Events* calendar. An event can repeat (every week, every two
@@ -215,17 +224,19 @@ Once it's installed, nothing needs the terminal:
   site didn't take the invitation). Change it or call it off, and everyone invited who hasn't said no is told. You can
   invite more people later, or quietly take an invitation back. *Events* also shows a calendar of everything you could
   go to, your own events, friends' and your groups', by month, week or as a list.
-- **Comments.** You and your friends (from their own sites) can comment under a post or photo; comments show
-  straight away. Friends can delete their own, and you can delete any. *Notifications* lists comments on your
-  posts and photos, and comments on friends' posts and photos you've commented on too, with a count in the menu
-  of those that are new to you. Comments are kept when you import again, and stay if you remove a friend, until you
-  delete them.
+- **Comments.** You and your friends (from their own sites) can comment under a post or photo made on afterwrd;
+  comments show straight away. Friends can delete their own, and you can delete any. *Notifications* lists comments on
+  your posts and photos, comments on friends' posts and photos you've commented on too, mentions, invitations, changes
+  to events you're going to, and comments in your groups, with a count in the menu of those that are new to you.
+  Comments stay if you remove a friend, until you delete them.
 - **Keeping up, quietly.** When you post or comment, your site sends your friends' sites a short note (a new post
   to all of them; a comment only to those who commented on the same thing), in batches of 40, trying again for a
-  few hours if a site is down. With more than 40 friends, Home asks those who've posted lately, plus a few others
-  in turn, as a page may only ask 50 other sites on the free plan. While a page is open and in view, it
+  few hours if a site is down. Home shows each friend's newest posts as their site last sent them, and asks again in
+  the background (those who've posted lately first, then a few others in turn, as one request may only call 50 other
+  sites on the free plan). While a page is open and in view, it
   checks your own site every 30 seconds: the counts in the menu update, and a small bar offers to show new posts
   or comments. Nothing moves until you choose, and none of it is pushed to your phone.
+- **The look.** Dark, Light or Auto (following your phone or computer), behind your picture.
 
 **What's published.** Only what the chosen sections show; the rest never leaves your computer. With the
 default (posts and photos):
@@ -249,15 +260,17 @@ instead:
 updated `public/static/licenses.txt`, which carries the licences of everything installed with afterwrd. The release
 won't build while it's out of date, or if the Worker bundles a package it doesn't cover.
 
-**Developing and testing.** In `worker/`: `npm install`. To try the site locally: `npm run dev` (the site brings its database up to date on its first request:
-apply migrations that way, not with `wrangler d1 migrations apply`, which only knows the `.sql` ones), then
-`npm run owner -- "Test" --local` and import at `http://localhost:8787/_admin/import`. Passkeys work on `localhost`
-but not on `127.0.0.1`.
+**Developing and testing.** In `worker/`: `npm install`. To try the site locally: `npm run dev` (the site brings its
+database up to date on its first request: apply migrations that way, not with `wrangler d1 migrations apply`, which
+only knows the `.sql` ones), then `npm run owner -- "Test" --local`, open the device link it prints and make a passkey,
+and import at `http://localhost:8787/_admin/import`. Passkeys work on `localhost` but not on `127.0.0.1`.
+`npm run check` runs the type checks (also run on every push), and `npm run test:e2e` the end-to-end tests (see
+[worker/test/e2e/README.md](worker/test/e2e/README.md)).
 
 ## What the import does
 
 - Fixes Facebook's text encoding (`JÃ¡nos` → `János`, broken emoji).
-- Parses summary lines such as *"Ste Millington commented on Jo Bloggs's photo."*
+- Parses summary lines such as *"Sam Taylor commented on Jo Bloggs's photo."*
   into an owner and a kind (post, photo, comment, reel…), so comments and likes
   can be grouped by person even when the post itself isn't in your export.
 - Merges Facebook's two like/reaction formats (a newer one with URLs, an older
@@ -282,26 +295,24 @@ Posts, photos and albums written on afterwrd and those from your Facebook downlo
 | `albums`                 | Your photo albums                                                             |
 | `comments`               | Comments on your afterwrd posts and photos, from you or friends' sites        |
 | `polls`, `poll_votes`    | Polls in your afterwrd posts, and who answered                                |
+| `events`, `event_answers`| Your events, and your friends' answers                                        |
+| `post_audience`          | Who a post shared with chosen friends is shown to                             |
+| `post_versions`, `comment_versions` | What edited posts and comments said before                         |
+| `comments_elsewhere`     | Your comments on friends' posts, kept here too                                |
 | `facebook_people`        | Everyone named in the download; `friend_since` set for current friends        |
 | `facebook_post_tags`     | People tagged in your Facebook posts                                          |
 | `facebook_comments`      | Your comments and replies on Facebook, with whose thing they were on          |
 | `facebook_reactions`     | Your likes and reactions on Facebook                                          |
 | `facebook_tagged_photos` | Other people's photos you're tagged in (links only, no images)                |
 
-### Linking with friends' exports (next step)
-
-Your export doesn't say which post a comment was on, only "X's photo" plus the
-comment's timestamp. A friend's export contains their posts *and* the comments
-on them, including yours with the same author name and timestamp, so
-`(author, created_at)` on a comment is the join key. `facebook_comments.target_owner_id`
-and `target_kind` narrow the search.
+Friends, groups, sign-in and the rest are in [worker/migrations/](worker/migrations/).
 
 ## Known limitations
 
 - Facebook identifies people only by name, so two friends with the same name
   are merged into one person.
-- 74 comments have no text in the export, just the summary line; they're shown
-  with a note.
+- Facebook's download sometimes keeps only a comment's summary line, not its text; those comments are shown with a
+  note saying so.
 - Photos you're tagged in are links back to Facebook, not images.
 
 ## Licence
@@ -311,8 +322,9 @@ Anyone can use it, change it and share it, free. If you change it and let other 
 network, you must offer them its source code under the same licence, so it can't be taken private.
 
 **No warranty.** afterwrd is provided as is, without any warranty (sections 15 and 16 of the licence say so in full).
-You run your own site in your own Cloudflare account and are responsible for it, including keeping it up to date.
-Think carefully about what you import, and turn on two-factor authentication for your Cloudflare account.
+You run your own site, in your own Cloudflare account or on your own server, and are responsible for it, including
+keeping it up to date. Think carefully about what you import, and turn on two-factor authentication for your Cloudflare
+account.
 
 afterwrd includes other open-source projects under their own licences (MIT, BSD, Apache 2.0 and the SIL Open Font
 Licence), listed with their full texts in [worker/public/static/licenses.txt](worker/public/static/licenses.txt),
