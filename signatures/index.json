@@ -1,6 +1,12 @@
 {
-  "seq": 24,
+  "seq": 25,
   "releases": [
+    {
+      "version": "0.57.0",
+      "manifest_sha256": "0a0dfacf2afb1b7e1c062945936cf780a13039ddd80253369a145db99a2fd8a8",
+      "signed_at": "2026-11-17T22:04:09Z",
+      "etag": "0d75da2be0f0acaeb9fb526b1b231abc788c3cd329da8cdac12d23ad5a4acc0a"
+    },
     {
       "version": "0.56.0",
       "manifest_sha256": "62c9655aafd355bf854b79f1563d6d6ada17024e7a3ba7f47e771a4bd91efb50",
@@ -146,6 +152,6 @@
       "etag": "7d08fbae9f17aca7cdfb4dc641c214d5c3026a0f4c323642e38a0852316507e1"
     }
   ],
-  "signature": "OiiOCunQCqHyDNpwO3JnkVHLYwWBWzdxtZUjaV+XyzuG+YHtVr6/uZgWIWByReD+MT+gC+umTUoDDnydxG6ZAg==",
-  "signature2": "u+HewtTsI6b+DYC2Ef7LEYAQewJZTtmOq0GupE7d9TYDCiaXrlIj1t/fMA1eAjy7MvJy/YhrfXJ804tx5THdBw=="
+  "signature": "+9ArBAYGeeq2Ha7TgoPrQrs32/61jQC33RXfuzgnINAXbPqxYRIRZKjzkqEwGBOB0WoRcMUiKuSFJHEclkv8CA==",
+  "signature2": "QSIqRb9AySgGTvXeEmqSf+3kxuxbdgqLGfQ8sfAE3LF8Cb5j3e+X/OyF0DL9jJvQPyFBTQzQShaK+Nbuu+2NCQ=="
 }
