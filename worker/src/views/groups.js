@@ -84,7 +84,7 @@ ${unfinished.length > 0 && html`<section class="card" id="unfinished">
     try {
       if (button.dataset.delete) {
         log("Deleting…");
-        await post("/_groups/" + button.dataset.delete + "/delete", { token: token() });
+        await post("/_groups/" + button.dataset.delete + "/delete", {});
         location.reload();
         return;
       }
@@ -103,21 +103,13 @@ ${unfinished.length > 0 && html`<section class="card" id="unfinished">
 
 /**
  * What a step that changes the owner's Cloudflare account needs: their connection from Connect (an hour's token,
- * cloudflare.js), coming back to `back` once Cloudflare's said yes; or, if that can't be used, a token pasted here.
+ * cloudflare.js), coming back to `back` once Cloudflare's said yes.
  */
 function connectField(connected, purpose, back) {
   return connected ? html`<p class="meta">Connected to Cloudflare for the next hour, ${purpose}.</p>`
     : html`<p class="meta"><a class="chip primary connect" href="${connectLink(back)}">Connect Cloudflare</a>
-    Cloudflare asks you to allow afterwrd to change Workers and databases in your account, for an hour, ${purpose}. Nothing is kept afterwards.</p>
-  <details class="meta"><summary>If connecting doesn't work, use an API token</summary>
-    <p><a href="${TOKEN_LINK}" target="_blank" rel="noopener">Create one</a> (the permissions are filled in; scroll down,
-    press <b>Continue to summary</b>, then <b>Create Token</b>), copy it, and paste it here. Delete it in Cloudflare afterwards.</p>
-    <input id="token" type="text" autocomplete="off" spellcheck="false" placeholder="Your API token" aria-label="Cloudflare API token">
-  </details>`;
+    Cloudflare asks you to allow afterwrd to change Workers and databases in your account, for an hour, ${purpose}. Nothing is kept afterwards.</p>`;
 }
-const TOKEN_LINK = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=" + encodeURIComponent(JSON.stringify([
-  { key: "workers_scripts", type: "edit" }, { key: "d1", type: "edit" }, { key: "account_settings", type: "read" }]))
-  + "&accountId=*&zoneId=all&name=afterwrd%20groups";
 
 // The small script both group pages that call Cloudflare use: post JSON, and say how it went.
 const STEP_SCRIPT = `
@@ -128,8 +120,7 @@ const STEP_SCRIPT = `
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Something went wrong.");
     return data;
-  }
-  const token = () => document.getElementById("token")?.value.trim() || "";`;
+  }`;
 
 /** Starting a group: name it, and this site makes its Worker (groupsites.js), step by step. */
 export function groupNewPage(ctx, { connected, domain, maxPhotos, selfHosted = false, command = "" }) {
@@ -172,13 +163,13 @@ ${domain ? html`<form class="card stack" id="start">
       if (!made) {
         const name = form.name.value.trim();
         log("Checking your Cloudflare account…");
-        const { account, script, address } = await post("/_groups/create/check", { token: token(), name });
+        const { account, script, address } = await post("/_groups/create/check", { name });
         log("Preparing " + address + "…");
         let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
-        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("/_groups/create/assets", { token: token(), account, script }));
+        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("/_groups/create/assets", { account, script }));
         if (!jwt) throw new Error("Couldn't finish uploading the group's site files. Try again in a minute.");
         log("Making the group's site…");
-        made = (await post("/_groups/create/deploy", { token: token(), account, script, jwt, name, about: form.about.value })).id;
+        made = (await post("/_groups/create/deploy", { account, script, jwt, name, about: form.about.value })).id;
       }
       log("Waiting for it to start…");
       for (let i = 0; i < 40 && !(await post("/_groups/create/wait", { id: made })).ready; i++) await new Promise((r) => setTimeout(r, 2000));
@@ -528,7 +519,7 @@ ${owner ? html`<section class="card" id="delete">
     error.textContent = "";
     try {
       log("Deleting the group…");
-      await post("/_groups/${raw(String(g.id))}/delete", { token: token() });
+      await post("/_groups/${raw(String(g.id))}/delete", {});
       location.assign("/groups");
     } catch (err) {
       error.textContent = err.message;

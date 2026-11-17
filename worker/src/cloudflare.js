@@ -1,6 +1,6 @@
 // Connecting to Cloudflare: afterwrd asks for a one-hour token through Cloudflare's own sign-in (OAuth 2.0 with
-// PKCE, as a public client: no secret) instead of a token the owner makes by hand. Used by the installer
-// (installer/installer.js), the Update page (update.js) and groups (groupsites.js). Nothing is kept beyond the hour:
+// PKCE, as a public client: no secret) instead of a token the owner makes by hand. Used by the installer at
+// install.afterwrd.app (central/), the Update page (update.js) and groups (groupsites.js). Nothing is kept beyond the hour:
 // the token lives in a cookie that expires with it, which only this site's own pages can use, and afterwrd never
 // asks for permission to make tokens of its own.
 //
@@ -48,10 +48,9 @@ export function connectedToken(request) {
   return token && CODE_RE.test(token) ? token : null;
 }
 
-/** The token a step uses: one pasted by hand (the fallback), or the connected one. Throws if there's neither. */
-export function tokenFor(request, body = {}) {
-  const pasted = typeof body.token === "string" ? body.token.trim() : "";
-  const token = pasted || connectedToken(request);
+/** The token a step uses: the connected one. Throws if there isn't one. */
+export function tokenFor(request) {
+  const token = connectedToken(request);
   if (!token) throw new Error("Connect Cloudflare first.");
   return token;
 }

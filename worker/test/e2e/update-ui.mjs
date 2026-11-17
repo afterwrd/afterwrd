@@ -73,7 +73,7 @@ await page.goto(`${BASE}/_admin/update`);
 const text = await page.$eval("main", (m) => m.innerText);
 if (mode === "behind") {
   check("offers the update with Connect Cloudflare, and no Remember", /is available/.test(text) && Boolean(await page.$("#connect")) && !(await page.$("#remember")));
-  check("the token box is the folded-away fallback", Boolean(await page.$("details.other #token")));
+  check("Connect is the only way: no box to paste a token into", !(await page.$("#token")));
   check("no Forget (nothing remembered)", !(await page.$("#forget")));
   check("Update without connecting says so", await page.evaluate(() => { document.getElementById("go").click(); return document.getElementById("error").textContent; }) === "Connect Cloudflare first.");
 
@@ -136,13 +136,6 @@ if (mode === "behind") {
   })())));
   check("Disconnect dropped the token", !(await page.cookies(BASE)).some((c) => c.name === "cf_token"));
 
-  // The fallback: a pasted token.
-  await page.goto(`${BASE}/_admin/update`);
-  await page.click("details.other summary");
-  await page.type("#token", "x".repeat(40));
-  await page.click("#go");
-  await page.waitForFunction(() => document.getElementById("error").textContent, { timeout: 15_000 });
-  check("a pasted token runs the update (and stops off workers.dev)", /workers\.dev/.test(await page.$eval("#error", (e) => e.textContent)));
 } else if (mode === "remembered") {
   check("an old remembered token is pointed out, with Forget", /earlier version kept/.test(text) && Boolean(await page.$("#forget")));
   check("updating still goes through Connect", Boolean(await page.$("#connect")));

@@ -114,6 +114,7 @@ Source: `src/peers.js:27-29`, `src/peers.js:111`, `src/membership.js:601`, `src/
 ## 3. Identity
 
 - **A site is its origin**, for example `https://ann.example`. Two sites are the same site exactly when their origins are equal as strings, after the normalisation in 2.1.
+- **Where a site runs** isn't part of the protocol. Most are on Cloudflare, at a `workers.dev` address; some run on their owner's own server, at an address of their own (afterwrd 0.53.0, `worker/selfhost/`). Both speak exactly this protocol. Friends' checks (5.12, 5.13, 5.16 to 5.18) only work between sites on Cloudflare, as a check asks Cloudflare what a site runs: a site treats any friend not at a `workers.dev` address as self-hosted, and never asks it for a check, offers one, or counts it as refusing. That's decided by the address, never by anything the other site says. A self-hosted site answers the check calls with `404`.
 - **The owner, as an actor**, has the id `<origin>/` (with a trailing slash).
 - **The owner's name** is the display name they gave when they set up their site. If there is none, it is `Someone`. It is sent in the following places:
   - the hello answers (`{"name": …}`);

@@ -84,14 +84,15 @@ git clone https://github.com/afterwrd/afterwrd && cd afterwrd/worker
 git checkout v0.23.0        # the release you want to check
 npm ci --ignore-scripts
 npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v0.23.0
-shasum -a 256 release/0.23.0/manifest.json release/0.23.0/installer.js
+shasum -a 256 release/0.23.0/manifest.json
 ```
 
-Both fingerprints should match the files of the same name attached to [that
-release](https://github.com/afterwrd/afterwrd/releases); the start of the manifest's is also shown at the foot of
+The fingerprint should match the `manifest.json` attached to [that
+release](https://github.com/afterwrd/afterwrd/releases); its start is also shown at the foot of
 [afterwrd.app](https://afterwrd.app/). The manifest lists the SHA-256 of every code and site file, and the installer
-and Update page refuse any file that doesn't match it, so a matching manifest covers all of those. The installer
-itself isn't in the manifest (it carries the manifest's fingerprint instead), which is why it's checked too.
+and Update page refuse any file that doesn't match it, so a matching manifest covers all of those. (Releases before
+0.53.0 also had an `installer.js` for Cloudflare's Deploy page, which carried the manifest's fingerprint and was worth
+checking too.)
 
 **Check its build record** (from 0.23.0 on). GitHub signs a record of every release saying that its files were built
 by this repository's release workflow, from the tagged commit. The record is kept in Sigstore's public transparency

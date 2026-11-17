@@ -123,11 +123,10 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     internet. Every call in afterwrd goes to one of three places: Cloudflare (its sign-in and its API, for installing and
     updating), GitHub (downloading releases and checking for new ones), or a site you've connected with. There are
     no analytics, no error-reporting services, no embedded scripts from anyone else, and no fonts fetched from elsewhere.</li>
-    <li><b>Read the installers.</b> The installer at install.afterwrd.app is <code>worker/central/index.js</code> in the
-    repository: it checks every file it installs against the release's manifest, and keeps nothing. The one for
-    Cloudflare's Deploy page is the file <code>installer.js</code> from the <a href="__RELEASE_PAGE__">published release
-    __VERSION__</a>, which GitHub builds from a tagged commit and which carries the fingerprint (a SHA-256 hash) of that
-    release's manifest. Either way, you can check afterwards what was installed: <a href="/check/">Check your install</a>.</li>
+    <li><b>Read the installer.</b> The installer at install.afterwrd.app is <code>worker/central/index.js</code> in the
+    repository: it checks every file it installs against the manifest of the <a href="__RELEASE_PAGE__">published release
+    __VERSION__</a>, which GitHub builds from a tagged commit, and keeps nothing. You can check afterwards what was
+    installed: <a href="/check/">Check your install</a>.</li>
     <li><b>Rebuild it yourself.</b> Releases are reproducible: building a release's tag on your own computer gives exactly
     the same files, so the same fingerprint. GitHub also signs a record of each build (who built it, from which commit),
     kept in Sigstore's public log where it can't be quietly changed. <a href="__REPO_PAGE__/blob/main/SECURITY.md#check-it-yourself">Check
@@ -310,9 +309,9 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   maintainer: it's what lets you install from a phone, without Cloudflare's code editor. It stores nothing, logs
   nothing, and its code is in the repository with everything else. Because it's run by someone else, it's one more thing
   to trust while you install, which is why <a href="/check/">Check your install</a> and a friend's check exist. If you'd
-  rather not use it, the <a href="__REPO_PAGE__#readme">README</a> explains installing with Cloudflare's own Deploy page
-  instead, which puts a copy of the installer in your own account and removes it afterwards.</p>
-  <p>Either way, to create your site's database and upload afterwrd into your
+  rather not trust it, or Cloudflare, you can run afterwrd on a server of your own instead: the
+  <a href="__REPO_PAGE__/tree/main/worker/selfhost">self-hosting instructions</a> explain how.</p>
+  <p>To create your site's database and upload afterwrd into your
   account the installer needs Cloudflare's permission, which it asks for through Cloudflare's own sign-in for apps: you press
   <b>Connect Cloudflare</b>, Cloudflare shows what afterwrd is asking for (making, changing and deleting Workers, which Cloudflare
   calls <i>Workers Admin</i>; making, changing and deleting databases; reading the account's workers.dev name) and you press <b>Allow</b>. Cloudflare then gives the installer a token that lasts an hour,

@@ -1,11 +1,11 @@
 // The owner's Update page: installs a newer afterwrd release over this one, keeping the database, photos and
-// secrets. It works with a one-hour token from Cloudflare's own sign-in (cloudflare.js: Connect, press Allow), or,
-// if that can't be used, with an API token the owner makes and pastes for the purpose. Nothing is kept afterwards.
+// secrets. It works with a one-hour token from Cloudflare's own sign-in (cloudflare.js: Connect, press Allow).
+// Nothing is kept afterwards.
 //   GET  /_admin/update            the page: this version, and the latest release (with its notes) if it's newer
 //   GET  /_admin/update/version    this version, for the page to see when the update has taken over
-//   POST /_admin/update/check      {token?, tag} -> which account this Worker is in
-//   POST /_admin/update/assets     {token?, account, tag} -> upload the release's site files
-//   POST /_admin/update/deploy     {token?, account, tag, jwt} -> the new version
+//   POST /_admin/update/check      {tag} -> which account this Worker is in
+//   POST /_admin/update/assets     {account, tag} -> upload the release's site files
+//   POST /_admin/update/deploy     {account, tag, jwt} -> the new version
 //   POST /_admin/update/forget     delete UPDATE_TOKEN, a token an earlier version remembered (no longer used)
 //   POST /_admin/update/auto-off   turn automatic updates off (auto.js; turning them on is a Connect of its own)
 //   POST /_admin/update/install-now  while they're on: "Install it now", the automatic run straight away, not waiting
@@ -16,10 +16,10 @@
 // release (or bring a group up to one) that's in the signed list, exactly as signed.
 // An update is staged and then switched by this version, which puts itself back if the new one doesn't answer
 // healthily within a few minutes (auto.js switchCarefully), as automatic updates are.
-//   POST /_admin/update/group-assets  {token?, group} -> upload this version's site files for a group this site made
-//   POST /_admin/update/group-deploy  {token?, group, jwt} -> bring that group's Worker up to this site's version
-// Without a token in the request, the connected one is used. Groups (groupsites.js) follow their owner's site: once
-// it's updated, this page offers to bring its groups up to the same version.
+//   POST /_admin/update/group-assets  {group} -> upload this version's site files for a group this site made
+//   POST /_admin/update/group-deploy  {group, jwt} -> bring that group's Worker up to this site's version
+// The connected token is used (or, while automatic updates are on, theirs). Groups (groupsites.js) follow their
+// owner's site: once it's updated, this page offers to bring its groups up to the same version.
 // Releases come from the GitHub repository in package.json (afterwrd.releases). Every file is checked against
 // the release's manifest; as with installing, trust rests on that repository.
 import pkg from "../package.json";
@@ -40,10 +40,6 @@ import { checkAttempts, checkGrant, checkingFriends, friendCheckResults, lastFai
 const VERSION = pkg.version;
 const REPO = pkg.afterwrd.releases;
 const TAG_RE = /^v\d+\.\d+\.\d+$/;
-// The fallback, a token made by hand: D1 too, so the same token can start and delete groups (groupsites.js).
-const PERMISSIONS = [{ key: "workers_scripts", type: "edit" }, { key: "d1", type: "edit" }, { key: "account_settings", type: "read" }];
-export const TOKEN_URL = "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys="
-  + encodeURIComponent(JSON.stringify(PERMISSIONS)) + "&accountId=*&zoneId=all&name=afterwrd%20update";
 export const TOKENS_PAGE = "https://dash.cloudflare.com/profile/api-tokens";
 const CHECK_SECONDS = 900; // how often the dot on the picture (and "Update available") looks for a new release
 const REFRESH_WAIT_MS = 1500; // how long a page waits for GitHub's answer when it's the one asking
@@ -102,15 +98,15 @@ export async function handleUpdate(request, env, url, owner) {
     if (!url.hostname.endsWith(".workers.dev")) throw new Error("Updating works from the site's workers.dev address.");
     const script = url.hostname.split(".")[0];
     if (path === "/forget") {
-      // A token remembered by a version before 0.20.0: removed with the connected (or pasted) token, or with itself.
+      // A token remembered by a version before 0.20.0: removed with the connected token, or with itself.
       if (!env.UPDATE_TOKEN) return json({ ok: true });
       let token;
-      try { token = tokenFor(request, body); } catch { token = env.UPDATE_TOKEN; }
+      try { token = tokenFor(request); } catch { token = env.UPDATE_TOKEN; }
       const { account } = await findWorker(token, url.hostname);
       await api(token, `/accounts/${account}/workers/scripts/${script}/secrets/UPDATE_TOKEN`, { method: "DELETE" });
       return json({ ok: true });
     }
-    const { token, background } = await updateToken(request, env, url, body);
+    const { token, background } = await updateToken(request, env, url);
     if (path !== "/check" && !/^[0-9a-f]{32}$/.test(body.account ?? "")) throw new Error("Unknown Cloudflare account.");
     // With automatic updates' access, only what's signed, exactly as signed (as the automatic run does).
     const pinned = background ? await signedManifest(env, url.origin, body.tag.slice(1)) : undefined;
@@ -157,12 +153,12 @@ export async function handleUpdate(request, env, url, owner) {
 }
 
 /**
- * The token an update step uses: one pasted or from Connect, as before, or, while automatic updates are on, one from
- * their background access, so the owner needn't connect at all.
+ * The token an update step uses: one from Connect, or, while automatic updates are on, one from their background
+ * access, so the owner needn't connect at all.
  */
-async function updateToken(request, env, url, body) {
+async function updateToken(request, env, url) {
   try {
-    return { token: tokenFor(request, body), background: false };
+    return { token: tokenFor(request), background: false };
   } catch (error) {
     const background = await backgroundToken(env, url.origin);
     if (background) return { token: background, background: true };
@@ -262,7 +258,7 @@ export const groupsBehind = async (db) => (await madeGroups(db)).filter((g) => g
 async function updateGroup(request, env, path, body) {
   try {
     const url = new URL(request.url);
-    const { token, background } = await updateToken(request, env, url, body);
+    const { token, background } = await updateToken(request, env, url);
     const group = (await groupsBehind(env.DB)).find((g) => g.id === Number(body.group));
     if (!group || !/^[0-9a-f]{32}$/.test(group.account)) throw new Error("That group is already up to date, or couldn't be reached.");
     const release = await loadRelease(GROUP_RELEASE, background ? await signedManifest(env, url.origin, VERSION) : undefined);

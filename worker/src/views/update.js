@@ -1,27 +1,19 @@
 // The owner's Update page (update.js): this version, the latest release and its notes, bringing groups up to date,
 // and asking a friend to check the site.
 import { connectLink } from "../cloudflare.js";
-import { TOKEN_URL, TOKENS_PAGE } from "../update.js";
+import { TOKENS_PAGE } from "../update.js";
 import { escape } from "../util.js";
 import { checkedWords, resultHtml } from "./checks.js";
 import { asset, FAVICON, ownerHeader } from "./nav.js";
 
-/** The Connect button for a step, or a note that it's done, with the by-hand fallback folded away. */
+/** The Connect button for a step, or a note that it's done. */
 function connectPart(connected, back, what, background = false) {
   if (connected) return `<p class="meta connected">Connected to Cloudflare for the next hour.</p>`;
   // Automatic updates' background access does it: nothing to connect.
   if (background) return `<p class="meta connected">This uses automatic updates' access, so there's no need to connect.</p>`;
   return `
 <p><a class="button" id="connect" href="${escape(connectLink(back))}">Connect Cloudflare</a>
-  <span class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd ${what}, for one hour. Nothing is kept.</span></p>
-<details class="other"><summary>If connecting doesn't work, use an API token</summary>
-  <ol class="how">
-    <li><a href="${TOKEN_URL}" target="_blank" rel="noopener">Create a token</a> in Cloudflare.
-      <span class="meta">The permissions are filled in: scroll down, press <b>Continue to summary</b>, <b>Create Token</b>, and copy it.</span></li>
-    <li>Paste it here: <input id="token" type="text" autocomplete="off" spellcheck="false" placeholder="Your API token" aria-label="Your API token">
-      <span class="meta">It's used only now, and then you delete it in Cloudflare (My Profile → API Tokens).</span></li>
-  </ol>
-</details>`;
+  <span class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd ${what}, for one hour. Nothing is kept.</span></p>`;
 }
 
 const day = (seconds) => new Date(seconds * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "Europe/London" });
@@ -229,14 +221,10 @@ ${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your
 <link rel="stylesheet" href="${asset("/static/style.css")}">
 ${FAVICON}
 <style>
-  .how { padding-left: 1.2rem; }
-  .how li { margin: 0.6rem 0; }
   .button, #go, #groups-go, button.go { display: inline-block; padding: 0.5rem 1rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button);
     font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
   .button + .meta { display: block; margin-top: 0.4rem; }
   #go:disabled, #groups-go:disabled, button.go:disabled { opacity: 0.6; cursor: default; }
-  #token { width: 100%; font: inherit; padding: 0.5rem; margin-top: 0.3rem; border: 1px solid var(--border); border-radius: 999px;
-    background: var(--bg); color: var(--text); -webkit-text-security: disc; }
   #error, #group-error, #forget-error, .error { color: var(--danger); }
   .security { padding: 0.6rem 0.9rem; border-left: 3px solid var(--danger); border-radius: 10px; background: var(--tint-4); }
   #done[hidden], #done [hidden] { display: none; }
@@ -347,7 +335,6 @@ ${forget}
     if (!res.ok) throw new Error(data.error || "Something went wrong.");
     return data;
   }
-  const pasted = () => document.getElementById("token")?.value.trim() || "";
   const forget = document.getElementById("forget");
   if (forget) forget.addEventListener("click", async () => {
     if (!(await askFirst("Forget the old token? Afterwards, delete it in Cloudflare too.", { ok: "Forget it" }))) return;
@@ -363,17 +350,16 @@ ${forget}
   if (groupsGo) groupsGo.addEventListener("click", async () => {
     const error = document.getElementById("group-error");
     const log = (text) => { const li = document.createElement("li"); li.textContent = text; document.getElementById("group-log").append(li); };
-    const token = pasted();
     error.textContent = "";
-    if (!token && !connected) { error.textContent = "Connect Cloudflare first."; return; }
+    if (!connected) { error.textContent = "Connect Cloudflare first."; return; }
     groupsGo.disabled = true;
     try {
       for (const group of JSON.parse(groupsGo.dataset.groups)) {
         log("Updating " + group.name + "…");
         let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
-        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("group-assets", { token, group: group.id }));
+        for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("group-assets", { group: group.id }));
         if (!jwt) throw new Error("Couldn't finish copying afterwrd to your account. Try again in a minute.");
-        await post("group-deploy", { token, group: group.id, jwt });
+        await post("group-deploy", { group: group.id, jwt });
       }
       log("Done.");
     } catch (err) {
@@ -383,23 +369,20 @@ ${forget}
   });
   if (go) go.addEventListener("click", async () => {
     const error = document.getElementById("error");
-    const token = pasted();
     const { tag, version } = go.dataset;
     const log = (text) => { const li = document.createElement("li"); li.textContent = text; document.getElementById("log").append(li); };
     error.textContent = "";
-    if (!token && !connected) { error.textContent = "Connect Cloudflare first."; return; }
+    if (!connected) { error.textContent = "Connect Cloudflare first."; return; }
     go.disabled = true;
     try {
       log("Checking your Cloudflare account…");
-      const { account } = await post("check", { token, tag });
+      const { account } = await post("check", { tag });
       log("Copying afterwrd " + version + " to your account…");
       let jwt = null; // a few files at a time (deploy.js FILES_AT_ONCE)
-      for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("assets", { token, account, tag }));
+      for (let i = 0; i < 30 && !jwt; i++) ({ jwt } = await post("assets", { account, tag }));
       if (!jwt) throw new Error("Couldn't finish copying afterwrd to your account. Try again in a minute.");
       log("Installing " + version + " and checking it works (this can take a few minutes)…");
-      await post("deploy", { token, account, tag, jwt });
-      const box = document.getElementById("token");
-      if (box) box.value = "";
+      await post("deploy", { account, tag, jwt });
       log("Waiting for the new version to start…");
       let started = false;
       // Cloudflare can take a few minutes to send visits to a new version (9 Nov 2026: over a minute), so up to three.

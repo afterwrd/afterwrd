@@ -1,10 +1,10 @@
 // Starting a group: this site makes the group its own Worker in the owner's Cloudflare account, with its own database,
 // running this same afterwrd release in group mode (groups.js), at <name>.<their subdomain>.workers.dev. It needs the
-// owner's Cloudflare connection (cloudflare.js: an hour's token from Connect), or an API token pasted for the purpose.
+// owner's Cloudflare connection (cloudflare.js: an hour's token from Connect).
 // Each step is its own request (the free plan allows 50 calls out per request), driven by the page (views.js):
-//   POST /_groups/create/check    {token?, name} -> {account, script}: the account, and a free name for the Worker
-//   POST /_groups/create/assets   {token?, account, script} -> {jwt}: the release's site files
-//   POST /_groups/create/deploy   {token?, account, script, jwt, name, about} -> {id}: the database, the code with a new
+//   POST /_groups/create/check    {name} -> {account, script}: the account, and a free name for the Worker
+//   POST /_groups/create/assets   {account, script} -> {jwt}: the release's site files
+//   POST /_groups/create/deploy   {account, script, jwt, name, about} -> {id}: the database, the code with a new
 //                                 GROUP_KEY secret, and its workers.dev address; and a row here, waiting to claim it
 //   POST /_groups/create/wait     {id} -> {ready}: whether it's answering yet
 //   POST /_groups/create/claim    {id} -> {id}: this site becomes the group's owner (membership.js)
@@ -12,7 +12,7 @@
 //                                 steps before claiming: on a self-hosted server (hosting.js), one made there by a
 //                                 command, from the address and setup code it gave; or, testing, one on this computer
 // And for a group this site made (its owner only):
-//   POST /_groups/<id>/delete     {token?}: the group tells its members it's closing, then its Worker and database go
+//   POST /_groups/<id>/delete     the group tells its members it's closing, then its Worker and database go
 // Updating groups to this site's version is on the Update page (update.js), with the same connection.
 import pkg from "../package.json";
 import { tokenFor } from "./cloudflare.js";
@@ -84,16 +84,16 @@ async function create(request, env, url, path, body) {
   }
 
   const { script: own, domain } = whereAmI(url);
-  const token = tokenFor(request, body);
+  const token = tokenFor(request);
   if (path === "/check") {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name) throw new Error("Give the group a name.");
     const { account } = await findWorker(token, url.hostname);
-    // Before anything's made: the token must be able to manage databases too (a pasted one might not).
+    // Before anything's made: the token must be able to manage databases too.
     try {
       await api(token, `/accounts/${account}/d1/database?per_page=1`);
     } catch {
-      throw new Error("That token can't make databases, which a group needs. Connect Cloudflare instead, or make a token with the link on this page.");
+      throw new Error("That Cloudflare connection can't make databases, which a group needs. Connect Cloudflare again, and Allow everything it asks.");
     }
     for (let n = 1; n <= 9; n++) {
       const script = scriptName(own, name, n);
@@ -146,7 +146,7 @@ export const isGroupWorker = (settings, group) => Boolean(settings && group.data
 async function remove(request, env, url, group, body) {
   if (group.role !== "owner") throw new Error("Only the group's owner can delete it.");
   if (group.script) {
-    const token = tokenFor(request, body);
+    const token = tokenFor(request);
     if (!ACCOUNT_RE.test(group.account ?? "") || !group.database) throw new Error("Unexpected details.");
     // Check the token can do it before anything's emptied.
     const settings = await workerSettings(token, group.account, group.script);

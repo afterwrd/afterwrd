@@ -1,7 +1,6 @@
 // Installing or updating afterwrd in someone's own Cloudflare account, through Cloudflare's API with a token they
-// give us. Used by the site's Update page (src/update.js), the Deploy-page installer (installer/installer.js, which
-// the release script bundles this file into) and the installer at install.afterwrd.app (central/index.js). Nothing
-// here stores the token.
+// give us. Used by the site's Update page (src/update.js) and the installer at install.afterwrd.app
+// (central/index.js). Nothing here stores the token.
 //
 // A release is a folder of files published at `base` (a GitHub release): manifest.json lists every code module
 // and site file with its SHA-256, and each file is published under its hash. Every file is checked against

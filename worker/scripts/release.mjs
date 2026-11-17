@@ -5,14 +5,11 @@
 // writes release/<version>/, a flat folder so every file can be a GitHub release asset:
 //   manifest.json    the code modules and site files, each with its SHA-256, plus the Worker settings
 //   <sha256>         every file, named by its hash
-//   installer.js     the installer, with the manifest's hash built in: deployed by the install page's "Install on
-//                    Cloudflare" link, or pasted into a new Worker by hand
 // and release/site/, the install page (with the Connect page Cloudflare's sign-in comes back to, and How it works).
-// Publish every file in the folder at --base unchanged; the installer refuses anything that doesn't match.
+// Publish every file in the folder at --base unchanged; installing and updating refuse anything that doesn't match.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { build as bundle } from "esbuild";
-import lz from "lz-string";
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -170,42 +167,13 @@ const manifest = {
 const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2));
 writeFileSync(join(out, "manifest.json"), manifestBytes);
 
-// The installer and the deploy code it shares with the Update page (src/deploy.js), as one file people can
-// paste. Bundling drops comments, so the installer's opening explanation is put back as a header.
-const installerPath = join(worker, "installer", "installer.js");
-const header = readFileSync(installerPath, "utf8").match(/^(\/\/.*\n)+/)[0];
-const bundled = await bundle({
-  entryPoints: [installerPath], bundle: true, format: "esm", target: "es2022", write: false, legalComments: "none",
-  banner: { js: header },
-});
-const installer = bundled.outputFiles[0].text
-  .replaceAll("__RELEASE_BASE__", base)
-  .replaceAll("__MANIFEST_SHA256__", sha256(manifestBytes))
-  .replaceAll("__VERSION__", version);
-writeFileSync(join(out, "installer.js"), installer);
-
-// "Install on Cloudflare": a link to Cloudflare's own Deploy page with the installer filled in, made the way the Workers
-// Playground's Deploy button makes it (the Worker as a form, compressed into the part after "#", which never leaves
-// the browser). The page's name for the Worker is the end of the path; Cloudflare adds a random ending to it, so the
-// installer asks for the site's address itself and moves afterwrd there (see installer.js).
-const playground = new FormData();
-playground.set("installer.js", new Blob([installer], { type: "application/javascript+module" }), "installer.js");
-playground.set("metadata", new Blob([JSON.stringify({ compatibility_date: config.compatibility_date, main_module: "installer.js" })],
-  { type: "application/json" }));
-const form = new Response(playground);
-const deployLink = "https://dash.cloudflare.com/workers-and-pages/deploy/playground/afterwrd-installer#"
-  + lz.compressToEncodedURIComponent(`${form.headers.get("content-type")}:${await form.text()}`);
-
-// The install page (published to GitHub Pages by the release workflow), with this installer in it to copy.
+// The install page (published to GitHub Pages by the release workflow).
 const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(base)?.[1];
-const escapeHtml = (text) => text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 const site = join(worker, "release", "site");
 rmSync(site, { recursive: true, force: true });
 mkdirSync(site, { recursive: true });
 writeFileSync(join(site, "index.html"), readFileSync(join(worker, "installer", "page.html"), "utf8")
-  .replaceAll("__INSTALLER_HTML__", () => escapeHtml(installer)) // a function, so "$" in the code stays literal
   .replaceAll("__VERSION__", version)
-  .replaceAll("__DEPLOY_LINK__", deployLink)
   .replaceAll("__MANIFEST_SHORT__", sha256(manifestBytes).slice(0, 12))
   .replaceAll("__RELEASE_PAGE__", repo ? `https://github.com/${repo}/releases/tag/v${version}` : base)
   .replaceAll("__REPO_PAGE__", repo ? `https://github.com/${repo}` : base));
@@ -238,7 +206,7 @@ rmSync(dist, { recursive: true, force: true });
 const total = [...modules, ...assets].reduce((n, f) => n + f.size, 0);
 console.log(`afterwrd ${version}: ${modules.length} code modules and ${assets.length} site files (${(total / 1e3).toFixed(0)} KB)`);
 console.log(`  ${relative(worker, out)}/  → publish at ${base}/`);
-console.log(`  installer: ${relative(worker, join(out, "installer.js"))} (manifest ${sha256(manifestBytes).slice(0, 12)}…)`);
+console.log(`  manifest ${sha256(manifestBytes).slice(0, 12)}…`);
 
 function newerThan(a, b) {
   const [x, y] = [a, b].map((v) => v.split(".").map(Number));

@@ -68,44 +68,44 @@ it's public (see [SECURITY.md](SECURITY.md)).
 
 ## Install your own
 
-**Easiest: use the install page, <https://afterwrd.app/>, on a phone or a computer.** Make your Cloudflare account
-(step 1 below) and stay signed in, then press *Install*: afterwrd's installer at <https://install.afterwrd.app/>
-connects to your Cloudflare account (you press *Allow* on Cloudflare's page; it lasts an hour and nothing is kept),
-asks your name (and makes your address from it, `afterwrd.<your-name>.workers.dev`, if the account hasn't one yet), puts afterwrd there, and
-sends you straight to your new site to make yourself its owner. It runs in the
-maintainer's Cloudflare account, so it's one more thing to trust: if you'd rather not, put the installer in your own
-account and run it there. By hand, the steps in full:
+Two ways: in a free Cloudflare account of your own (the easy way, and the one most people take), or on your own
+server.
 
-You need a free Cloudflare account and a few minutes, on a phone or a computer. Bringing your Facebook years is optional, and
-can be done any time.
+### In your own Cloudflare account
+
+You need a free Cloudflare account and a few minutes, on a phone or a computer. Bringing your Facebook years is optional,
+and can be done any time.
 
 1. **Make a Cloudflare account** at <https://dash.cloudflare.com/sign-up>. An email address is all it asks
    for; don't add a card. If you already use Cloudflare for other things, make a new account just for afterwrd:
    installing and updating ask for permission over every Worker and database in the account, for an hour, so in an
    account of its own that's only afterwrd.
-2. **Create a Worker.** In the Cloudflare dashboard's left-hand menu: *Compute* → *Workers & Pages* →
-   *Create application* (top right) → *Start with Hello World*. Replace the made-up *Worker name* (something
-   like `blue-mud-43e4`) with `afterwrd`, or whatever you like: it becomes your address,
-   `afterwrd.<your-name>.workers.dev`. Leave *Protect with Cloudflare Access* off (afterwrd has its own
-   sign-in) and press *Deploy*. The first time, Cloudflare asks you to choose `<your-name>`.
-3. **Paste in the installer.** Download `installer.js` from the [latest release](https://github.com/afterwrd/afterwrd/releases/latest)
-   and copy all of it, then in the Worker press *Edit code*, select everything there, paste over it and press *Deploy*.
-4. **Run it.** Open your Worker's address. Choose your site's address, press **Connect Cloudflare** and, on
-   Cloudflare's page, **Allow**: that lets the installer make your database and upload afterwrd, for an hour, and
-   nothing is kept afterwards. (If connecting doesn't work, the installer can use an API token you make instead.)
-5. **Make yourself the owner.** The installer hands over to afterwrd: give your name and create a passkey
-   (your face, fingerprint or device PIN; there's no password). Then write a post, add photos, and connect
+2. **Install.** Stay signed in to Cloudflare, open <https://afterwrd.app/> and press *Install*. afterwrd's installer at
+   <https://install.afterwrd.app/> connects to your Cloudflare account (you press *Allow* on Cloudflare's page; it lasts
+   an hour and nothing is kept), asks your name (and makes your address from it, `afterwrd.<your-name>.workers.dev`,
+   if the account hasn't one yet), and puts afterwrd there.
+3. **Make yourself the owner.** The installer sends you straight to your new site: give your name and create a
+   passkey (your face, fingerprint or device PIN; there's no password). Then write a post, add photos, and connect
    with friends from *Friends*.
-6. **Optional: bring your Facebook years.** On Facebook: Settings → *Download your information* → choose your
+4. **Optional: bring your Facebook years.** On Facebook: Settings → *Download your information* → choose your
    profile, *All available information*, format **JSON**, media quality *High*. Facebook emails you when it's
    ready (from minutes to a day). Then choose *Import* in afterwrd's menu, pick the zip file(s), tick what to
    bring and press *Import and publish*. Your browser reads the download; only what you tick is uploaded. Your
    Facebook friends then appear on *Friends*, each with an *Invite* button that makes a message to send them.
 
 Connecting uses Cloudflare's own sign-in for apps: afterwrd is a registered app there, and you can see or revoke what
-you've allowed under *My Profile* → *Connected Applications*. The installer checks every file it downloads against the
-fingerprint built into it, so what's installed is exactly the published release. Cloudflare's free plan allows 5 GB of
-photos and videos. To check a release for yourself, see [Check it yourself](SECURITY.md#check-it-yourself).
+you've allowed under *My Profile* → *Connected Applications*. The installer runs in the maintainer's Cloudflare account,
+so it's one more thing to trust; it checks every file it downloads against the release's published fingerprints, so
+what's installed is exactly the published release. Cloudflare's free plan allows 5 GB of photos and videos. To check a
+release for yourself, see [Check it yourself](SECURITY.md#check-it-yourself).
+
+### On your own server
+
+afterwrd doesn't need Cloudflare. With Docker on a server of your own (a home server, a Raspberry Pi or a rented one)
+and an address for your site, a [Docker image](worker/selfhost/README.md) runs the same afterwrd on workerd, the
+open-source engine Cloudflare's Workers run on, with Caddy in front for HTTPS. It can be friends and share groups with
+sites on Cloudflare. Friends' sites can't check a self-hosted site (nothing outside your server can say what runs on
+it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/selfhost/README.md).
 
 ### Keeping it safe
 
@@ -122,8 +122,7 @@ photos and videos. To check a release for yourself, see [Check it yourself](SECU
 - **Let your friends' sites check it.** One more *Allow* (read-only), and a few times a week a friend's afterwrd site
   checks yours is exactly a signed release, with nothing else uploaded in its place since the last check. A finding
   shows on both your Homes. Otherwise the owner's *Update* page installs a newer release, keeping
-  your passkeys, connections and archive. (Pasting a newer `installer.js` over your afterwrd Worker does the same.) Home says so when an update
-  fixes a security problem. To hear about every release, *Watch* the repository on GitHub (*Custom* → *Releases*) or
+  your passkeys, connections and archive. Home says so when an update fixes a security problem. To hear about every release, *Watch* the repository on GitHub (*Custom* → *Releases*) or
   follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
   wasn't you, remove it in *Your devices*.
@@ -132,7 +131,9 @@ photos and videos. To check a release for yourself, see [Check it yourself](SECU
   site checks it's in that account, signs every device out, and lets you make a passkey on the one you're using.
 - **Use a Cloudflare account just for afterwrd** if you use Cloudflare for anything else (see step 1).
 
-## Running and developing the Worker
+(On your own server, some of this is different: see [worker/selfhost/README.md](worker/selfhost/README.md).)
+
+## Using your site
 
 `worker/` is a Cloudflare Worker that shows your archive only to people who've signed in with a passkey.
 You import from a page on the site itself: your browser reads the Facebook download and uploads only the
@@ -140,26 +141,7 @@ sections you choose. Posts, people and the rest go into D1, photos and videos in
 Worker builds pages from them, so search and filters work as they do locally. Cloudflare's free plan covers
 it with no card needed: Workers, D1 and SQLite-backed Durable Objects only, no R2 or Zero Trust.
 
-**One-off setup.** Every command below runs in `worker/`.
-
-1. Create a free Cloudflare account at <https://dash.cloudflare.com/sign-up>. It needs only an email address.
-2. Install the Worker's tools, sign in and deploy. The first time, wrangler asks you to pick a workers.dev
-   subdomain and creates the database:
-   ```sh
-   cd worker
-   npm install
-   npx wrangler login                       # opens the browser
-   npm run deploy
-   ```
-3. Make yourself the owner. Use the address the deploy printed:
-   ```sh
-   npm run owner -- "Your Name" --url https://afterwrd.<subdomain>.workers.dev
-   ```
-   Open the link and create a passkey.
-4. Go to **Import** in the menu, choose the zip file(s) from Facebook (or the unzipped folder), tick what to
-   publish and press **Import and publish**.
-
-**Afterwards.** Nothing needs the terminal:
+Once it's installed, nothing needs the terminal:
 
 - **Import** again whenever you have a newer download, or to change what's published. Files already on the
   site aren't uploaded again, and files the new import doesn't use are deleted. Friends see the old version
@@ -210,8 +192,8 @@ it with no card needed: Workers, D1 and SQLite-backed Durable Objects only, no R
   which ends it all at once. If a friend's site stops answering for a day, Home stops mentioning it and *Friends*
   says so instead, so you can remove them. Two sites in the same Cloudflare account can connect too.
 - **Groups.** Each group is its own small site: *Groups → Start a group* makes it a Worker of its own, with its own
-  database, in your Cloudflare account (with the token remembered for updates, or one you paste; it needs to edit
-  Workers and D1). It runs afterwrd in group mode: it holds the group and nothing else, and no one signs in to it.
+  database, in your Cloudflare account (you *Connect Cloudflare* and *Allow*, for an hour; on your own server, a command
+  there makes it). It runs afterwrd in group mode: it holds the group and nothing else, and no one signs in to it.
   You and its members use it from your own sites, so being in a group isn't being friends, and a group's keys open
   nothing on anyone's site. Make an invite link on its *Members* page and send it round: anyone with an afterwrd site
   can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 40 besides its
@@ -245,9 +227,6 @@ it with no card needed: Workers, D1 and SQLite-backed Durable Objects only, no R
   checks your own site every 30 seconds: the counts in the menu update, and a small bar offers to show new posts
   or comments. Nothing moves until you choose, and none of it is pushed to your phone.
 
-`npm run deploy` is only for new versions of afterwrd's code; it never touches your archive.
-`npm run owner` (with no name) makes a new device link from the terminal, if you're ever without one.
-
 **What's published.** Only what the chosen sections show; the rest never leaves your computer. With the
 default (posts and photos):
 - comments are published only when a photo is attached to them;
@@ -262,14 +241,15 @@ Files over 95 MB (the most Cloudflare accepts in one upload) are left out with a
 git tag -a v<version> -m "afterwrd <version>" && git push origin v<version>
 ```
 A GitHub Action (`.github/workflows/release.yml`) builds the release from the tagged code and publishes it with
-every file attached, including `installer.js`. To build one locally instead:
+every file attached, and another (`image.yml`) builds and publishes the self-hosted image. To build a release locally
+instead:
 `npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v<version>` in `worker/`.
 
 **Licences.** After adding, removing or upgrading a dependency, run `npm run notices` in `worker/` and commit the
 updated `public/static/licenses.txt`, which carries the licences of everything installed with afterwrd. The release
 won't build while it's out of date, or if the Worker bundles a package it doesn't cover.
 
-**Testing.** To try the site locally: `npm run dev` (the site brings its database up to date on its first request:
+**Developing and testing.** In `worker/`: `npm install`. To try the site locally: `npm run dev` (the site brings its database up to date on its first request:
 apply migrations that way, not with `wrangler d1 migrations apply`, which only knows the `.sql` ones), then
 `npm run owner -- "Test" --local` and import at `http://localhost:8787/_admin/import`. Passkeys work on `localhost`
 but not on `127.0.0.1`.

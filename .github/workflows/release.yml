@@ -3,8 +3,9 @@
 #   (bump "version" in worker/package.json and commit)
 #   git tag -a v0.2.0 -m "afterwrd 0.2.0" && git push origin v0.2.0
 #
-# The release's files (manifest, files named by hash, installer.js) are built here from the tagged source and
-# attached to a GitHub release, which is where installers download them from.
+# The release's files (the manifest, and every file named by its hash) are built here from the tagged source and
+# attached to a GitHub release, which is where installing and updating download them from. The self-hosted image is
+# built from the same tag by image.yml.
 name: Release
 
 on:
@@ -65,9 +66,9 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" release/"$VERSION"/* \
             --title "afterwrd $VERSION" \
-            --notes "To install, follow the [install page](https://$(node -p "require('./package.json').afterwrd.site")/), which copies installer.js for you."
+            --notes "To install, use the [install page](https://$(node -p "require('./package.json').afterwrd.site")/). To run it on your own server instead, see [worker/selfhost](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME/worker/selfhost)."
 
-      # The install page, with this release's installer in it, goes to the gh-pages branch, which GitHub Pages
+      # The install page goes to the gh-pages branch, which GitHub Pages
       # serves (Settings → Pages → Deploy from a branch → gh-pages) at the domain in package.json (afterwrd.site).
       # Only the latest page is kept.
       - name: Publish the install page

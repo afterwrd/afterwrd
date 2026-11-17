@@ -265,7 +265,10 @@ await bob.click(`a[href="/groups/${bobGroup}/posts/${bobPost}"]`);
 await bob.waitForSelector("article.in-group");
 check("…and link to the post's own page, with its comments", (await cards(bob))[0]?.comments.length === 3);
 
-// Live: Bob has his group open; Cat comments on his post; a quiet bar offers it.
+// Live: Bob has his group open; Cat comments on his post; a quiet bar offers it. Times are in seconds and the bar counts
+// from the second the page was made, so the earlier comments' notes are let fall into an earlier second first (or the
+// bar would rightly count one of them too), and Cat's comment comes in a later one.
+await new Promise((r) => setTimeout(r, 1100));
 await bob.goto(`${B}/groups/${bobGroup}`);
 await new Promise((r) => setTimeout(r, 1100));
 await cat.goto(`${C}/groups/${catGroup}`);
