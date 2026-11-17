@@ -297,6 +297,27 @@ for (let i = 0; i < 4; i++) {
 await sam.goto(`${B}/`);
 check("…and still do after more than five (the last check that got through is kept)", /hasn't let yours check it the last \d+ times/.test(await text(sam, ".friend-check")));
 
+// Ann's side of it: her site notes Sam's site tried (once a day at most), and says so.
+const tried = JSON.parse(sql(stateA, "SELECT value FROM settings WHERE key = 'check_attempts'")[0]?.value ?? "{}");
+check("Ann's site notes that Sam's site tried, once (not a write for every try)", Object.keys(tried).length === 1, JSON.stringify(tried));
+await ann.goto(`${A}/_admin/update`);
+check("…and her Update page says so, next to the offer to let them", (await text(ann, "#check-attempts")).includes("Sam Taylor's site has tried to check yours lately")
+  && Boolean(await ann.$("#checks-off a[href='/_cloudflare/checks-start']")));
+// Home's one reminder: not for a new site (it was just asked at setup)…
+await ann.goto(`${A}/`);
+check("Home doesn't remind a site that's only just been set up", !(await ann.$("#look-after")));
+// …but once it's a few days old, once.
+sql(stateA, `UPDATE credentials SET created_at = created_at - ${4 * 86400}`);
+await ann.goto(`${A}/`);
+const reminder = await text(ann, "#look-after");
+check("a few days on, Home reminds her once, saying Sam's site tried, with a way to set it up",
+  reminder.includes("let friends' sites check it's genuine") && reminder.includes("Sam Taylor's site has already tried to check it")
+  && /checks-start|then=checks/.test(await ann.$eval("#look-after-go", (a) => a.getAttribute("href"))), reminder);
+await ann.click("#look-after button"); // in place (ui.js data-inplace)
+await ann.waitForFunction(() => !document.getElementById("look-after"), { timeout: 10000 }).catch(() => {});
+await ann.goto(`${A}/`);
+check("…and after Not now, never again", !(await ann.$("#look-after")) && sql(stateA, "SELECT COUNT(*) AS n FROM settings WHERE key = 'look_after_reminded'")[0].n === 1);
+
 // --- a new site's setup: both Allows, one after the other, then on to the site -------------------------------------
 sql(stateB, "UPDATE settings SET value = json_set(value, '$.on', json('false')) WHERE key = 'auto_update'");
 relay = null;

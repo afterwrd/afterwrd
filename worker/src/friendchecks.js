@@ -121,6 +121,55 @@ async function letOn(env, data) {
   await box.keepSecret("check_client", CLIENT_ID); // renewed with the app it was given to (cloudflare.js grantClient)
   await box.keepSecret("check_access", null);
   await saveSetting(env.DB, GRANT_KEY, { on: true, since: now(), problem: null });
+  await env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(ATTEMPTS_KEY).run();
+}
+
+// Friends' sites that asked to check this one while it didn't let them: settings check_attempts, {<connection id>: when},
+// kept so the owner can see their friends are trying (the Update page, and Home's one reminder). At most one write a
+// day for each friend, so a site asking over and over can't wear out this one's database.
+const ATTEMPTS_KEY = "check_attempts";
+const ATTEMPTS_DAYS = 14;
+
+async function noteTurnedDown(db, connectionId) {
+  const at = now();
+  const path = `$."${Number(connectionId)}"`;
+  await db.batch([
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES (?, '{}')").bind(ATTEMPTS_KEY),
+    db.prepare("UPDATE settings SET value = json_set(value, ?1, ?2) WHERE key = ?4 AND COALESCE(json_extract(value, ?1), 0) < ?3")
+      .bind(path, at, at - 86400, ATTEMPTS_KEY),
+  ]);
+}
+
+/** Friends whose sites tried to check this one lately, while it didn't let them: [{name, at}], newest first. */
+export async function checkAttempts(db) {
+  const tried = await setting(db, ATTEMPTS_KEY);
+  const since = now() - ATTEMPTS_DAYS * 86400;
+  const ids = Object.entries(tried).filter(([, at]) => Number(at) > since).map(([id]) => Number(id)).filter(Number.isSafeInteger);
+  if (!ids.length) return [];
+  const { results } = await db.prepare(`SELECT id, name FROM connections WHERE id IN (SELECT value FROM json_each(?))
+    AND connected_at IS NOT NULL AND approved_at IS NOT NULL`).bind(JSON.stringify(ids)).all();
+  return results.map((r) => ({ name: String(r.name), at: Number(tried[r.id]) })).sort((a, b) => b.at - a.at);
+}
+
+// Home's one reminder (views/home.js) that the site can look after itself, for an owner who didn't allow both lasting
+// permissions: shown once the site is a few days old, and never again after "Not now" (settings look_after_reminded).
+const REMIND_AFTER_DAYS = 3;
+
+/** What Home's reminder offers: {auto, checks, attempts} for the ones not allowed yet, or null for no reminder. */
+export async function lookAfterReminder(db, auto, grant) {
+  if ((auto.on || auto.problem) && (grant.on || grant.problem)) return null;
+  const [seen, first] = await db.batch([
+    db.prepare("SELECT 1 FROM settings WHERE key = 'look_after_reminded'"),
+    db.prepare("SELECT MIN(created_at) AS at FROM credentials"),
+  ]);
+  const since = /** @type {{ at: number | null } | undefined} */ (first.results?.[0])?.at;
+  if (seen.results?.length || !since || since > now() - REMIND_AFTER_DAYS * 86400) return null;
+  return { auto: !auto.on && !auto.problem, checks: !grant.on && !grant.problem, attempts: grant.on ? [] : await checkAttempts(db) };
+}
+
+/** "Not now" on Home's reminder: it isn't shown again. */
+export async function lookAfterLater(db) {
+  await db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('look_after_reminded', ?)").bind(String(now())).run();
 }
 
 /** "Not now" on Home's offer (the Update page still has it). */
@@ -139,7 +188,10 @@ export async function letOff(env) {
  */
 export async function giveCheckToken(env, url, peer, body) {
   if (body?.type !== "CheckToken") return [{ error: "That isn't a request for a check." }, 400];
-  if (!(await checkGrant(env.DB)).on) return [{ error: "This site doesn't let friends' sites check it by themselves.", off: true }, 409];
+  if (!(await checkGrant(env.DB)).on) {
+    await noteTurnedDown(env.DB, peer.id);
+    return [{ error: "This site doesn't let friends' sites check it by themselves.", off: true }, 409];
+  }
   const at = now();
   // Counted in the same statement as the insert, so requests sent all at once can't slip past.
   const row = await env.DB.prepare(`INSERT INTO check_tokens (connection_id, at) SELECT ?1, ?2

@@ -38,7 +38,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null }) {
+export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null }) {
   const stream = [
     ...own.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
@@ -67,6 +67,15 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
       <a href="/_admin/update#checking">See what it found</a> <button class="link">Put it away</button></form>`)}
     ${checkGrant.problem && html`<p class="notice alert">Your friends' sites can't check yours by themselves any more:
       ${checkGrant.problem} <a href="/_admin/update#check">Let them again</a>.</p>`}
+    ${lookAfter && html`<form class="notice" id="look-after" method="post" action="/_admin/checks/remind-later" data-region="" data-inplace="remove">
+      ${lookAfter.auto && lookAfter.checks ? html`Your site can look after itself: keep itself up to date, and let friends' sites check
+          it's genuine.`
+        : lookAfter.auto ? html`Your site can keep itself up to date, so fixes reach it without you doing anything.`
+        : html`Your site can let friends' sites check it's genuine now and then, and tell you if anything's wrong.`}
+      ${lookAfter.attempts.length > 0 && html`${listed(lookAfter.attempts.map((a) => `${a.name}'s`))}
+        ${lookAfter.attempts.length === 1 ? "site has" : "sites have"} already tried to check it.`}
+      <a id="look-after-go" href="${lookAfter.auto ? (lookAfter.checks ? "/_cloudflare/auto-start?then=checks" : "/_cloudflare/auto-start") : "/_cloudflare/checks-start"}">Set it up</a>
+      <button class="link">Not now</button></form>`}
     ${recovered && html`<form class="notice alert" id="recovered" method="post" action="/_admin/devices/recovered-seen" data-region="" data-inplace="remove">
       You got back into your site through Cloudflare on ${fmtDate(recovered)}. Every other device was signed out and its
       passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in

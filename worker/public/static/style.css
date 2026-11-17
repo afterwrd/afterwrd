@@ -273,7 +273,8 @@ button.busy { cursor: progress; animation: busy 1.2s ease-in-out infinite; }
 .say { display: flex; align-items: flex-end; gap: 0.5rem; }
 .say textarea {
   flex: 1; min-width: 0; min-height: 2.6rem; max-height: 12rem; field-sizing: content; resize: none;
-  padding: 0.55rem 1.05rem; border: 1px solid transparent; border-radius: 999px;
+  /* Half the one-line height: a pill on one line, a softly rounded box as it grows. */
+  padding: 0.55rem 1.05rem; border: 1px solid transparent; border-radius: 1.3rem;
   font: inherit; font-size: 0.95rem; background: var(--sunken); color: var(--text);
 }
 .say textarea:focus { outline: none; border-color: var(--accent); }

@@ -104,14 +104,18 @@ function autoNext(auto, running) {
  * Friends' sites checking this one by themselves (friendchecks.js): that they do, or the offer to let them, and what a
  * check found. Everything else, done by hand or rarely, is folded away below it (see updatePage).
  */
-function checksPart(grant, failure) {
+function checksPart(grant, failure, attempts = []) {
   const found = failure ? `<div class="notice alert" id="check-failure"><p><b>${escape(failure.name)}'s site checked yours</b> on
     ${escape(day(failure.checked_at))}${failure.version ? ` (afterwrd ${escape(failure.version)})` : ""} and found something that needs a look:</p>
     <ul>${failure.problems.map((p) => `<li>${escape(p)}</li>`).join("")}</ul>
     <p class="meta">If you didn't change anything in Cloudflare yourself, ask ${escape(failure.name)} about it, and see
     <a href="https://afterwrd.app/check/#wrong">what to do</a>.</p></div>` : "";
   if (grant.on) return `${found}<p id="checks-on">Your friends' sites check yours by themselves now and then, and tell you if anything's wrong.</p>`;
-  return `${found}<div id="checks-off">${grant.problem ? `<p class="notice alert">Friends' sites can't check yours by themselves any more: ${escape(grant.problem)}</p>` : ""}
+  const names = attempts.map((a) => `${escape(a.name)}'s`);
+  const tried = attempts.length ? `<p class="notice" id="check-attempts">${names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`}
+    ${attempts.length === 1 ? "site has" : "sites have"} tried to check yours lately (most recently on ${escape(day(attempts[0].at))}), but it isn't
+    allowed yet.</p>` : "";
+  return `${found}<div id="checks-off">${grant.problem ? `<p class="notice alert">Friends' sites can't check yours by themselves any more: ${escape(grant.problem)}</p>` : ""}${tried}
   <p><b>Let your friends' sites check yours by themselves.</b> Now and then, a friend's afterwrd site checks yours is the
   genuine afterwrd, and tells you if anything's wrong. It can only look, never change anything. Cloudflare will ask you
   to <b>Allow</b> it: leave <b>Background Access</b> ticked.</p>
@@ -152,7 +156,7 @@ function checkingPart(auto, checking, results) {
 }
 
 /** @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data */
-export function updatePage({ owner, version: VERSION, latest, available, securityFix, site, connected, oldToken, groups, go, checked = null, friends = [], checkWait = 0, auto = { on: false }, history = [], problem = null, madeGroups = 0, checkGrant = {}, checkFailure = null, checking = true, friendChecks = [], me = null }) {
+export function updatePage({ owner, version: VERSION, latest, available, securityFix, site, connected, oldToken, groups, go, checked = null, friends = [], checkWait = 0, auto = { on: false }, history = [], problem = null, madeGroups = 0, checkGrant = {}, checkFailure = null, checking = true, friendChecks = [], checkAttempts = [], me = null }) {
   // While automatic updates are on, they're the one way to update (signed releases only), unless a release has to be
   // installed by hand (a new kind of store): then the steps below, with their access.
   const byHand = !auto.on || !auto.next || (auto.waiting?.needsHand && auto.waiting.version === auto.next.version);
@@ -247,7 +251,7 @@ ${history.length ? `<section class="card" id="history">
 <section class="card" id="check">
   <h2>Friends' checks</h2>
   <p id="last-checked">${checked ? escape(checkedWords(checked)) : "Your site hasn't been checked yet."}</p>
-  ${checksPart(checkGrant, checkFailure)}
+  ${checksPart(checkGrant, checkFailure, checkAttempts)}
   <details class="other" id="checks-more"${friendChecks.some((r) => r.verdict === "needs a look" && !r.seen_at) ? " open" : ""}>
   <summary>More about checks</summary>
   ${letOffPart(checkGrant)}

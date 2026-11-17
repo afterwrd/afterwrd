@@ -21,7 +21,7 @@ import { newPushDevices, pushKey } from "../push.js";
 import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
 import { autoState } from "../auto.js";
-import { checkGrant, friendCheckAlerts, lastFailure } from "../friendchecks.js";
+import { checkGrant, friendCheckAlerts, lastFailure, lookAfterReminder } from "../friendchecks.js";
 import { now, pageData, withoutKeys } from "../util.js";
 import { safeNext } from "../auth.js";
 import { fmtDate, fmtMonth } from "../views/format.js";
@@ -619,6 +619,8 @@ async function home(ctx, params) {
     // that their sites keep refusing): friendchecks.js.
     checkFailure, friendChecks,
     checkGrant: checkGrantState, // a problem with it, if there is one
+    // The one reminder that the site can look after itself (keep up to date, let friends' sites check it), if it can't yet.
+    lookAfter: await lookAfterReminder(db, auto, checkGrantState),
     asking, introductions,
   };
 }

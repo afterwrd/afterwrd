@@ -36,7 +36,7 @@ import { API } from "./deploy.js";
 import { checkLinkPage, messagePage } from "./views/pages.js";
 import { callSite, ownerName, siteOrigin } from "./peers.js";
 import { knownLatest, newer } from "./update.js";
-import { laterChecks, letOff, putAway, setCheckingFriends } from "./friendchecks.js";
+import { laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
 import { signedList } from "./signing.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 
@@ -68,6 +68,10 @@ export async function handleCheckAdmin(request, env, url) {
   // Friends' automatic checks (friendchecks.js): letting friends' sites check this one, this one checking theirs.
   if (url.pathname === "/_admin/checks/let-later") {
     await laterChecks(env.DB);
+    return Response.redirect(`${url.origin}/`, 303);
+  }
+  if (url.pathname === "/_admin/checks/remind-later") { // "Not now" on Home's one reminder to let the site look after itself
+    await lookAfterLater(env.DB);
     return Response.redirect(`${url.origin}/`, 303);
   }
   if (url.pathname === "/_admin/checks/let-off") {

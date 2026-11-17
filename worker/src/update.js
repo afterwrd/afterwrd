@@ -34,7 +34,7 @@ import { html, json, now, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
 import { updatePage } from "./views/update.js";
 import { lastChecked, tooSoonToCheck } from "./checks.js";
-import { checkGrant, checkingFriends, friendCheckResults, lastFailure } from "./friendchecks.js";
+import { checkAttempts, checkGrant, checkingFriends, friendCheckResults, lastFailure } from "./friendchecks.js";
 
 const VERSION = pkg.version;
 const REPO = pkg.afterwrd.releases;
@@ -190,7 +190,7 @@ async function updateData(request, env, url, owner) {
     problem: await updateProblem(env.DB),
     // Friends' automatic checks (friendchecks.js): whether friends' sites may check this one, what the last that found
     // something said, and this site's checks of theirs.
-    checkGrant: await checkGrant(env.DB), checkFailure: await lastFailure(env.DB),
+    checkGrant: await checkGrant(env.DB), checkFailure: await lastFailure(env.DB), checkAttempts: await checkAttempts(env.DB),
     checking: await checkingFriends(env.DB), friendChecks: await friendCheckResults(env.DB),
   };
 }
