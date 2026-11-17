@@ -8,8 +8,9 @@
 //                                 GROUP_KEY secret, and its workers.dev address; and a row here, waiting to claim it
 //   POST /_groups/create/wait     {id} -> {ready}: whether it's answering yet
 //   POST /_groups/create/claim    {id} -> {id}: this site becomes the group's owner (membership.js)
-//   POST /_groups/create/local    {origin, setup, name, about} -> {id}: only when testing (ALLOW_LOCAL_SITES), a
-//                                 group Worker already running on this computer, instead of the steps before claiming
+//   POST /_groups/create/local    {origin, setup, name, about} -> {id}: a group's site already running, instead of the
+//                                 steps before claiming: on a self-hosted server (hosting.js), one made there by a
+//                                 command, from the address and setup code it gave; or, testing, one on this computer
 // And for a group this site made (its owner only):
 //   POST /_groups/<id>/delete     {token?}: the group tells its members it's closing, then its Worker and database go
 // Updating groups to this site's version is on the Update page (update.js), with the same connection.
@@ -20,6 +21,7 @@ import { claimGroup, forgetGroup } from "./membership.js";
 import { cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
 import { ownerName, siteOrigin } from "./peers.js";
 import { json, now, randomToken } from "./util.js";
+import { selfHosted } from "./hosting.js";
 
 export const GROUP_RELEASE = `https://github.com/${pkg.afterwrd.releases}/releases/download/v${pkg.version}`;
 const SCRIPT_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -50,11 +52,19 @@ async function isFree(token, account, script) {
 
 async function create(request, env, url, path, body) {
   const db = env.DB;
+  // A group's site that's already running, which this site then claims: on a self-hosted server, one made there with
+  // a command (selfhost/), which gave the owner its address and setup code; or, when testing, one on this computer.
   if (path === "/local") {
     const origin = siteOrigin(body.origin, env);
-    if (env.ALLOW_LOCAL_SITES !== "1" || !origin?.startsWith("http://")) return json({ error: "Only when testing." }, 404);
+    const testing = env.ALLOW_LOCAL_SITES === "1" && origin?.startsWith("http://");
+    if (!testing && !(selfHosted(env) && origin?.startsWith("https://"))) return json({ error: "Not found." }, 404);
+    if (origin === url.origin) throw new Error("That's your own site's address. Use the group's.");
+    // One waiting at a time for an address: a setup code mistyped before doesn't leave a row behind.
+    await db.prepare("DELETE FROM groups WHERE origin = ? AND joined_at IS NULL AND script = ''").bind(origin).run();
     return json({ id: await waitingRow(db, { origin, setup: body.setup, name: body.name, about: body.about }) });
   }
+  // Self-hosted, there's no Cloudflare account to make a group's site in (hosting.js).
+  if (selfHosted(env) && path !== "/wait" && path !== "/claim") return json({ error: "Not found." }, 404);
   if (path === "/wait") {
     const group = await db.prepare("SELECT origin FROM groups WHERE id = ? AND joined_at IS NULL AND script IS NOT NULL").bind(Number(body.id)).first();
     if (!group) return json({ error: "That group isn't waiting to be set up." }, 404);
@@ -62,7 +72,16 @@ async function create(request, env, url, path, body) {
       .then((r) => r.ok).catch(() => false);
     return json({ ready });
   }
-  if (path === "/claim") return json({ id: await claimGroup(env, url, body.id) });
+  if (path === "/claim") {
+    try {
+      return json({ id: await claimGroup(env, url, body.id) });
+    } catch (error) {
+      // A group's site made elsewhere (/local: no Worker of this site's to finish): what was noted goes, so a mistyped
+      // setup code can simply be typed again.
+      await db.prepare("DELETE FROM groups WHERE id = ? AND joined_at IS NULL AND script = ''").bind(Number(body.id)).run();
+      throw error;
+    }
+  }
 
   const { script: own, domain } = whereAmI(url);
   const token = tokenFor(request, body);
@@ -121,7 +140,8 @@ export const isGroupWorker = (settings, group) => Boolean(settings && group.data
 
 /**
  * Deletes a group this site made: the group tells its members' sites, then its Worker and database are deleted. Only
- * that Worker (still bound to the database made for it) and that database, never anything else that has its name.
+ * that Worker (still bound to the database made for it) and that database, never anything else that has its name. A
+ * group with no Worker (self-hosted, or testing) is told to close and empty itself, and then forgotten here.
  */
 async function remove(request, env, url, group, body) {
   if (group.role !== "owner") throw new Error("Only the group's owner can delete it.");
@@ -140,8 +160,8 @@ async function remove(request, env, url, group, body) {
     } catch (error) {
       if (error.status !== 404) throw error; // already gone (a deletion that stopped halfway, tried again)
     }
-  } else {
-    await fetchClose(group); // a group Worker on this computer, when testing
+  } else if (group.joined_at) {
+    await fetchClose(group); // a group's site on a self-hosted server (its data goes by a command there), or testing here
   }
   await forgetGroup(env.DB, group);
   return json({ ok: true });

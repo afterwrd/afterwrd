@@ -1,0 +1,5 @@
+# What the self-hosted image's build (selfhost/Dockerfile) leaves out: installed fresh there, or not needed.
+node_modules
+.wrangler
+release
+test/e2e/out

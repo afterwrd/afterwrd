@@ -26,6 +26,7 @@ import { handleLive } from "./live.js";
 import { handlePush } from "./push.js";
 import { autoState, handleAutoConnect, handleAutoStep, health, runAuto } from "./auto.js";
 import { handleChecksConnect, runFriendChecks } from "./friendchecks.js";
+import { selfHosted } from "./hosting.js";
 
 export { MediaStore } from "./media.js";
 export { Outbox } from "./outbox.js";
@@ -41,6 +42,11 @@ const HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow",
 };
+
+// What a self-hosted site doesn't have (hosting.js): automatic updates and Connect (/_auto, /_cloudflare), friends'
+// checks both ways (/_check, /_admin/checks, and the protocol's check calls), and getting back in through Cloudflare
+// (/_auth/recover). Updating (update.js) and starting groups (groupsites.js) say what to do instead.
+const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_peer\/(check-request|check-token|check-soon|check-failed|checked)$/;
 
 export default {
   async fetch(request, env, work) {
@@ -59,7 +65,7 @@ export default {
   // The daily run of automatic updates (auto.js), at the time set when they were turned on. Group Workers have none.
   // Then this site's checks of its friends' sites that are due (friendchecks.js).
   async scheduled(event, env, work) {
-    if (env.GROUP_KEY) return;
+    if (env.GROUP_KEY || selfHosted(env)) return; // both jobs work through Cloudflare (hosting.js)
     work.waitUntil(runAuto(env).then(async () => {
       const { on, origin } = await autoState(env.DB);
       // (On this computer a test can have every friend checked at once.)
@@ -97,6 +103,8 @@ async function route(request, env, work) {
     const answer = url.searchParams.has("health") ? await health(env) : { id: env.VERSION?.id ?? null };
     return new Response(JSON.stringify(answer), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
   }
+  // Self-hosted (hosting.js), what works through Cloudflare isn't there: as if it didn't exist.
+  if (selfHosted(env) && CLOUDFLARE_ONLY.test(url.pathname)) return new Response("Not found", { status: 404 });
   // The steps of an automatic update, asked for by the site's own daily run with a key only it has (auto.js).
   if (url.pathname.startsWith("/_auto/")) return handleAutoStep(request, env, url);
   if (url.pathname.startsWith("/_auth/")) return handleAuth(request, env, url);

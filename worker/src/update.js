@@ -32,7 +32,8 @@ import { releaseKey, signedList } from "./signing.js";
 import { GROUP_RELEASE, isGroupWorker } from "./groupsites.js";
 import { html, json, now, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
-import { updatePage } from "./views/update.js";
+import { selfHostedUpdatePage, updatePage } from "./views/update.js";
+import { onCloudflare, selfHosted } from "./hosting.js";
 import { lastChecked, tooSoonToCheck } from "./checks.js";
 import { checkGrant, checkingFriends, friendCheckResults, lastFailure } from "./friendchecks.js";
 
@@ -50,6 +51,14 @@ const FRESH_SECONDS = 300; // how long the Update page trusts its last answer fr
 
 export async function handleUpdate(request, env, url, owner) {
   const path = url.pathname.slice("/_admin/update".length);
+  // Self-hosted (hosting.js), the server updates by pulling a newer image: the page says what's out and how.
+  if (selfHosted(env)) {
+    if (request.method === "GET" && path === "") {
+      return html(selfHostedUpdatePage(pageData(env, { ...(await selfHostedData(env)), me: await headerMe(env.DB, owner) })));
+    }
+    if (request.method === "GET" && path === "/version") return json({ version: VERSION });
+    return new Response("Not found", { status: 404 });
+  }
   if (request.method === "GET" && path === "") {
     return html(updatePage(pageData(env, { ...(await updateData(request, env, url, owner)), me: await headerMe(env.DB, owner) })));
   }
@@ -170,6 +179,18 @@ async function signedManifest(env, origin, version) {
   return signed.manifestSha256;
 }
 
+/** What a self-hosted site's Update page shows: this version, the latest release, and this site's updates. */
+async function selfHostedData(env) {
+  const latest = await latestRelease(env.DB);
+  return {
+    version: VERSION, latest,
+    available: Boolean(latest.version && newer(latest.version, VERSION)),
+    securityFix: latest.securityFix && newer(latest.securityFix, VERSION) ? latest.securityFix : null,
+    history: (await env.DB.prepare("SELECT version, from_version, at FROM updates ORDER BY id DESC LIMIT 5").all()).results,
+    problem: await updateProblem(env.DB),
+  };
+}
+
 /** What the Update page shows: this version, the latest release, groups behind, and asking a friend for a check. */
 async function updateData(request, env, url, owner) {
   const latest = await latestRelease(env.DB);
@@ -183,8 +204,10 @@ async function updateData(request, env, url, owner) {
     auto: await autoData(env, url, latest),
     madeGroups: (await env.DB.prepare(`SELECT COUNT(*) AS n FROM groups WHERE joined_at IS NOT NULL AND role = 'owner'
       AND script IS NOT NULL AND script != ''`).first())?.n ?? 0,
-    friends: (await env.DB.prepare(`SELECT id, name FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL
-      AND their_key IS NOT NULL ORDER BY name COLLATE NOCASE LIMIT 200`).all()).results,
+    // Friends who could check this site: only those whose sites are on Cloudflare (hosting.js).
+    friends: (await env.DB.prepare(`SELECT id, name, origin FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL
+      AND their_key IS NOT NULL ORDER BY name COLLATE NOCASE LIMIT 200`).all()).results
+      .filter((f) => onCloudflare(f.origin, env)).map(({ id, name }) => ({ id, name })),
     // The versions this site has run (migrate.js), newest first, and a newer one's database update that failed.
     history: (await env.DB.prepare("SELECT version, from_version, at FROM updates ORDER BY id DESC LIMIT 5").all()).results,
     problem: await updateProblem(env.DB),

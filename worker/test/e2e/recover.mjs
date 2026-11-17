@@ -171,7 +171,7 @@ check("Cloudflare's token was kept nowhere", !JSON.stringify(sql("SELECT * FROM 
 await lost.goto(`${BASE}/`);
 await lost.click("#go");
 await lost.waitForFunction(() => document.getElementById("error")?.textContent, { timeout: 10000 }).catch(() => {});
-check("while the link waits, the older passkeys can't sign in", (await words(lost, "#error")).includes("getting back into your site through Cloudflare")
+check("while the link waits, the older passkeys can't sign in", (await words(lost, "#error")).includes("getting back into your site without a passkey")
   && lost.url().includes("/_auth/login"), await words(lost, "#error"));
 
 // A sign-in that began just before the recovery and slipped through (as if): it can't make a way in of its own,
@@ -189,7 +189,7 @@ await Promise.all([phone.waitForNavigation(), phone.click("#go")]);
 check("making a passkey signs the new phone in, and it replaces the others", phone.url() === `${BASE}/`
   && sql("SELECT COUNT(*) AS n FROM credentials")[0].n === 1 && sql("SELECT COUNT(*) AS n FROM sessions")[0].n === 1);
 const notice = await words(phone, "#recovered");
-check("Home says how it got back in, that the other passkeys went, and where to add devices again", notice.includes("through Cloudflare")
+check("Home says how it got back in, that the other passkeys went, and where to add devices again", notice.includes("without a passkey")
   && notice.includes("passkey removed") && Boolean(await phone.$("#recovered a[href='/_admin']")), notice);
 check("…and doesn't also call the new phone a new device", !(await phone.$("form[action='/_admin/devices/seen']")));
 await phone.goto(`${BASE}/_auth/recover`);

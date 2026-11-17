@@ -1,0 +1,25 @@
+# afterwrd on your own server, with Caddy in front for HTTPS (selfhost/README.md).
+# Change me.example.com here and in the Caddyfile to your site's address, then: docker compose up -d
+services:
+  afterwrd:
+    image: ghcr.io/afterwrd/afterwrd:latest
+    restart: unless-stopped
+    environment:
+      AFTERWRD_ADDRESS: me.example.com # your site's address (only read the first time)
+    volumes:
+      - afterwrd-data:/data # your site, its groups, photos and all: back this up
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  afterwrd-data:
+  caddy-data:

@@ -2,11 +2,10 @@
 // Posts, ticked: Posts and Photos stay for afterwrd posts, while imported material follows what was ticked.
 // Needs a fresh local database with SETUP_CODE=local-test-setup-code.
 //   node fresh.mjs <zip> <fixtures dir>
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
+import { siteSql } from "./helpers.mjs";
 import { fileURLToPath } from "node:url";
-const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -103,15 +102,13 @@ check("imported photo sets stay hidden", (await page.goto(`${BASE}/photos/album/
   && (await page.goto(`${BASE}/photos/tagged`)).status() === 404);
 // Nothing imported points at a row the import didn't bring (albums, with Photos left out): a later album can't pick
 // Facebook's photos up.
-const rows = (q) => JSON.parse(execFileSync("./node_modules/.bin/wrangler", ["d1", "execute", "afterwrd", "--local", "--json", "--command", q],
-  { cwd: WORKER, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))[0].results;
+const rows = (q) => siteSql(null, q);
 check("imported photos don't point at albums that weren't imported", rows(`SELECT COUNT(*) AS n FROM media WHERE source = 'facebook'
   AND album_id IS NOT NULL AND album_id NOT IN (SELECT id FROM albums WHERE source = 'facebook')`)[0].n === 0
   && rows("SELECT COUNT(*) AS n FROM media WHERE source = 'facebook'")[0].n > 0);
 
 // With no picture chosen here, Facebook's profile picture and cover (from the download) are used.
-const sql = (q) => execFileSync("./node_modules/.bin/wrangler", ["d1", "execute", "afterwrd", "--local", "--command", q],
-  { cwd: WORKER, stdio: "ignore" });
+const sql = (q) => siteSql(null, q);
 sql("UPDATE facebook_people SET profile_media_id = (SELECT MIN(id) FROM media WHERE hash IS NOT NULL), cover_media_id = (SELECT MIN(id) FROM media WHERE hash IS NOT NULL) WHERE is_me = 1");
 await page.goto(`${BASE}/posts`);
 check("Facebook's picture and cover head the profile", Boolean(await page.$("section.profile .avatar img")) && Boolean(await page.$("section.profile .cover img"))

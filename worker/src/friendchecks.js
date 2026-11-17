@@ -32,6 +32,7 @@ import { autoState, SETUP_DONE, step } from "./auto.js";
 import { checkSite, cloudflareReader, siteFiles, siteIn } from "./checks.js";
 import { callSite } from "./peers.js";
 import { signedList } from "./signing.js";
+import { onCloudflare } from "./hosting.js";
 import { knownLatest } from "./update.js";
 import { json, now, html } from "./util.js";
 
@@ -188,8 +189,8 @@ async function checkAccess(env, origin) {
 export async function askFriendsToCheckSoon(env) {
   if (!(await checkGrant(env.DB)).on) return;
   const { results } = await env.DB.prepare(`SELECT origin, their_key FROM connections WHERE connected_at IS NOT NULL
-    AND approved_at IS NOT NULL AND their_key IS NOT NULL ORDER BY RANDOM() LIMIT 2`).all();
-  for (const friend of results) {
+    AND approved_at IS NOT NULL AND their_key IS NOT NULL ORDER BY RANDOM() LIMIT 20`).all();
+  for (const friend of results.filter((f) => onCloudflare(f.origin, env)).slice(0, 2)) { // self-hosted ones can't check
     await callSite(friend.origin, "/_peer/check-soon", { key: friend.their_key, timeout: 5000, body: { type: "CheckSoon" } }).catch(() => {});
   }
 }
@@ -275,7 +276,7 @@ export async function runFriendChecks(env, origin, { everyone = false } = {}) {
   // friend is asked, so none is wrongly said to have refused.
   const list = await signedList(env, origin);
   if (!list || list.seq < (state.listSeq ?? 0)) return;
-  for (const friend of await whoToCheck(env.DB, everyone)) {
+  for (const friend of await whoToCheck(env, everyone)) {
     try {
       await checkFriend(env, origin, friend);
     } catch (error) {
@@ -284,12 +285,16 @@ export async function runFriendChecks(env, origin, { everyone = false } = {}) {
   }
 }
 
-async function whoToCheck(db, everyone) {
+async function whoToCheck(env, everyone) {
+  const db = env.DB;
   const at = now();
-  const { results: friends } = await db.prepare(`SELECT c.id, c.name, c.origin, c.their_key,
+  // Only friends' sites on Cloudflare: a self-hosted one can't be checked (hosting.js), so it's never asked, and never
+  // counted as refusing.
+  const { results: found } = await db.prepare(`SELECT c.id, c.name, c.origin, c.their_key,
       (SELECT MAX(checked_at) FROM friend_checks f WHERE f.connection_id = c.id) AS last,
       (SELECT at FROM check_soon s WHERE s.connection_id = c.id) AS soon
     FROM connections c WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL AND c.their_key IS NOT NULL`).all();
+  const friends = found.filter((f) => onCloudflare(f.origin, env));
   const rested = (f) => !f.last || f.last < at - 86400; // never the same friend twice in a day
   const picked = friends.filter((f) => f.soon && f.soon > at - SOON_DAYS * 86400 && f.soon > (f.last ?? 0) && rested(f))
     .sort((a, b) => a.soon - b.soon).slice(0, SOON);

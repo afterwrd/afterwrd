@@ -4,10 +4,14 @@
 //   npm run owner -- "Your Name"     makes you the owner of a new site, and prints a link to add your first device
 //   npm run owner                    a new link to add another device, once you're the owner
 //
-// Add --local to work against `npm run dev` instead of the deployed site. Links use the site address from --url,
+// Add --local to work against `npm run dev` instead of the deployed site. With AFTERWRD_SELFHOST set to a
+// self-hosted site's data folder (selfhost/), it writes to that site's database file instead. Links use the site address from --url,
 // or AFTERWRD_URL, or http://localhost:8787 with --local. Day to day, Your devices (/_admin) does the same.
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const LINK_SECONDS = 3600; // a device link gives owner access, so it's short-lived
 
@@ -30,10 +34,24 @@ console.log(`Device link for ${user.name} (works once, for one hour, and gives o
 console.log("Open it only on your own phone or computer; whoever opens it first gets in.");
 
 function sql(command) {
+  if (process.env.AFTERWRD_SELFHOST) return selfhostSql(process.env.AFTERWRD_SELFHOST, command);
   const result = spawnSync("npx", ["wrangler", "d1", "execute", "afterwrd", local ? "--local" : "--remote", "--json",
     "--command", command], { encoding: "utf8" });
   if (result.status !== 0) fail(`wrangler failed:\n${result.stderr || result.stdout}`);
   return JSON.parse(result.stdout).flatMap((r) => r.results ?? []);
+}
+
+/** Rows from a self-hosted site's database, read and written straight from its SQLite file. */
+function selfhostSql(data, command) {
+  const dir = join(data, "database");
+  const name = existsSync(dir) && readdirSync(dir).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
+  if (!name) fail(`No site database in ${dir}. Has the site been opened once?`);
+  const db = new DatabaseSync(join(dir, name));
+  try {
+    return db.prepare(command).all();
+  } finally {
+    db.close();
+  }
 }
 
 function quote(text) {

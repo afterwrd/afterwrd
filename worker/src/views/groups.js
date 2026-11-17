@@ -50,7 +50,7 @@ export function groupsIndexPage(ctx, { groups, unfinished = [], connected = fals
     });
   }
 </script>
-<p class="meta">Each group is its own small site, in the Cloudflare account of whoever started it. Its members read it
+<p class="meta">Each group is its own small site, kept by whoever started it alongside their own. Its members read it
 from their own sites, and post and comment there. You're told about comments on posts you wrote or commented on; for
 anything else, open the group. What's coming up in your groups is on <a href="/events">Events</a>, with your friends'
 events and your own.</p>
@@ -132,7 +132,8 @@ const STEP_SCRIPT = `
   const token = () => document.getElementById("token")?.value.trim() || "";`;
 
 /** Starting a group: name it, and this site makes its Worker (groupsites.js), step by step. */
-export function groupNewPage(ctx, { connected, domain, maxPhotos }) {
+export function groupNewPage(ctx, { connected, domain, maxPhotos, selfHosted = false, command = "" }) {
+  if (selfHosted) return selfHostedGroupNewPage(ctx, { maxPhotos, command });
   return page(ctx, "Start a group", html`
 <p class="crumbs"><a href="/groups">Groups</a> /</p>
 <h1>Start a group</h1>
@@ -190,6 +191,54 @@ ${domain ? html`<form class="card stack" id="start">
     }
   });
 </script>` : html`<p class="notice">Groups can be started from your site's workers.dev address.</p>`}`);
+}
+
+/**
+ * Starting a group on a self-hosted server (hosting.js): its site is made on the server by a command, which gives its
+ * address and a setup code; this site then claims it (groupsites.js /local, then membership.js claimGroup).
+ */
+function selfHostedGroupNewPage(ctx, { maxPhotos, command }) {
+  return page(ctx, "Start a group", html`
+<p class="crumbs"><a href="/groups">Groups</a> /</p>
+<h1>Start a group</h1>
+<p>A group is its own small site on your server, at its own address, separate from yours: it holds the group and nothing
+else, and no one signs in to it. You and its members use it from your own afterwrd sites. You decide who's in it (up to
+40 people besides you), can make others admins, and can delete it. Members can post photos (up to ${maxPhotos} a post),
+which are kept on the group's site.</p>
+<ol class="how">
+  <li>Point an address at your server for the group, as you did for your site: <code>walkers.example.com</code>, say.</li>
+  <li>On your server, run <code>${command} walkers.example.com</code> (with the group's address). It gives you a setup code.</li>
+  <li>Fill in the group's address and that code here.</li>
+</ol>
+<form class="card stack" id="start">
+  <input name="name" required maxlength="100" placeholder="Its name" aria-label="Group name">
+  <textarea name="about" rows="2" maxlength="1000" placeholder="What it's for (optional)" aria-label="What it's for"></textarea>
+  <input name="origin" required placeholder="The group's address, e.g. walkers.example.com" autocomplete="off" spellcheck="false" inputmode="url" aria-label="The group's address">
+  <input name="setup" required placeholder="Its setup code" autocomplete="off" spellcheck="false" aria-label="Setup code">
+  <div class="actions-row"><button class="chip primary" id="go">Start the group</button></div>
+  <ol id="log"></ol>
+  <p id="error" role="alert"></p>
+</form>
+<script>${raw(STEP_SCRIPT)}
+  const form = document.getElementById("start");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const go = document.getElementById("go");
+    error.textContent = "";
+    go.disabled = true;
+    try {
+      const typed = form.origin.value.trim().replace(/[/]+$/, "");
+      const origin = /^https?:[/][/]/i.test(typed) ? typed : "https://" + typed;
+      const made = (await post("/_groups/create/local", { origin, setup: form.setup.value.trim(), name: form.name.value, about: form.about.value })).id;
+      log("Setting it up as yours…");
+      const { id } = await post("/_groups/create/claim", { id: made });
+      location.assign("/groups/" + id + "/members");
+    } catch (err) {
+      error.textContent = err.message;
+      go.disabled = false;
+    }
+  });
+</script>`);
 }
 
 /** Join the group an invite link is for? (Or why not.) */
@@ -362,7 +411,7 @@ export function groupPhotoPage(ctx, { membership: g, group: info, post, photo: m
 }
 
 /** Who's in a group. For its admins: requests to join, the invite link, roles, and (its owner) deleting it. */
-export function groupMembersPage(ctx, { membership: g, group: info, members, max, connected, friends = [] }) {
+export function groupMembersPage(ctx, { membership: g, group: info, members, max, connected, friends = [], deleteCommand = null }) {
   const owner = g.role === "owner";
   const here = `/groups/${g.id}/members`;
   // Friends with them, asked them, asked by them, or a button to ask: everyone in a group can see who's in it.
@@ -449,6 +498,8 @@ ${owner ? html`<section class="card" id="delete">
   <p class="meta">Everything in it goes, for everyone: posts, photos and comments, and the group's site itself.
   Members' sites are told. This can't be undone.</p>
   ${g.script ? connectField(connected, "to delete the group's site", `/groups/${g.id}/members`) : ""}
+  ${deleteCommand && html`<p class="meta" id="delete-command">Its site stays on your server, empty, until you remove it there:
+    <code>${deleteCommand}</code></p>`}
   <div class="actions-row"><button class="chip" id="delete-go">Delete the group</button></div>
   <ol id="log"></ol>
   <p id="error" role="alert"></p>

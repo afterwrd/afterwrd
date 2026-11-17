@@ -68,7 +68,7 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
     ${checkGrant.problem && html`<p class="notice alert">Your friends' sites can't check yours by themselves any more:
       ${checkGrant.problem} <a href="/_admin/update#check">Let them again</a>.</p>`}
     ${recovered && html`<form class="notice alert" id="recovered" method="post" action="/_admin/devices/recovered-seen" data-region="" data-inplace="remove">
-      You got back into your site through Cloudflare on ${fmtDate(recovered)}. Every other device was signed out and its
+      You got back into your site on ${fmtDate(recovered)}, without a passkey. Every other device was signed out and its
       passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in
       <a href="/_admin">Your devices</a>. <button class="link">Done</button></form>`}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">

@@ -205,7 +205,7 @@ for (const trick of ["/.//evil.example", "/..//evil.example", "/%2e//evil.exampl
 
 // --- update page ------------------------------------------------------------------------------
 const updatePage = await (await fetch(`${BASE}/_admin/update`, { headers: { Cookie: `__Host-session=${ownerCookie}` } })).text();
-check("owner's Update page shows this version", updatePage.includes(`This site is afterwrd ${JSON.parse(execFileSync("cat", [`${WORKER}/package.json`], { encoding: "utf8" })).version}`));
+check("owner's Update page shows this version", updatePage.includes(`Your site is on afterwrd ${JSON.parse(execFileSync("cat", [`${WORKER}/package.json`], { encoding: "utf8" })).version}`));
 const update404 = await fetch(`${BASE}/_admin/update/version`, { redirect: "manual" });
 check("Update isn't reachable signed out", update404.status === 302);
 check("Update refuses a made-up release name", (await post("/_admin/update/check", { token: "x", tag: "v1;rm" }, ownerCookie)).status === 400);

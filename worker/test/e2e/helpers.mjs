@@ -54,9 +54,15 @@ import { fileURLToPath } from "node:url";
 
 const WORKER = fileURLToPath(new URL("../..", import.meta.url));
 
-/** The SQLite file behind a local test site's D1 database (the one that isn't Miniflare's metadata), or null. */
+/**
+ * The SQLite file behind a local test site's D1 database (the one that isn't Miniflare's metadata), or null. With
+ * AFTERWRD_SELFHOST set (the only site's data folder), the sites are self-hosted ones (selfhost/), whose database is
+ * in <data folder>/database.
+ */
 function databaseFile(state) {
-  const dir = join(state ?? join(WORKER, ".wrangler", "state"), "v3", "d1", "miniflare-D1DatabaseObject");
+  const selfhost = process.env.AFTERWRD_SELFHOST;
+  const dir = selfhost ? join(state ?? selfhost, "database")
+    : join(state ?? join(WORKER, ".wrangler", "state"), "v3", "d1", "miniflare-D1DatabaseObject");
   if (!existsSync(dir)) return null;
   const name = readdirSync(dir).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
   return name ? join(dir, name) : null;

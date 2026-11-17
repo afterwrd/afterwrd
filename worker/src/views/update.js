@@ -26,6 +26,21 @@ function connectPart(connected, back, what, background = false) {
 
 const day = (seconds) => new Date(seconds * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "Europe/London" });
 
+/** A newer version's database update that failed (migrate.js), so the site stayed as it was. */
+function problemPart(problem, version) {
+  return problem ? `<p class="notice alert" id="update-problem">afterwrd ${escape(problem.version)} couldn't update your site's database on
+  ${escape(day(problem.at))}. Nothing was lost: your site stayed on ${escape(version)}, as it was. Please send this to whoever
+  looks after afterwrd: <code>${escape(problem.migration)}: ${escape(problem.error)}</code></p>` : "";
+}
+
+/** The versions this site has run, newest first. */
+function historyPart(history) {
+  return history.length ? `<section class="card" id="history">
+  <h2>This site's updates</h2>
+  <ul>${history.map((h) => `<li>${escape(day(h.at))}: afterwrd ${escape(h.version)}${h.from_version ? `, from ${escape(h.from_version)}` : ""}</li>`).join("")}</ul>
+</section>` : "";
+}
+
 /** Automatic updates (auto.js): on or off, what's next, what last happened, and anything that needs the owner. */
 function autoPart(auto) {
   const last = auto.last?.result === "kept" ? `<p class="notice alert">afterwrd ${escape(auto.last.version)} didn't pass its
@@ -235,15 +250,10 @@ ${ownerHeader("update", me)}
 <main>
 <h1>Update afterwrd</h1>
 <p class="meta">Your site is on afterwrd ${escape(VERSION)}.</p>
-${problem ? `<p class="notice alert" id="update-problem">afterwrd ${escape(problem.version)} couldn't update your site's database on
-  ${escape(day(problem.at))}. Nothing was lost: your site stayed on ${escape(VERSION)}, as it was. Please send this to whoever
-  looks after afterwrd: <code>${escape(problem.migration)}: ${escape(problem.error)}</code></p>` : ""}
+${problemPart(problem, VERSION)}
 ${body}
 ${autoPart(auto)}
-${history.length ? `<section class="card" id="history">
-  <h2>This site's updates</h2>
-  <ul>${history.map((h) => `<li>${escape(day(h.at))}: afterwrd ${escape(h.version)}${h.from_version ? `, from ${escape(h.from_version)}` : ""}</li>`).join("")}</ul>
-</section>` : ""}
+${historyPart(history)}
 <section class="card" id="check">
   <h2>Friends' checks</h2>
   <p id="last-checked">${checked ? escape(checkedWords(checked)) : "Your site hasn't been checked yet."}</p>
@@ -462,6 +472,53 @@ ${forget}
     (autoGo === "groups" ? groupsGo ?? document.querySelector("#groups button[data-install-now]") : go)?.click();
   }
 </script>
+</body>
+</html>`;
+}
+
+/**
+ * The Update page on a self-hosted site (hosting.js): this version, the newest release and its notes, and the commands
+ * that update the server. Nothing here can update it: the server's owner pulls the new image.
+ */
+export function selfHostedUpdatePage({ version: VERSION, latest, available, securityFix, history = [], problem = null, me = null }) {
+  const body = latest.error ? `<p>Couldn't look for a newer version just now (${escape(latest.error)}). It'll try again later.</p>`
+    : !available ? `<p>You have the latest version.</p>`
+    : `<p><b>afterwrd ${escape(latest.version)} is available.</b> <a href="${escape(latest.page)}" target="_blank" rel="noopener">On GitHub</a></p>
+${securityFix ? `<p class="security"><b>It fixes a security problem</b> (in ${escape(securityFix)}), so it's worth updating soon.</p>` : ""}
+${latest.notes ? `<section class="card notes"><h2>What's new</h2><p>${escape(latest.notes)}</p></section>` : ""}
+<p>To update, on your server, in the folder with afterwrd's <code>compose.yaml</code>:</p>
+<pre id="update-commands">docker compose pull
+docker compose up -d</pre>
+<p class="meta">Updating keeps everything: your posts, photos, friends and devices. Your groups on the same server update with it.</p>`;
+  return `<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Update · afterwrd</title>
+<link rel="stylesheet" href="${asset("/static/style.css")}">
+${FAVICON}
+<style>
+  .security { padding: 0.6rem 0.9rem; border-left: 3px solid var(--danger); border-radius: 10px; background: var(--tint-4); }
+  .notes h2, #check h2 { margin: 0 0 0.4rem; font-size: 1rem; }
+  .notes p { margin: 0; white-space: pre-wrap; }
+  pre { overflow-x: auto; padding: 0.6rem 0.9rem; border-radius: 10px; background: var(--tint-4); }
+</style>
+</head>
+<body>
+${ownerHeader("update", me)}
+<main>
+<h1>Update afterwrd</h1>
+<p class="meta">Your site is on afterwrd ${escape(VERSION)}, on your own server.</p>
+${problemPart(problem, VERSION)}
+${body}
+${historyPart(history)}
+<section class="card" id="check">
+  <h2>Friends' checks</h2>
+  <p>Your site is self-hosted, so friends' sites can't check it, and it can't check theirs. A check asks Cloudflare what's
+  running on a site, and nothing outside your server can say what runs on it. Keeping it safe is up to you.</p>
+</section>
+</main>
 </body>
 </html>`;
 }

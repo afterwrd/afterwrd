@@ -345,7 +345,8 @@ ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cove
   <h1 class="friend-name">${c.avatar && html`<img class="avatar-small" src="${c.avatar.thumbSrc}" alt="">`}${c.name}</h1>
   ${c.facebook && has(ctx, "friends") && html`<a class="chip" href="/people/${c.facebook.id}">${raw(icon("friends"))}<span>Your Facebook history together</span></a>`}
 </div>
-<div class="meta">${host(c.origin)} · a friend you're connected with. Only you see this here. ${removeFriend(c, "link")}</div>
+<div class="meta">${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}
+  · a friend you're connected with. Only you see this here. ${removeFriend(c, "link")}</div>
 <nav class="tabs">
   ${[["posts", "Posts"], ["photos", "Photos"]].map(([key, label]) =>
     html`<a href="${friendBase(c)}/${key}" ${key === tab && raw('aria-current="page"')}>${label}</a>`)}
