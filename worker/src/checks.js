@@ -24,7 +24,7 @@
 //   - what it's connected to: exactly afterwrd's bindings (database, photo store, outbox, site files, its secrets),
 //     no settings (plain text variables), no tail Workers or Logpush sending its requests elsewhere, the release's
 //     compatibility settings, and one version serving all of its traffic;
-//   - that it doesn't hand out its site files without its code checking them (each file, asked for without signing
+//   - that it doesn't hand out its site files without its code checking them (each private file, asked for without signing
 //     in, must get the sign-in redirect the code gives, not the file from Cloudflare directly);
 //   - what apps (OAuth) and API tokens did in the account since the Worker was made, marking what afterwrd doesn't do.
 // The code carries the hash of every static file (src/static.js), so with the above it covers the whole site.
@@ -39,6 +39,7 @@ import { knownLatest, newer } from "./update.js";
 import { laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
 import { signedList } from "./signing.js";
 import { onCloudflare } from "./hosting.js";
+import { isPublicStatic } from "./static.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 
 const REPO = pkg.afterwrd.releases;
@@ -518,10 +519,12 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
 
 /**
  * Its site files only through its code: asked for without signing in, each must get the code's sign-in redirect.
- * Problems found, in words.
+ * The ones the code hands out to anyone (static.js isPublicStatic: fonts, the home-screen app's files) are left out,
+ * as they'd come back either way. Problems found, in words.
  */
 export async function siteFiles(site, manifest, fetcher = fetch) {
-  const paths = (manifest.assets ?? []).map((a) => a?.path).filter((p) => typeof p === "string" && /^\/static\/[\w./-]+$/.test(p) && !p.startsWith("/static/fonts/"));
+  const paths = (manifest.assets ?? []).map((a) => a?.path).filter((p) => typeof p === "string" && /^\/static\/[\w./-]+$/.test(p)
+    && !p.startsWith("/static/fonts/") && !isPublicStatic(p));
   const direct = [];
   for (const path of paths.slice(0, 25)) {
     const response = await fetcher(site + path, { method: "HEAD", redirect: "manual" }).catch(() => null);

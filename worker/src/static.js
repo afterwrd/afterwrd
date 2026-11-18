@@ -5,6 +5,15 @@
 // Cloudflare sends every request here: a friend's check, src/checks.js, makes sure it does.)
 import HASHES from "../generated/asset-hashes.json";
 
+// The static files anyone may have without signing in, as the router serves them (app.js), and so the ones a friend's
+// check (checks.js siteFiles) doesn't expect the sign-in redirect for. The fonts, so the sign-in pages can use them
+// (open-licensed, and they say nothing about the site); and the home-screen app's manifest, icons and service worker,
+// which phones fetch without the session and are the same for every site. (A check goes by the checking site's own
+// list: a file made public in a later release would be reported by friends' sites that haven't updated yet.)
+export const PUBLIC_FONT = /^\/static\/fonts\/[\w-]+\.woff2$/;
+export const PUBLIC_APP = /^\/static\/app\/(manifest\.webmanifest|icon-(180|192|512)\.png|push-sw\.js)$/;
+export const isPublicStatic = (/** @type {string} */ pathname) => PUBLIC_FONT.test(pathname) || PUBLIC_APP.test(pathname);
+
 const sha256 = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
   .map((b) => b.toString(16).padStart(2, "0")).join("");
 

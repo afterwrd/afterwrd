@@ -19,7 +19,7 @@ import { checkNewer, databaseIsNewer, ensureSchema } from "./migrate.js";
 import { handlePeer } from "./peers.js";
 import { messagePage } from "./views/pages.js";
 import { signedFor } from "./share.js";
-import { serveStatic } from "./static.js";
+import { PUBLIC_APP, PUBLIC_FONT, serveStatic } from "./static.js";
 import { handleCheck } from "./checks.js";
 import { html } from "./util.js";
 import { handleLive } from "./live.js";
@@ -127,10 +127,10 @@ async function route(request, env, work) {
   if (url.pathname.startsWith("/_check/")) return handleCheck(request, env, url);
   const reading = request.method === "GET" || request.method === "HEAD";
   // The fonts are public, so the sign-in pages can use them too; they're open-licensed and say nothing about the site.
-  if (reading && /^\/static\/fonts\/[\w-]+\.woff2$/.test(url.pathname)) return serveStatic(request, env);
+  if (reading && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);
   // The home-screen app's manifest, icons and service worker are public too: phones fetch them without
   // the session, and they're the same for every site. The service worker may look after the whole site (scope "/").
-  if (reading && /^\/static\/app\/(manifest\.webmanifest|icon-(180|192|512)\.png|push-sw\.js)$/.test(url.pathname)) {
+  if (reading && PUBLIC_APP.test(url.pathname)) {
     const file = await serveStatic(request, env);
     if (url.pathname === "/static/app/push-sw.js") file.headers.set("Service-Worker-Allowed", "/");
     return file;
@@ -221,7 +221,7 @@ async function routeGroup(request, env, url) {
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
   const signed = await signedFile(request, env, url);
   if (signed) return signed;
-  if (request.method === "GET" && /^\/static\/fonts\/[\w-]+\.woff2$/.test(url.pathname)) return serveStatic(request, env);
+  if (request.method === "GET" && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);
   return html(messagePage("This is an afterwrd group. Its members open it from their own afterwrd sites.",
     { href: "https://afterwrd.app/", label: "About afterwrd" }), 404);
 }
