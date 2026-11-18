@@ -173,13 +173,31 @@ async function remove(request, env, url, group, body) {
   return json({ ok: true });
 }
 
+/**
+ * Closes the group: it empties itself and tells its members' sites, a round at a time, saying how many are left
+ * (groups.js close); asked again until none are, each round being a new request for the group, with its own 50 calls.
+ * A round that gets no answer (or a server error) is asked for again, up to twice running: safe, as the group saves
+ * who's left before telling them, and once closed it carries on for the owner's key. At most CLOSING_CALLS calls (30
+ * told in each), so this request stays inside its own 50. A group that's already gone, refuses, stays unreachable, or
+ * is from before rounds (it answers no `remaining`) is deleted all the same.
+ */
+const CLOSING_CALLS = 40;
 async function fetchClose(group) {
-  const response = await fetch(`${group.origin}/_group/admin/close`, {
-    method: "POST", redirect: "manual", signal: AbortSignal.timeout(20_000), body: "{}",
-    headers: { Authorization: `Bearer ${group.their_key}`, "Content-Type": "application/json" },
-  }).catch(() => null);
-  await response?.body?.cancel();
-  // A group that's already gone, or unreachable, is deleted all the same.
+  let failed = 0;
+  for (let call = 0; call < CLOSING_CALLS; call++) {
+    const response = await fetch(`${group.origin}/_group/admin/close`, {
+      method: "POST", redirect: "manual", signal: AbortSignal.timeout(20_000), body: "{}",
+      headers: { Authorization: `Bearer ${group.their_key}`, "Content-Type": "application/json" },
+    }).catch(() => null);
+    if (!response || response.status >= 500) {
+      await response?.body?.cancel();
+      if (++failed > 2) return;
+      continue;
+    }
+    failed = 0;
+    const answer = response.ok ? await response.json().catch(() => null) : (await response.body?.cancel(), null);
+    if (!(Number(answer?.remaining) > 0)) return;
+  }
 }
 
 /** POST /_groups/create/… and /_groups/<id>/delete (the Origin check is done by the caller, membership.js). */

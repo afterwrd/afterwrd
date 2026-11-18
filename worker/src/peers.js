@@ -162,10 +162,10 @@ export async function handlePeer(request, env, url, work) {
   if (route === "GET /_peer/feed") return json(await feed(env, url.origin, peer));
   const page = Math.min(10_000, Math.max(1, Number.parseInt(url.searchParams.get("page"), 10) || 1));
   if (route === "GET /_peer/posts") return json(await sharePosts(env, url.origin, page, await ownerName(db), peer));
-  if (route === "GET /_peer/albums") return json(await shareAlbums(env, url.origin));
+  if (route === "GET /_peer/albums") return json(await shareAlbums(env, url.origin, peer));
   const shared = /^GET \/_peer\/(albums\/(\d+|other|videos)|photos\/([0-9a-f]{64})|posts\/(post-\d+-[0-9a-f]{8}))$/.exec(route);
   if (shared) {
-    const found = shared[2] ? await shareAlbum(env, url.origin, shared[2], page)
+    const found = shared[2] ? await shareAlbum(env, url.origin, shared[2], page, peer)
       : shared[3] ? await sharePhoto(env, url.origin, shared[3], peer)
       : await sharePost(env, url.origin, shared[4], await ownerName(db), peer);
     return found ? json(tidy({ "@context": CONTEXT, ...found })) : json({ error: "That isn't there any more." }, 404);

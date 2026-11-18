@@ -150,9 +150,15 @@ if (stage === "before") {
   const file = readdirSync(d1).find((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
   const old = new DatabaseSync(join(d1, file), { readOnly: true });
   try {
-    check("the old database is kept, marked moved, with the posts from before still in it",
-      Boolean(old.prepare(`SELECT 1 FROM d1_migrations WHERE name = '${MOVED}'`).get())
-      && Boolean(old.prepare("SELECT 1 FROM posts WHERE text = 'Before the upgrade'").get()));
+    // A site begun on 0.57.0 or later kept everything in its object from the start: its D1 database was never used.
+    const usedD1 = Boolean(old.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'd1_migrations'").get());
+    if (usedD1) {
+      check("the old database is kept, marked moved, with the posts from before still in it",
+        Boolean(old.prepare(`SELECT 1 FROM d1_migrations WHERE name = '${MOVED}'`).get())
+        && Boolean(old.prepare("SELECT 1 FROM posts WHERE text = 'Before the upgrade'").get()));
+    } else {
+      check("a site begun in its own object never used D1", !old.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'posts'").get());
+    }
   } finally {
     old.close();
   }

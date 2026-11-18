@@ -62,14 +62,17 @@ export const friendGone = (db, connectionId) => [
  */
 export async function eventsFor(db, ids, peer = null) {
   if (!ids.length) return new Map();
-  const list = JSON.stringify(ids);
+  // By the range of post numbers, then only those asked for, as sitePolls does: only the events in that range are
+  // read, rather than each id looked up whether it has one or not.
+  const range = [Math.min(...ids), Math.max(...ids)];
+  const wanted = new Set(ids);
   const [events, guests] = await db.batch([
-    db.prepare("SELECT * FROM events WHERE post_id IN (SELECT value FROM json_each(?))").bind(list),
+    db.prepare("SELECT * FROM events WHERE post_id BETWEEN ? AND ?").bind(...range),
     db.prepare(`SELECT a.post_id, c.id, c.origin, c.name, a.delivery, x.answer FROM post_audience a JOIN connections c ON c.id = a.connection_id AND ${APPROVED("c.")}
       LEFT JOIN event_answers x ON x.post_id = a.post_id AND x.connection_id = a.connection_id
-      WHERE a.post_id IN (SELECT value FROM json_each(?)) ORDER BY x.answered_at, c.name COLLATE NOCASE`).bind(list),
+      WHERE a.post_id BETWEEN ? AND ? ORDER BY x.answered_at, c.name COLLATE NOCASE`).bind(...range),
   ]);
-  return new Map(events.results.map((e) => {
+  return new Map(events.results.filter((e) => wanted.has(e.post_id)).map((e) => {
     const all = guests.results.filter((g) => g.post_id === e.post_id);
     const who = (answer) => all.filter((g) => g.answer === answer).map((g) => ({ id: g.id, name: g.name, from: g.origin }));
     return [e.post_id, {

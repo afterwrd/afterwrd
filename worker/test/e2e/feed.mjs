@@ -428,6 +428,14 @@ const signed = fullSrc;
 check("the signed link works without signing in", (await fetch(signed)).status === 200);
 check("a tampered link doesn't", (await fetch(signed.replace(/sig=(.)/, (_, c) => `sig=${c === "A" ? "B" : "A"}`))).status === 403);
 check("nor an expired one", (await fetch(signed.replace(/exp=\d+/, "exp=1000"))).status === 403);
+// A friend's photo link lasts to the end of the next day (UTC), and is for that friend only (share.js signedFile),
+// in the same shape older sites check for (friends.js signedLink).
+const linkExp = Number(/exp=(\d+)/.exec(signed)?.[1]);
+const secondsNow = Math.floor(Date.now() / 1000);
+check("a friend's photo link runs to the end of the next day", linkExp % 86400 === 0 && linkExp - secondsNow > 86400 - 60
+  && linkExp - secondsNow <= 2 * 86400, signed);
+check("…in the shape every site accepts", /\?exp=\d{1,12}&sig=[\w-]{43}$/.test(signed), signed);
+check("…and one stretched past that is refused", (await fetch(signed.replace(/exp=\d+/, `exp=${linkExp + 86400}`))).status === 403);
 check("files without a link still need signing in", (await fetch(signed.split("?")[0], { redirect: "manual" })).status === 302);
 check("only Ann (the owner) can open friend pages", (await (await fetch(`${A}/friend/${bobId}/posts`, { redirect: "manual" })).status) === 302);
 
@@ -563,6 +571,7 @@ await Promise.all([ann.waitForNavigation(), ann.click("button[data-disconnect]")
 check("Remove friend removes it on both sites", sql(stateA, "SELECT COUNT(*) AS n FROM connections")[0].n === 0
   && sql(stateB, "SELECT COUNT(*) AS n FROM connections")[0].n === 0);
 check("the old key stops working", (await peer("/_peer/feed", keyForB)).status === 401);
+check("…and so do Bob's photo links for Ann, at once", (await fetch(signed)).status === 403);
 check("Ann keeps her copies of what she said after disconnecting", sql(stateA, "SELECT site FROM comments_elsewhere").some((c) => c.site === B));
 check("disconnecting forgets who they were on Facebook", sql(stateA, "SELECT COUNT(*) AS n FROM friend_links")[0].n === 0);
 

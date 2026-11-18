@@ -149,12 +149,16 @@ export function parsePoll(o, env, { names = false } = {}) {
 /** The polls in some of the owner's posts (posts ids), as `viewer` ('site', the owner; or a friend's site) sees them. */
 export async function sitePolls(db, ids, viewer) {
   if (!ids.length) return new Map();
-  const marks = ids.map(() => "?").join(",");
+  // By the range of post numbers, then only those asked for: SQLite reads just the polls in that range (usually
+  // none), where a list of ids is looked up one by one, costing rows read even when there's no poll at all (a friend's
+  // site asks for 30 posts each time it refreshes: docs/speed-and-scale-plan.md, "Scale test").
+  const range = [Math.min(...ids), Math.max(...ids)];
+  const wanted = new Set(ids);
   const [polls, votes] = await db.batch([
-    db.prepare(`SELECT * FROM polls WHERE post_id IN (${marks})`).bind(...ids),
-    db.prepare(`SELECT post_id, voter, name, choices FROM poll_votes WHERE post_id IN (${marks}) ORDER BY voted_at`).bind(...ids),
+    db.prepare("SELECT * FROM polls WHERE post_id BETWEEN ? AND ?").bind(...range),
+    db.prepare("SELECT post_id, voter, name, choices FROM poll_votes WHERE post_id BETWEEN ? AND ? ORDER BY voted_at").bind(...range),
   ]);
-  return new Map(polls.results.map((row) => [row.post_id,
+  return new Map(polls.results.filter((row) => wanted.has(row.post_id)).map((row) => [row.post_id,
     tally(row, votes.results.filter((v) => v.post_id === row.post_id), { viewer, names: viewer === "site" })]));
 }
 

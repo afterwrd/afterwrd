@@ -43,8 +43,9 @@
 //   POST /_group/admin/about      {name, about}
 //   POST /_group/admin/here       {on}: whether any member may use @here (mentions.js), or only the owner and admins
 // The owner:
-//   POST /_group/admin/close      tells every member's site the group's gone, and empties it (the owner's site then
-//                                 deletes this Worker)
+//   POST /_group/admin/close      empties the group and tells members' sites it's gone, a round at a time: it answers
+//                                 {remaining}, and the owner's site asks again until none are left (then deletes this
+//                                 Worker). Once closed, only the owner's key carries on (closingRound).
 import { actorId, CONTEXT, editedFields, fileUrl, groupId, groupPostId, iso, tidy } from "../public/static/activity.js";
 import pkg from "../package.json";
 import { MAX_COMMENT } from "./archive/comments.js";
@@ -670,20 +671,58 @@ async function decide(env, group, admin, id, action) {
   return null;
 }
 
-/** Empties the group, then tells its members' sites (last: those calls use up the free plan's 50). */
+// Members' sites told the group's gone per round of closing: well inside a request's 50 calls out (removing the
+// group's photos is calls to objects, which don't count).
+const CLOSING_ROUND = 30;
+
+/**
+ * Empties the group, then tells the first of its members' sites; returns how many are left to tell. Who's left (their
+ * site and key) waits in settings, with the owner's key's hash, for the owner's site to ask for the next round
+ * (closingRound): a group of any size can be closed, each round being a new request with its own 50 calls. Only those
+ * two settings and the closed mark stay, and only until the owner's site deletes the group.
+ */
 async function close(env, group, owner) {
   const db = env.DB;
-  const { results: members } = await db.prepare("SELECT * FROM group_members WHERE id != ?").bind(owner.id).all();
+  const { results: members } = await db.prepare("SELECT origin, their_key FROM group_members WHERE id != ? ORDER BY id").bind(owner.id).all();
   const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos").all();
+  const setting = (key, value) => db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, value);
   await db.batch([
     ...["group_comments", "group_comment_versions", "group_photos", "group_answers", "group_event_skips", "answer_log", "group_poll_votes", "group_polls",
       "group_events", "group_posts", "group_post_versions", "group_links", "group_members", "groups"]
       .map((table) => db.prepare(`DELETE FROM ${table}`)),
     // So it can't be claimed again, should its Worker outlast this (its owner's site deletes it next).
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_closed', '1')"),
+    setting("group_closed", "1"),
+    setting("group_closer", owner.key_hash),
+    setting("group_farewells", JSON.stringify(members.map((m) => ({ origin: m.origin, their_key: m.their_key })))),
   ]);
   await removeUnusedFiles(env, photos.flatMap((f) => [f.hash, f.thumb_hash]));
-  await Promise.all(members.slice(0, maxMembers(env) + MAX_WAITING).map(tellRemoved));
+  return tellNext(db);
+}
+
+/** Tells the next round of members' sites the group's gone; returns how many are left. */
+async function tellNext(db) {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = 'group_farewells'").first();
+  const left = row ? JSON.parse(row.value) : [];
+  const now = left.slice(0, CLOSING_ROUND);
+  const later = left.slice(CLOSING_ROUND);
+  // Saved before telling, so a round cut short doesn't tell anyone twice (one that can't be reached isn't asked again).
+  if (later.length) await db.prepare("UPDATE settings SET value = ? WHERE key = 'group_farewells'").bind(JSON.stringify(later)).run();
+  else await db.prepare("DELETE FROM settings WHERE key IN ('group_farewells', 'group_closer')").run();
+  await Promise.all(now.map(tellRemoved));
+  return later.length;
+}
+
+/**
+ * A closed group's next round of telling members (close), for its owner's site only: null if this isn't one (the
+ * request goes on as any other, and is refused, as the group has no members now).
+ */
+async function closingRound(request, env) {
+  const db = env.DB;
+  const match = /^Bearer (\S+)$/.exec(request.headers.get("Authorization") ?? "");
+  if (!match || !KEY_RE.test(match[1])) return null;
+  const closer = await db.prepare("SELECT value FROM settings WHERE key = 'group_closer'").first();
+  if (!closer || closer.value !== await sha256(match[1])) return null;
+  return json({ ok: true, remaining: await tellNext(db) });
 }
 
 /** Proves `key` belongs to the site at `origin`, and was made there for joining (or claiming) this group. */
@@ -788,6 +827,10 @@ export async function handleGroupApi(request, env, url) {
   if (route === "GET /_group/ping") return json({ afterwrd: "group", version: pkg.version, protocol: PROTOCOL });
   if (route === "POST /_group/claim") return claim(request, env, url);
 
+  if (route === "POST /_group/admin/close") {
+    const round = await closingRound(request, env);
+    if (round) return round;
+  }
   const member = await memberFrom(request, env);
   const group = member && await theGroup(db);
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
@@ -924,8 +967,7 @@ export async function handleGroupApi(request, env, url) {
   }
   if (route === "POST /_group/admin/close") {
     if (member.role !== "owner") return json({ error: "Only the group's owner can delete it." }, 403);
-    await close(env, group, member);
-    return json({ ok: true });
+    return json({ ok: true, remaining: await close(env, group, member) });
   }
   return json({ error: "Not found." }, 404);
 }

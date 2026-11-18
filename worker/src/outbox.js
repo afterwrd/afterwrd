@@ -16,7 +16,7 @@ import { handle, HEADERS } from "./app.js";
 import { refreshCopies } from "./feed.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
-import { local, oldDatabase, remote, runStatements, ZONE_HEADER } from "./sqlite.js";
+import { local, oldDatabase, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
 import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
 
@@ -101,6 +101,13 @@ export class Outbox extends DurableObject {
     if (!this.isSite()) throw new Error("Only the site's own object has its database.");
     if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
     return runStatements(this.ctx.storage, statements, together);
+  }
+
+  /** In the "site" object: several batches from another object, each its own transaction (sqlite.js batches). */
+  async queryBatches(batches) {
+    if (!this.isSite()) throw new Error("Only the site's own object has its database.");
+    if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
+    return runBatches(this.ctx.storage, batches);
   }
 
   /** Whether this is the site's own object (the others are the outbox and the vault). */
@@ -227,6 +234,8 @@ export class Outbox extends DurableObject {
       `SELECT post_id || ':' || connection_id AS k FROM post_audience WHERE post_id IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify([...new Set(due.map((n) => n.post_id))])).all()).results.map((r) => r.k));
 
+    // What became of each invitation, saved together at the end: one call to the site's object, not one each.
+    const deliveries = [];
     await Promise.all(due.map(async (note) => {
       if (invited && !invited.has(`${note.post_id}:${note.connection_id}`)) {
         this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, note.id);
@@ -250,10 +259,11 @@ export class Outbox extends DurableObject {
       if (finished) this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, note.id);
       else this.sql.exec(`UPDATE ${table} SET tries = tries + 1, due = ? WHERE id = ?`, at + RETRY_SECONDS[note.tries] * 1000, note.id);
       if (KINDS[table].invite && finished) {
-        await this.env.DB.prepare("UPDATE post_audience SET delivery = ? WHERE post_id = ? AND connection_id = ?")
-          .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.post_id, note.connection_id).run();
+        deliveries.push(this.env.DB.prepare("UPDATE post_audience SET delivery = ? WHERE post_id = ? AND connection_id = ?")
+          .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.post_id, note.connection_id));
       }
     }));
+    if (deliveries.length) await this.env.DB.batch(deliveries);
     return due.length;
   }
 }

@@ -152,14 +152,43 @@ class Statement {
   }
 }
 
-/** env.DB over `send(statements, together)`, which runs them and gives back runStatements' results. */
-export function client(send) {
+/**
+ * Runs several batches on `storage`, each in its own transaction (one failing doesn't stop the others); for each, null
+ * or what went wrong.
+ * @returns {(string | null)[]}
+ */
+export function runBatches(storage, batches) {
+  return batches.map((statements) => {
+    try {
+      runStatements(storage, statements, true);
+      return null;
+    } catch (error) {
+      return String(error?.message ?? error);
+    }
+  });
+}
+
+/**
+ * env.DB over `send(statements, together)`, which runs them and gives back runStatements' results, and
+ * `sendBatches(batches)` (runBatches).
+ */
+export function client(send, sendBatches) {
   const db = {
     send,
     prepare: (sql) => new Statement(db, sql),
     async batch(statements) {
       if (!statements.length) return [];
       return (await send(statements.map((s) => s.plain()), true)).map(({ columns, ...result }) => result);
+    },
+    /**
+     * Several batches at once, each its own transaction, as one call when the database is in another object: from
+     * the Outbox, one call instead of one per batch (each counts towards a run's 50; docs/speed-and-scale-plan.md,
+     * "Scale test"). For each batch, null or what went wrong.
+     * @param {Statement[][]} batches
+     * @returns {Promise<(string | null)[]>}
+     */
+    async batches(batches) {
+      return sendBatches(batches.map((statements) => statements.map((s) => s.plain())));
     },
     exec() {
       throw new Error("exec() isn't available on a database in an object.");
@@ -169,13 +198,15 @@ export function client(send) {
 }
 
 /** env.DB inside the object that holds the database: each statement runs here and now. */
-export const local = (storage) => client(async (statements, together) => runStatements(storage, statements, together));
+export const local = (storage) => client(async (statements, together) => runStatements(storage, statements, together),
+  async (batches) => runBatches(storage, batches));
 
 /** The object holding the site's database: an Outbox object named "site" (no new kind of object: scripts/release.mjs). */
 export const siteObject = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("site"));
 
 /** env.DB anywhere else (the Outbox, the Worker): each statement or batch is one call to the site's object. */
-export const remote = (env) => client((statements, together) => siteObject(env).query(statements, together));
+export const remote = (env) => client((statements, together) => siteObject(env).query(statements, together),
+  (batches) => siteObject(env).queryBatches(batches));
 
 /** The header the Worker passes the visitor's time zone in (request.cf.timezone), to the site's object. */
 export const ZONE_HEADER = "Afterwrd-Zone";
@@ -185,6 +216,10 @@ export const ZONE_HEADER = "Afterwrd-Zone";
  * Database object when self-hosted (selfhost/d1.js), or D1. Null if there's neither.
  */
 export function oldDatabase(env) {
-  if (env.DATABASE) return client((statements, together) => env.DATABASE.get(env.DATABASE.idFromName("db")).query(statements, together));
+  if (env.DATABASE) {
+    return client((statements, together) => env.DATABASE.get(env.DATABASE.idFromName("db")).query(statements, together), () => {
+      throw new Error("Not for the database being moved.");
+    });
+  }
   return env.DB ?? null;
 }

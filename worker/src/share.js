@@ -5,8 +5,9 @@
 //   albums()         the albums, with covers
 //   album(key, page) one album's photos and videos
 //   photo(hash)      one photo or video, with comments, the post it came with, and its neighbours
-// Photos and videos aren't sent: each comes with a link signed here ("afterwrd:fetch") that the friend's browser
-// loads straight from this site for the next hour or two (signedFile, checked in index.js).
+// Photos and videos aren't sent: each comes with a link signed here ("afterwrd:fetch") for that one friend, which
+// their browser loads straight from this site for the next day or two, while they're still a friend (signedFile,
+// checked in app.js).
 //
 // Who sees a post: all friends (posts.audience 'friends'), or only those listed in post_audience ('chosen': an
 // event, seen only by those invited). Every answer here is for one friend (`peer`, their connection), and leaves out
@@ -36,25 +37,62 @@ async function key(env) {
   return mediaKey;
 }
 
+const DAY = 86400;
+const encode = (text) => new TextEncoder().encode(text);
 const signature = async (env, hash, exp) =>
-  toBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", await key(env), new TextEncoder().encode(`${hash}.${exp}`))));
+  toBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", await key(env), encode(`${hash}.${exp}`))));
+
+// A friend's link (signedFile with `friend`) keeps the shape every site checks for (friends.js signedLink:
+// ?exp=<digits>&sig=<43 characters>, 32 bytes), so older friends' sites take it as they always have. Its 32 bytes are
+// the friend's connection number (FRIEND_BYTES) and then as much of an HMAC of the file, the expiry and that number as
+// fits. That message is unlike a plain link's, so neither can stand in for the other.
+const FRIEND_BYTES = 4;
+const friendMac = async (env, hash, exp, friend) =>
+  new Uint8Array(await crypto.subtle.sign("HMAC", await key(env), encode(`${hash}.${exp}.friend.${friend}`)));
 
 /**
- * A link to one stored file that works without signing in until it expires: one to two hours, on the hour, or for
- * a profile picture or cover (`long`), six to seven days, so friends' sites can keep showing it.
+ * A link to one stored file that works without signing in until it expires.
+ * - For a friend (`friend`: their connection's id, as in their site's copy of the feed): until the end of the next
+ *   day (UTC), 24 to 48 hours, the same all day, and only while they're still a friend (signedFor). A day rather than
+ *   an hour so the copies friends' sites keep stay usable, and aren't rewritten, for a day, and their browsers keep the
+ *   photos (docs/speed-and-scale-plan.md, "Scale test").
+ * - A profile picture or cover (`long`): six to seven days, so friends' sites can keep showing it.
+ * - Anything else (a group's photos, or ones a group copies from a member's site): one to two hours, on the hour.
+ * @param {any} env
+ * @param {string} site
+ * @param {string} hash
+ * @param {{ long?: boolean, friend?: number | null }} [options]
  */
-export async function signedFile(env, site, hash, { long = false } = {}) {
-  const exp = long ? (Math.floor(now() / 86400) + 7) * 86400 : (Math.floor(now() / 3600) + 2) * 3600;
+export async function signedFile(env, site, hash, { long = false, friend = null } = {}) {
+  if (!long && Number.isSafeInteger(friend) && friend > 0 && friend < 2 ** 32) {
+    const exp = (Math.floor(now() / DAY) + 2) * DAY;
+    const sig = new Uint8Array(32);
+    new DataView(sig.buffer).setUint32(0, friend);
+    sig.set((await friendMac(env, hash, exp, friend)).subarray(0, sig.length - FRIEND_BYTES), FRIEND_BYTES);
+    return `${site}/files/${hash}?exp=${exp}&sig=${toBase64Url(sig)}`;
+  }
+  const exp = long ? (Math.floor(now() / DAY) + 7) * DAY : (Math.floor(now() / 3600) + 2) * 3600;
   return `${site}/files/${hash}?exp=${exp}&sig=${await signature(env, hash, exp)}`;
 }
 
-/** Whether a request for /files/<hash> carries a good, unexpired signature; returns seconds left, or 0. */
+/**
+ * Whether a request for /files/<hash> carries a good, unexpired signature; returns seconds left, or 0. A friend's
+ * link also needs them to be a friend still, so removing someone stops their links at once.
+ */
 export async function signedFor(env, hash, params) {
   const exp = Number(params.get("exp"));
   const sig = params.get("sig") ?? "";
   if (!Number.isSafeInteger(exp) || exp <= now() || !/^[\w-]{43}$/.test(sig)) return 0;
-  const ok = await crypto.subtle.verify("HMAC", await key(env), fromBase64Url(sig), new TextEncoder().encode(`${hash}.${exp}`));
-  return ok ? exp - now() : 0;
+  const bytes = fromBase64Url(sig);
+  if (await crypto.subtle.verify("HMAC", await key(env), bytes, encode(`${hash}.${exp}`))) return exp - now();
+  // Never longer than a friend's link is ever signed for.
+  if (exp > (Math.floor(now() / DAY) + 2) * DAY) return 0;
+  const friend = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+  const mac = (await friendMac(env, hash, exp, friend)).subarray(0, bytes.length - FRIEND_BYTES);
+  if (!crypto.subtle.timingSafeEqual(mac, bytes.subarray(FRIEND_BYTES))) return 0;
+  const still = await env.DB.prepare("SELECT 1 FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL")
+    .bind(friend).first();
+  return still ? exp - now() : 0;
 }
 
 // --- what's shared --------------------------------------------------------------------------------------------------
@@ -75,9 +113,10 @@ async function chosen(db) {
   return row ? JSON.parse(row.value) : [];
 }
 
-async function media(env, site, m, { long = false } = {}) {
-  const object = mediaObject(site, m, { "afterwrd:fetch": await signedFile(env, site, m.hash, { long }) });
-  if (object.preview && m.thumb_hash) object.preview["afterwrd:fetch"] = await signedFile(env, site, m.thumb_hash, { long });
+/** A photo or video for a friend's site (`friend`: their connection's id), or with a `long` link for any of them. */
+async function media(env, site, m, { long = false, friend = null } = {}) {
+  const object = mediaObject(site, m, { "afterwrd:fetch": await signedFile(env, site, m.hash, { long, friend }) });
+  if (object.preview && m.thumb_hash) object.preview["afterwrd:fetch"] = await signedFile(env, site, m.thumb_hash, { long, friend });
   delete object.location; // where photos were taken stays here
   return object;
 }
@@ -123,7 +162,7 @@ export async function notes(env, site, posts, { replies = true, peer }) {
     mediaType: "text/plain",
     content: p.text ?? "",
     attachment: [
-      ...await Promise.all(photos.results.filter((m) => m.post_id === p.id).map((m) => media(env, site, m))),
+      ...await Promise.all(photos.results.filter((m) => m.post_id === p.id).map((m) => media(env, site, m, { friend: peer.id }))),
       ...(p.link_url ? [{ type: "Link", href: p.link_url }] : []),
     ],
     // People tagged on Facebook (a name only), then who it mentions (mentions.js: with their site's address).
@@ -191,7 +230,7 @@ async function setInfo(db, key) {
   return { set, stats, name: set.title ?? album?.name, album };
 }
 
-export async function shareAlbums(env, site) {
+export async function shareAlbums(env, site, peer) {
   const db = env.DB;
   const items = [];
   for (const key of await setKeys(db)) {
@@ -201,13 +240,13 @@ export async function shareAlbums(env, site) {
       .bind(...(album?.cover_media_id ? [album.cover_media_id] : set.params)).first();
     items.push({
       type: "Collection", name, totalItems: stats.count, "afterwrd:key": key,
-      published: iso(stats.first_ts), updated: iso(stats.last_ts), icon: cover?.hash ? await media(env, site, cover) : undefined,
+      published: iso(stats.first_ts), updated: iso(stats.last_ts), icon: cover?.hash ? await media(env, site, cover, { friend: peer.id }) : undefined,
     });
   }
   return { type: "Collection", totalItems: items.length, items };
 }
 
-export async function shareAlbum(env, site, key, page) {
+export async function shareAlbum(env, site, key, page, peer) {
   const db = env.DB;
   if (!(await setKeys(db)).includes(key)) return null;
   const { set, stats, name, album } = await setInfo(db, key);
@@ -216,7 +255,7 @@ export async function shareAlbum(env, site, key, page) {
   return {
     type: "OrderedCollectionPage", name, summary: album?.description || undefined, totalItems: stats.count,
     published: iso(stats.first_ts), updated: iso(stats.last_ts), "afterwrd:key": key, "afterwrd:page": page,
-    "afterwrd:hasNext": page * PHOTOS_PAGE < stats.count, orderedItems: await Promise.all(results.map((m) => media(env, site, m))),
+    "afterwrd:hasNext": page * PHOTOS_PAGE < stats.count, orderedItems: await Promise.all(results.map((m) => media(env, site, m, { friend: peer.id }))),
   };
 }
 
@@ -276,7 +315,7 @@ export async function sharePhoto(env, site, hash, peer) {
   const withPost = m.post_id && await postById(db, m.post_id);
   const post = withPost && (await postShared(db, withPost, peer.id)) ? withPost : null;
   return {
-    ...await media(env, site, m),
+    ...await media(env, site, m, { friend: peer.id }),
     ...neighbours,
     "afterwrd:postedWith": post ? (await notes(env, site, [post], { replies: false, peer }))[0] : undefined,
     // Only photos made on afterwrd take comments, for now.

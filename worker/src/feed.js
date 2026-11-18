@@ -25,6 +25,10 @@ import { cleanMentions, mentionTags } from "./mentions.js";
 // so with more friends than SITES it asks those whose notes (notify.js) say they've posted lately, newest
 // first, keeping a few places for the friends asked longest ago, so a quiet friend or a missed note still turns up.
 const SITES = 40;
+// How long Home waits for a friend's site with no copy to show. Sites answer in 0.5–0.7 s on Cloudflare (1.5 s when
+// slow); one that doesn't answer in time is asked again in the background (the Outbox waits callSite's 8 s), so a
+// site that's hanging holds Home up for this long, not 8 s (docs/speed-and-scale-plan.md, "Scale test").
+const HOME_WAIT_MS = 3000;
 const TAKING_TURNS = 5;
 // A friend's site that hasn't answered for a day (or says this site isn't connected) stops being mentioned on Home,
 // and Friends says so instead, with a way to remove them (views.js). It's still asked, but once an hour at most.
@@ -97,11 +101,16 @@ export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && 
  * @param {number} [at]
  */
 export function noteAnswer(db, connection, error = null, at = now()) {
+  answered(connection, error, at);
+  return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
+    .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
+}
+
+/** Notes on `connection` (the row, in memory) whether their site answered (noteAnswer). */
+function answered(connection, error, at) {
   Object.assign(connection, error?.status !== undefined
     ? { missing_since: connection.missing_since ?? at, said_no: error.status === 401 ? 1 : 0 }
     : { reached_at: at, missing_since: null, said_no: 0 });
-  return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
-    .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
 }
 
 /** Which friends' sites Home asks this time (see SITES). */
@@ -147,7 +156,9 @@ function copyUntil(posts, at) {
 
 /**
  * Statements keeping what friend `connection`'s site just sent (`feed`, cleaned): the copy of their posts Home shows,
- * their name and picture if they've changed, and copies of their events the owner's invited to (events.js).
+ * their name and picture if they've changed, and copies of their events the owner's invited to (events.js). When the
+ * copy was made, and until when it can be shown, are set on `connection` (the row, in memory) for the caller to save
+ * with the rest of the row (askSites).
  * @param {D1Database} db
  * @param {Row<"connections">} connection
  * @param {{ name?: string, avatar?: { thumbSrc?: string } | null, posts: any[] }} feed
@@ -164,7 +175,6 @@ function keepFeed(db, connection, feed, at) {
     ...posts.map(({ p, data }) => db.prepare(`INSERT INTO friend_posts (connection_id, post_key, created_at, data) VALUES (?, ?, ?, ?)
       ON CONFLICT (connection_id, post_key) DO UPDATE SET created_at = excluded.created_at, data = excluded.data
       WHERE friend_posts.data IS NOT excluded.data`).bind(connection.id, p.key, Math.min(Number(p.created_at) || 0, at + FUTURE_SECONDS), data)),
-    db.prepare("UPDATE connections SET copied_at = ?, copy_until = ? WHERE id = ?").bind(at, connection.copy_until, connection.id),
     ...eventCopies(db, connection, feed.posts),
   ];
   // Keep names up to date if a friend changes theirs.
@@ -179,32 +189,55 @@ function keepFeed(db, connection, feed, at) {
 
 /**
  * Asks each of `connections`' sites for their newest posts, and keeps what they send. Returns {connection, error?}.
+ * `timeout`: how long to wait for each (callSite's own if not given).
  * @template {Row<"connections">} C
  * @param {D1Database} db
  * @param {C[]} connections
  * @param {any} env
- * @returns {Promise<{ connection: C, error?: any }[]>}
+ * @param {number} [timeout]
+ * @returns {Promise<{ connection: C, error?: any, slow?: boolean }[]>}
  */
-async function askSites(db, connections, env) {
+async function askSites(db, connections, env, timeout) {
   const replies = await Promise.all(connections.map(async (connection) => {
+    const started = Date.now();
     try {
-      const feed = await callSite(connection.origin, "/_peer/feed", { key: connection.their_key });
+      const feed = await callSite(connection.origin, "/_peer/feed", { key: connection.their_key, ...(timeout && { timeout }) });
       return { connection, feed: cleanFeed(feed, connection.origin, env) };
     } catch (error) {
-      return { connection, error };
+      // Out of Home's short time (not a site that said no, or isn't there): it's asked again in the background with
+      // longer, which decides whether it's reachable, so nothing about it is noted here but that it was asked.
+      const slow = Boolean(timeout) && error?.status === 0 && Date.now() - started >= timeout - 100;
+      return { connection, error, slow };
     }
   }));
   const at = now();
   // A batch for each friend: small transactions, however many friends there are, and one friend's failing (something
   // too big to keep, say) doesn't stop the rest, or Home. A site that says this one isn't connected (401: they removed
-  // the owner) has its copy forgotten at once.
-  await Promise.all(replies.map(({ connection, feed, error }) => db.batch([
-    db.prepare("UPDATE connections SET feed_checked_at = ? WHERE id = ?").bind(at, connection.id),
-    noteAnswer(db, connection, error, at),
-    ...(feed ? keepFeed(db, connection, feed, at) : []),
-    ...(error?.status === 401 ? [db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connection.id)] : []),
-  ]).catch((failed) => console.error(`Keeping ${connection.origin}'s posts:`, failed.message))));
-  return replies.map(({ connection, error }) => ({ connection, error }));
+  // the owner) has its copy forgotten at once. All of them are sent at once (db.batches): from the Outbox, where the
+  // database is another object, that's one call rather than one per friend, which would go past a run's 50.
+  // The friend's row changes in one statement (when they were asked, whether they answered, when their copy was made),
+  // so a refresh writes one row for it rather than three: with 500 friends refreshed several times a day, that's most
+  // of a day's writes when nothing's changed (docs/speed-and-scale-plan.md, "Scale test").
+  const batches = replies.map(({ connection, feed, error, slow }) => {
+    if (slow) return [db.prepare("UPDATE connections SET feed_checked_at = ? WHERE id = ?").bind(at, connection.id)];
+    answered(connection, error, at);
+    const kept = feed ? keepFeed(db, connection, feed, at) : [];
+    const copy = feed ? ", copied_at = ?, copy_until = ?" : "";
+    return [
+      db.prepare(`UPDATE connections SET feed_checked_at = ?, reached_at = ?, missing_since = ?, said_no = ?${copy} WHERE id = ?`)
+        .bind(at, connection.reached_at ?? null, connection.missing_since, connection.said_no,
+          ...(feed ? [connection.copied_at, connection.copy_until] : []), connection.id),
+      ...kept,
+      ...(error?.status === 401 ? [db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connection.id)] : []),
+    ];
+  });
+  // If the call itself fails (too big all together, say, or the site busy moving), each friend's batch is sent on its
+  // own instead, so one call's failing doesn't lose them all. (env.DB is typed as D1's, which has no batches():
+  // sqlite.js adds it.)
+  const oneByOne = () => Promise.all(batches.map((b) => db.batch(b).then(() => null, (error) => String(error?.message ?? error))));
+  const failed = batches.length ? await /** @type {any} */ (db).batches(batches).catch(oneByOne) : [];
+  failed.forEach((message, i) => message && console.error(`Keeping ${replies[i].connection.origin}'s posts:`, message));
+  return replies.map(({ connection, error, slow }) => ({ connection, error, slow }));
 }
 
 /** In the background (the Outbox's alarm): fetches these friends' newest posts again, and keeps them. */
@@ -229,19 +262,22 @@ export async function loadFeed(db, ownOrigin, env = null) {
   const at = now();
   // Friends, and the newest posts from the copies that can be shown, at once (see `usable`, which the SQL matches).
   // Read again below if a friend's site is asked while Home waits, as that gives them a copy that can be shown.
+  // `+connection_id` keeps SQLite walking friend_posts_newest and stopping at HOME_POSTS, rather than reading every
+  // friend's copy and sorting the lot (with 500 friends, 15,000 rows a visit: docs/speed-and-scale-plan.md, "Scale test").
   /** @type {[{ results: (Row<"connections"> & { avatar?: { thumbSrc: string } | null })[] }, { results: Pick<Row<"friend_posts">, "connection_id" | "data">[] }]} */
   const [{ results: connections }, copies] = await Promise.all([
     db.prepare(`SELECT * FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE`).all(),
-    db.prepare(`SELECT connection_id, data FROM friend_posts WHERE connection_id IN (SELECT id FROM connections
+    db.prepare(`SELECT connection_id, data FROM friend_posts WHERE +connection_id IN (SELECT id FROM connections
       WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL AND COALESCE(copied_at, 0) != 0 AND COALESCE(copy_until, 0) > ?1
       AND said_no = 0) ORDER BY created_at DESC LIMIT ?2`).bind(at + MARGIN_SECONDS, HOME_POSTS).all(),
   ]);
   // A copy of a site that's said this one isn't connected any more isn't shown, however recent.
   const usable = (c) => Boolean(c.copied_at) && (c.copy_until ?? 0) > at + MARGIN_SECONDS && !c.said_no;
-  const replies = await askSites(db, await sitesToAsk(db, connections.filter((c) => !usable(c))), env);
-  // Fetched in the background, for next time: copies getting old, and friends with none that weren't asked now (more
-  // than SITES of them). Quiet sites no more than hourly, as above.
-  const asked = new Set(replies.map((r) => r.connection));
+  const replies = await askSites(db, await sitesToAsk(db, connections.filter((c) => !usable(c))), env, HOME_WAIT_MS);
+  // Fetched in the background, for next time: copies getting old, friends with none that weren't asked now (more
+  // than SITES of them), and those that didn't answer in time (the Outbox waits longer). Quiet sites no more than
+  // hourly, as above.
+  const asked = new Set(replies.filter((r) => r.error?.status !== 0).map((r) => r.connection));
   const old = connections.filter((c) => !asked.has(c) && (!usable(c) || c.copied_at < at - FRESH_SECONDS)
     && (!gone(c, at) || (c.feed_checked_at ?? 0) <= at - QUIET_ASK_SECONDS));
   // Handed over while the rest is read, and waited for at the end.
@@ -261,7 +297,7 @@ export async function loadFeed(db, ownOrigin, env = null) {
   const marked = await markAllMine(db, theirs.map(({ id, p }) => ({ connectionId: id, target: p.key, comments: p.comments })), ownOrigin);
   const posts = theirs.map(({ id, p }, i) => ({ ...p, connection: shown.get(id), comments: marked[i] }));
   // Home only mentions a friend's site that's just stopped answering; one that's gone quiet is on Friends instead.
-  const unreachable = replies.filter((r) => r.error && !gone(r.connection, at))
+  const unreachable = replies.filter((r) => r.error && !r.slow && !gone(r.connection, at))
     .map((r) => ({ connection: shown.get(r.connection.id), error: r.error.message }));
   await refreshing;
   return { posts, connections: [...shown.values()], unreachable };

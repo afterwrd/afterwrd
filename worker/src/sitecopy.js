@@ -27,8 +27,14 @@ const SHARED = { posts: "source = 'afterwrd'", media: "source = 'afterwrd'" };
 
 /** Whether the object's own database is ready: copied (or with nothing to copy). */
 export function copied(storage) {
-  return Boolean(storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name = 'afterwrd_copy'").toArray().length
-    && storage.sql.exec("SELECT 1 FROM afterwrd_copy WHERE name = '' AND done = 1").toArray().length);
+  // Asked directly, rather than first looking for the table in sqlite_master: that reads every table and index the
+  // site has (about 140 rows), each time the object wakes (docs/speed-and-scale-plan.md, "Scale test").
+  try {
+    return storage.sql.exec("SELECT 1 FROM afterwrd_copy WHERE name = '' AND done = 1").toArray().length > 0;
+  } catch (error) {
+    if (/no such table/i.test(String(error?.message))) return false;
+    throw error;
+  }
 }
 
 /**
