@@ -63,6 +63,8 @@ import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";
 import { editGroupComment, editGroupPost, groupCommentVersions, groupPostVersions, groupVersionsGone } from "./edits.js";
 
 export const MAX_MEMBERS = 40; // with the requests waiting, few enough that all can be told when the group closes
+/** The member cap: MAX_MEMBERS, or in a scale test (self-hosted, with TEST_SCALE) whatever TEST_MAX_MEMBERS says. */
+export const maxMembers = (env) => (env.TEST_SCALE && env.HOSTING === "self" && Number(env.TEST_MAX_MEMBERS)) || MAX_MEMBERS;
 const MAX_WAITING = 10;
 export const MAX_GROUP_PHOTOS = 8; // each is two files to copy from the member's site: within the free plan's 50 calls
 export const MAX_GROUP_TEXT = 5000;
@@ -654,8 +656,8 @@ async function decide(env, group, admin, id, action) {
     if (member.approved_at) return null;
     const done = await db.prepare(`UPDATE group_members SET approved_at = ?1 WHERE id = ?2
       AND (SELECT COUNT(*) FROM group_members WHERE group_id = ?3 AND approved_at IS NOT NULL) < ?4`)
-      .bind(now(), member.id, group.id, MAX_MEMBERS + 1).run();
-    return done.meta.changes ? null : `The group is full: it can have up to ${MAX_MEMBERS} members besides its owner.`;
+      .bind(now(), member.id, group.id, maxMembers(env) + 1).run();
+    return done.meta.changes ? null : `The group is full: it can have up to ${maxMembers(env)} members besides its owner.`;
   }
   if (action === "admin" || action === "member") {
     if (!member.approved_at) return "Let them in first.";
@@ -681,7 +683,7 @@ async function close(env, group, owner) {
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_closed', '1')"),
   ]);
   await removeUnusedFiles(env, photos.flatMap((f) => [f.hash, f.thumb_hash]));
-  await Promise.all(members.slice(0, MAX_MEMBERS + MAX_WAITING).map(tellRemoved));
+  await Promise.all(members.slice(0, maxMembers(env) + MAX_WAITING).map(tellRemoved));
 }
 
 /** Proves `key` belongs to the site at `origin`, and was made there for joining (or claiming) this group. */

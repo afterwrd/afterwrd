@@ -3,6 +3,7 @@
 // each file into rows under SQLite's 2 MB limit.
 import { DurableObject } from "cloudflare:workers";
 import { MAX_FILE } from "../public/static/import/schema.js";
+import { scaleTest } from "./timing.js";
 
 const CHUNK = 1_900_000;
 export const HASH_RE = /^[0-9a-f]{64}$/;
@@ -15,6 +16,7 @@ export class MediaStore extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    scaleTest(this, env, `media-${ctx.id.name}`);
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS files (
         hash TEXT PRIMARY KEY, size INTEGER NOT NULL, type TEXT NOT NULL, chunks INTEGER NOT NULL

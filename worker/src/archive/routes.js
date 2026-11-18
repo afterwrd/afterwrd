@@ -10,7 +10,7 @@ import { sitePolls } from "../polls.js";
 import { editablePosts, postVersions } from "../edits.js";
 import { connectionById, loadFeed, markAllMine, markMine, noteAnswer, rememberPicture } from "../feed.js";
 import * as friend from "../friends.js";
-import { MAX_GROUP_PHOTOS, MAX_MEMBERS } from "../groups.js";
+import { MAX_GROUP_PHOTOS, maxMembers } from "../groups.js";
 import { whereAmI } from "../groupsites.js";
 import * as groups from "../membership.js";
 import { ownerName } from "../peers.js";
@@ -1026,7 +1026,7 @@ async function groupEventFile(ctx, params, id, postId) {
 /** Who's in a group; for its admins, also requests to join, the invite link, and running it. */
 async function groupMembers(ctx, params, id) {
   return fromGroup(ctx, id, async (g) => ({
-    ...await groups.loadMembers(ctx.env, g), max: MAX_MEMBERS, connected: ctx.connected,
+    ...await groups.loadMembers(ctx.env, g), max: maxMembers(ctx.env), connected: ctx.connected,
     // Self-hosted, its data stays on the server until a command removes it (hosting.js).
     deleteCommand: selfHosted(ctx.env) && g.role === "owner" ? serverCommand(`delete-group ${new URL(g.origin).host}`) : null,
     // Where the owner stands with each member, to offer asking them to be friends (connect.js).

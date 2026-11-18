@@ -9,8 +9,10 @@
 // - sql: of that, the time D1 says it spent running them, and the rows they read (from each result's meta; not for
 //   raw()). A lot of rows read means a query looking through a whole table.
 // - sites: time with at least one call to another site waiting (friends' sites, groups, GitHub), and how many.
-// - calls: every call out this request has made so far, other sites and Durable Objects (photos, the Outbox)
-//   together. The free plan allows 50 a request. Calls made after the reply has gone (work.waitUntil) also count
+// - calls: calls out to other sites (fetch) this request has made so far: the free plan allows 50 a request. Calls
+//   to Durable Objects (photos, the Outbox, the site's own object) don't count towards that (tried on Cloudflare,
+//   18 Nov 2026: 60 by RPC or stub.fetch went through where the 51st fetch failed); each is one of the account's
+//   object requests a day, so they're shown alongside. Calls made after the reply has gone (work.waitUntil) also count
 //   against the 50 but can't be in the header.
 // - total: from the request arriving to the reply being ready.
 //
@@ -21,13 +23,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 /**
  * @typedef {{ n: number, ms: number, active: number, since: number, rounds: number }} Clock
  * @typedef {{ start: number, db: Clock, sites: Clock, objects: number, show: boolean, delays: { db: number, sites: number },
- *   sql: { ms: number, rows: number } }} Timing
+ *   sql: { ms: number, rows: number }, scale?: Scale }} Timing
+ * @typedef {{ object: any, refused: number, cursors: any[], texts: string[], writes: number, pending: Promise<unknown>[] }} Scale
  */
 
 /** @type {AsyncLocalStorage<Timing>} */
 const current = new AsyncLocalStorage();
 const clock = () => ({ n: 0, ms: 0, active: 0, since: 0, rounds: 0 });
-/** Calls out a free-plan request may make (docs/speed-and-scale-plan.md). */
+/** Calls out to other sites (fetch) a free-plan request may make; calls to objects don't count (docs/speed-and-scale-plan.md). */
 export const CALLS_ALLOWED = 50;
 
 /**
@@ -57,18 +60,147 @@ async function timed(which, count, work) {
   }
 }
 
+/**
+ * Scale tests only (scaleTest below): the free plan's 50 calls out per run, enforced as Cloudflare does, by refusing
+ * the 51st fetch. Calls to objects don't count. Null to go ahead.
+ */
+function refused(timing) {
+  if (!timing?.scale || timing.sites.n < CALLS_ALLOWED) return null;
+  timing.scale.refused++;
+  return new Error("Too many subrequests.");
+}
+
 // Every fetch() a site makes, wherever it is in the code, is timed while a request is being measured.
 const original = globalThis.fetch;
-globalThis.fetch = (...args) => timed("sites", 1, () => original(...args));
+globalThis.fetch = (...args) => {
+  const no = refused(current.getStore());
+  return no ? Promise.reject(no) : timed("sites", 1, () => original(...args));
+};
+
+const fresh = () => ({ start: Date.now(), db: clock(), sites: clock(), objects: 0, show: false, delays: { db: 0, sites: 0 },
+  sql: { ms: 0, rows: 0 } });
 
 /**
- * Runs `answer` (one request) with its own timing.
+ * Runs `answer` (one request) with its own timing. In a scale test, a request is already being measured as one run of
+ * its object (scaleTest), and carries on with that.
  * @template T
  * @param {() => Promise<T>} answer
  */
 export function measure(answer) {
-  return current.run({ start: Date.now(), db: clock(), sites: clock(), objects: 0, show: false, delays: { db: 0, sites: 0 },
-    sql: { ms: 0, rows: 0 } }, answer);
+  if (current.getStore()?.scale) return answer();
+  return current.run(fresh(), answer);
+}
+
+// --- Scale tests (test/scale; docs/scale-test-plan.md) --------------------------------------------------------------
+//
+// Only for a self-hosted site (HOSTING=self) whose config sets TEST_SCALE (to its address): the scale test's sites.
+// Nothing here runs anywhere else. Every run of one of its objects (a request, an alarm, a call from another object)
+// is counted as Cloudflare counts it: its calls out to other sites (the 51st is refused; calls to objects don't count,
+// but are logged), and the rows its SQLite read and wrote
+// (setting an alarm counts as one written). When the run and whatever it left going (waitUntil) have finished, one
+// line goes to the log: AFTERWRD_STATS {...}. It holds counts and the request's path, never what anyone wrote.
+
+const patched = new WeakSet();
+
+/**
+ * Called by each object's constructor (Outbox, MediaStore). With TEST_SCALE set, every method of its class (including
+ * fetch and alarm) runs as one counted run. `name`: which object, as the log line says it ("site", "outbox", "media").
+ * @param {any} object  the object (its ctx is protected, so it can't be typed more closely here)
+ * @param {Record<string, any>} env
+ * @param {string} name
+ */
+export function scaleTest(object, env, name) {
+  // Two settings, as cloudflare.js testingHere asks for ALLOW_LOCAL_SITES: the scale test runs self-hosted only, so a
+  // single variable added to a site on Cloudflare can't switch this on.
+  if (!env.TEST_SCALE || env.HOSTING !== "self") return;
+  const ctx = /** @type {any} */ (object.ctx);
+  object.scaleName = name;
+  // Whatever a run hands to waitUntil counts towards that run (as on Cloudflare): noted against the run in progress.
+  const waitUntil = ctx.waitUntil.bind(ctx);
+  object.scaleWaitUntil = waitUntil;
+  ctx.waitUntil = (promise) => {
+    current.getStore()?.scale?.pending.push(promise);
+    waitUntil(promise);
+  };
+  const sqlProto = Object.getPrototypeOf(ctx.storage.sql);
+  if (!patched.has(sqlProto)) {
+    patched.add(sqlProto);
+    const exec = sqlProto.exec;
+    sqlProto.exec = function (...args) {
+      const cursor = Reflect.apply(exec, this, args);
+      const scale = current.getStore()?.scale;
+      if (scale) {
+        scale.cursors.push(cursor);
+        scale.texts.push(String(args[0]));
+      }
+      return cursor;
+    };
+  }
+  const storageProto = Object.getPrototypeOf(ctx.storage);
+  if (!patched.has(storageProto)) {
+    patched.add(storageProto);
+    const setAlarm = storageProto.setAlarm;
+    storageProto.setAlarm = function (...args) {
+      const scale = current.getStore()?.scale;
+      if (scale) scale.writes++;
+      return Reflect.apply(setAlarm, this, args);
+    };
+  }
+  const proto = Object.getPrototypeOf(object);
+  if (patched.has(proto)) return;
+  patched.add(proto);
+  for (const method of Object.getOwnPropertyNames(proto)) {
+    const plain = proto[method];
+    if (method === "constructor" || typeof plain !== "function") continue;
+    proto[method] = function (...args) {
+      // A method the object calls on itself is part of the run that called it.
+      if (current.getStore()?.scale?.object === this) return Reflect.apply(plain, this, args);
+      return counted(this, method, args[0] instanceof Request ? new URL(args[0].url).pathname : "", () => Reflect.apply(plain, this, args));
+    };
+  }
+}
+
+/** One run of `object`'s `method`, counted and logged (scaleTest). */
+function counted(object, method, path, work) {
+  const timing = { ...fresh(), scale: { object, refused: 0, cursors: [], texts: [], writes: 0, pending: [] } };
+  return current.run(timing, async () => {
+    let failed = false;
+    try {
+      return await work();
+    } catch (error) {
+      failed = true;
+      throw error;
+    } finally {
+      const replied = Date.now();
+      object.scaleWaitUntil((async () => {
+        const { pending } = timing.scale;
+        for (let seen = -1; seen !== pending.length;) {
+          seen = pending.length;
+          await Promise.allSettled(pending);
+        }
+        logRun(object, method, path, timing, pending.length ? Date.now() : replied, failed);
+      })());
+    }
+  });
+}
+
+function logRun(object, method, path, timing, end, failed) {
+  const { scale } = timing;
+  let read = 0;
+  let written = scale.writes;
+  for (const cursor of scale.cursors) {
+    read += cursor.rowsRead;
+    written += cursor.rowsWritten;
+  }
+  // A run that read a lot says which statements did it: the start of their SQL, with whole numbers written in
+  // (sqlite.js inlineIntegers), never the text bound to them.
+  const heavy = read > 200 ? scale.cursors.map((c, i) => [c.rowsRead, scale.texts[i].replace(/\s+/g, " ").slice(0, 160)])
+    .filter(([rows]) => rows >= 20).sort((a, b) => b[0] - a[0]).slice(0, 6) : undefined;
+  // Paths with anything long in them (friend and invite links' tokens, files' hashes) are logged without it.
+  const shown = path.replace(/\/[\w-]{20,}/g, "/:token").slice(0, 80);
+  console.log(`AFTERWRD_STATS ${JSON.stringify({ site: object.env.TEST_SCALE, obj: object.scaleName, m: method, path: shown,
+    t0: timing.start, ms: end - timing.start, calls: timing.sites.n, objects: timing.objects, refused: scale.refused, rr: read, rw: written,
+    failed, heavy })}`);
 }
 
 /**
@@ -97,7 +229,7 @@ export function timingHeader() {
     `db;dur=${db.ms};desc="Database: ${db.n} ${db.n === 1 ? "query" : "queries"} in ${db.rounds} ${db.rounds === 1 ? "round" : "rounds"}"`,
     `sql;dur=${Math.round(sql.ms * 10) / 10};desc="Running them: ${sql.rows} rows read"`,
     `sites;dur=${sites.ms};desc="Other sites: ${sites.n} ${sites.n === 1 ? "call" : "calls"}"`,
-    `calls;desc="Calls out: ${sites.n + objects} of ${CALLS_ALLOWED}"`,
+    `calls;desc="Calls out: ${sites.n} of ${CALLS_ALLOWED}; to objects: ${objects}"`,
     `total;dur=${Date.now() - start}`,
   ].join(", ");
 }
@@ -151,12 +283,14 @@ function timedDatabase(db) {
   return {
     prepare: (sql) => statement(db.prepare(sql)),
     batch: (statements) => timed("db", statements.length, () => db.batch(statements.map((s) => s.unwrapped ?? s))).then(ran),
+    batches: db.batches && ((batches) => timed("db", batches.reduce((n, b) => n + b.length, 0),
+      () => db.batches(batches.map((b) => b.map((s) => s.unwrapped ?? s))))),
     exec: (sql) => timed("db", 1, () => db.exec(sql)),
     dump: () => db.dump(),
   };
 }
 
-/** A Durable Object binding whose objects count each call as one call out. */
+/** A Durable Object binding whose objects count each call (an object request: not one of the 50 calls out). */
 function countedNamespace(namespace) {
   return new Proxy(namespace, {
     get(target, prop) {

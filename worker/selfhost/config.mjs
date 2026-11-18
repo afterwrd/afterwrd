@@ -14,6 +14,9 @@
 //   local   tests only: it may call addresses on this computer, where the other test sites are
 //   listen  tests only: its own address to listen on (127.0.0.1:8787), instead of coming through the router
 // Options: router (where the router listens, e.g. "*:8080"), tools (where tools.js listens: "unix:/tmp/afterwrd/tools.sock").
+// Tests only (test/scale): elsewhere, sites run by another workerd on this computer ([{host, address: "127.0.0.1:8082"}]),
+// reached through that workerd's router (one workerd can't hold more than about 250 sites: V8 gives all of a
+// process's JavaScript 4 GB); testNet, delays and failures outbound.js adds to calls between sites (outbound.js).
 //
 // For tests: node selfhost/config.mjs <build dir> <sites.json>  (sites.json: a list of sites as above)
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -30,13 +33,18 @@ const worker = (meta, modules, bindings, extra = "") => `(
 const esm = (name) => `(name = ${text(name)}, esModule = embed ${text(name)})`;
 
 /** Writes <build>/config.capnp for these sites; returns its path. */
-export function writeConfig(build, sites, { router = null, tools = null } = {}) {
+export function writeConfig(build, sites, { router = null, tools = null, elsewhere = [], testNet = null } = {}) {
   const meta = JSON.parse(readFileSync(join(build, "meta.json"), "utf8"));
   const sql = readdirSync(build).filter((f) => f.endsWith(".sql")).map((f) => `(name = ${text(f)}, text = embed ${text(f)})`);
   const version = JSON.stringify({ id: `selfhost-${meta.version}`, tag: `v${meta.version}`, timestamp: meta.builtAt });
   const routed = sites.filter((s) => s.host);
   const hostMap = (pick) => JSON.stringify(Object.fromEntries(routed.map((s) => [s.host, pick(s)])));
   const siteBindings = routed.map((s) => `(name = "S_${s.id}", service = "site-${s.id}")`);
+  // Another workerd's router, for each address it listens on (tests only).
+  const others = [...new Set(elsewhere.map((s) => s.address))];
+  const otherName = (address) => `elsewhere-${others.indexOf(address)}`;
+  const outboundMap = JSON.stringify({ ...Object.fromEntries(routed.map((s) => [s.host, `S_${s.id}`])),
+    ...Object.fromEntries(elsewhere.map((s) => [s.host, `E_${others.indexOf(s.address)}`])) });
 
   const services = [
     `(name = "files-disk", disk = (path = ${text(join(build, "public"))}, writable = false))`,
@@ -48,9 +56,12 @@ export function writeConfig(build, sites, { router = null, tools = null } = {}) 
     services.push(`(name = "internet-local", network = (allow = ["public", "private", "local"], tlsOptions = (trustBrowserCas = true)))`);
   }
   const sockets = [];
+  for (const address of others) services.push(`(name = "${otherName(address)}", external = (address = ${text(address)}, http = ()))`);
   if (routed.length) {
-    services.push(`(name = "outbound", worker = ${worker(meta, [esm("outbound.js")], [`(name = "SITES", json = ${text(hostMap((s) => `S_${s.id}`))})`,
-      `(name = "INTERNET", service = "internet")`, ...siteBindings], `,\n    globalOutbound = "internet"`)})`);
+    services.push(`(name = "outbound", worker = ${worker(meta, [esm("outbound.js")], [`(name = "SITES", json = ${text(outboundMap)})`,
+      `(name = "INTERNET", service = "internet")`, ...siteBindings,
+      ...others.map((address, i) => `(name = "E_${i}", service = "${otherName(address)}")`),
+      ...(testNet ? [`(name = "TEST_NET", json = ${text(JSON.stringify(testNet))})`] : [])], `,\n    globalOutbound = "internet"`)})`);
   }
   if (router && routed.length) {
     services.push(`(name = "router", worker = ${worker(meta, [esm("router.js")], [`(name = "SITES", json = ${text(hostMap((s) => `S_${s.id}`))})`,

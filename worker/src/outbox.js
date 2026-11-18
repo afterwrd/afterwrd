@@ -17,6 +17,7 @@ import { refreshCopies } from "./feed.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
 import { local, oldDatabase, remote, runStatements, ZONE_HEADER } from "./sqlite.js";
+import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
 
 const BATCH = 40;
@@ -53,6 +54,7 @@ export class Outbox extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    scaleTest(this, env, ctx.id.name);
     // The site's own object keeps only the site's tables (migrate.js makes them), and its env.DB is them. The database
     // the site used before is copied in once (sitecopy.js), and kept here only for that.
     if (ctx.id.name === "site") {
@@ -60,8 +62,10 @@ export class Outbox extends DurableObject {
       this.env = { ...env, DB: local(ctx.storage) };
       return;
     }
-    // Every other object reaches the site's database in the site's object.
-    this.env = { ...env, DB: remote(env) };
+    // Every other object reaches the site's database in the site's object. Its calls to other objects are counted, as
+    // a request's are (timing.js): only scale tests do anything with the count here.
+    const counted = measured(env);
+    this.env = { ...counted, DB: remote(counted) };
     for (const table of GONE) this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
     for (const [table, { column, more = "" }] of Object.entries(KINDS)) {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (

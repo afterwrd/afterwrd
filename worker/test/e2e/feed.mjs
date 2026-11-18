@@ -143,7 +143,7 @@ const timing = friendPage.headers()["server-timing"] ?? "";
 check("A friend's page says how long it waited on the database and their site, and the calls out used",
   /db;dur=\d+;desc="Database: [1-9]\d* quer\w+ in [1-9]\d* rounds?"/.test(timing) && /sql;dur=[\d.]+;desc="Running them: [1-9]\d* rows read"/.test(timing)
   && /sites;dur=\d+;desc="Other sites: [1-9]\d* call/.test(timing)
-  && /calls;desc="Calls out: [1-9]\d* of 50"/.test(timing) && /total;dur=\d+/.test(timing), timing);
+  && /calls;desc="Calls out: [1-9]\d* of 50; to objects: \d+"/.test(timing) && /total;dur=\d+/.test(timing), timing);
 const others = await Promise.all([fetch(`${A}/_auth/login`), fetch(`${A}/_peer/feed`, { headers: { Authorization: `Bearer ${keyBobHolds}` } })]);
 check("…but not signed out, nor in answer to a friend's site", others[1].status === 200 && others.every((r) => !r.headers.has("server-timing")));
 // Site files by their fingerprint are kept for good; by any other address they're checked each time (static.js, nav.js).
