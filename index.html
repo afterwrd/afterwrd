@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Install afterwrd</title>
+<meta name="description" content="A small, private social network of your own, with your Facebook years brought along. Free, in your own Cloudflare account.">
+<meta name="theme-color" content="#16201b">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%226%22%20fill%3D%22%23ff8a3d%22%2F%3E%3Cpath%20d%3D%22M12%204a8%208%200%201%201-4.7%2014.5L3.8%2020l1.2-3.6A8%208%200%200%201%2012%204z%22%20transform%3D%22translate(2.4%202.2)%20scale(0.8)%22%20fill%3D%22none%22%20stroke%3D%22%2316201b%22%20stroke-width%3D%223.6%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E">
+<style>
+  /* Campfire, as on the sites themselves (the fonts are the device's own here). */
+  :root { --bg: #16201b; --surface: #1f2b25; --raised: #263329; --sunken: #121a16; --text: #ede6da; --muted: #a9a092; --border: #2e3d35;
+          --accent: #ff8a3d; --accent-strong: #ffab73; --accent-soft: #2b2118; --on-accent: #16201b; color-scheme: dark;
+          --round: ui-rounded, "SF Pro Rounded", "Nunito", "Quicksand", system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font: 900 2.5rem/1.12 var(--round); margin: 0 0 12px; letter-spacing: -0.02em; }
+  .brand { display: inline-flex; align-items: center; font: 900 1.7rem/1 var(--round); margin: 0 0 26px; letter-spacing: -0.02em; }
+  .brand .o { width: 0.82em; height: 0.82em; margin: 0.08em 0.01em 0; color: var(--accent); }
+  .lede { color: var(--muted); margin: 0 0 14px; font-size: 1.08rem; }
+  .how { margin: 0 0 30px; }
+  ol.steps { list-style: none; counter-reset: step; padding: 0; margin: 0; display: grid; gap: 14px; }
+  ol.steps > li { counter-increment: step; background: var(--surface); border-radius: 22px; padding: 18px 20px 18px 64px; position: relative; }
+  ol.steps > li::before { content: counter(step); position: absolute; left: 18px; top: 16px; width: 30px; height: 30px; border-radius: 50%;
+    background: var(--accent); color: var(--on-accent); font: 900 0.95rem var(--round); display: grid; place-items: center; }
+  ol.steps > li.optional { background: transparent; border: 2px dashed var(--border); }
+  ol.steps > li.optional::before { content: "+"; background: var(--surface); color: var(--text); }
+  h2 { font: 900 1.2rem var(--round); margin: 2px 0 6px; }
+  h2 .meta { font: 600 0.85rem system-ui, sans-serif; }
+  .hour { margin: 12px 0 4px; padding: 12px 14px; border-radius: 16px; background: var(--accent-soft); border-left: 4px solid var(--accent); }
+  .hour b:first-child { color: var(--accent-strong); }
+  p { margin: 6px 0; }
+  .meta { color: var(--muted); font-size: 0.9rem; }
+  a { color: var(--accent-strong); }
+  .button { display: inline-block; margin: 8px 8px 0 0; padding: 11px 20px; border-radius: 999px; border: 0;
+    background: var(--raised); color: var(--text); font: 800 1rem var(--round); text-decoration: none; cursor: pointer; }
+  .button.primary { background: var(--text); color: var(--on-accent); }
+  .safe { margin-top: 28px; background: var(--accent-soft); border: 0; border-radius: 22px; padding: 18px 20px; }
+  .safe h2 { margin-top: 0; color: var(--accent-strong); }
+  .safe ul { margin: 0; padding-left: 1.2rem; }
+  .safe li { margin: 0.4rem 0; }
+  footer { margin-top: 28px; color: var(--muted); font-size: 0.85rem; }
+  code { font-size: 0.9em; }
+</style>
+</head>
+<body>
+<main>
+<p class="brand" aria-label="afterwrd">afterw<svg class="o" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</p>
+<h1>A small social network of your own</h1>
+<p class="lede">Post, share photos and talk with friends who have their own afterwrd site, and, if you like, bring your
+Facebook years along. It runs in your own free Cloudflare account, so no one else holds your data and there's nothing
+to pay. A few minutes, on a phone or a computer.</p>
+<p class="meta how">Want the details first? <a href="/how-it-works/">How it works</a>, or
+<a href="/compared/">how afterwrd is different from Facebook</a>.</p>
+
+<ol class="steps">
+  <li>
+    <h2>Make a free Cloudflare account</h2>
+    <p>Cloudflare is where your site will run. It only needs an email address: you don't need to add a card, as
+    afterwrd fits in the free plan. Confirm your email when Cloudflare's message comes, then come back here.</p>
+    <a class="button" href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Sign up to Cloudflare</a>
+    <p class="meta">Already have an account just for afterwrd? <a href="https://dash.cloudflare.com/login" target="_blank" rel="noopener">Sign in</a>.
+    If you use Cloudflare for other things, make a separate one for afterwrd.</p>
+  </li>
+  <li>
+    <h2>Install</h2>
+    <p>Signed in to Cloudflare in this browser? Press <b>Install</b>.</p>
+    <p class="hour"><b>One hour, nothing kept.</b> Cloudflare will ask you to <b>Allow</b> afterwrd to set up your site.
+    That access ends after an hour, and afterwrd keeps nothing.</p>
+    <a class="button primary" href="https://install.afterwrd.app/connect">Install</a>
+    <p class="meta">Then you give your name and make a passkey to sign in with: your face, fingerprint or phone PIN, no
+    password. Last, your site offers to keep itself up to date and to let friends' sites check it's genuine. You can say
+    yes, or turn them on later.</p>
+  </li>
+  <li class="optional">
+    <h2>Bring your Facebook years <span class="meta">(optional, any time)</span></h2>
+    <p>Ask Facebook for a copy of your things, in its <a href="https://accountscenter.facebook.com/info_and_permissions/dyi/" target="_blank" rel="noopener">Download your information</a>:
+    choose your profile, <b>All available information</b>, format <b>JSON</b> and media quality <b>High</b>. Facebook
+    emails you when it's ready (minutes, or up to a day). Then choose <b>Import</b> in afterwrd's menu (behind your
+    picture) and pick the zip file(s). Your posts, photos and comments appear under <b>Memories</b>, and your Facebook
+    friends list helps you see who to invite.</p>
+  </li>
+</ol>
+
+<section class="safe">
+  <h2>Keeping it safe</h2>
+  <ul>
+    <li><b>Look after your Cloudflare account</b> as you would your email: your site lives there. Turn on two-step sign-in
+      (My Profile → Authentication).</li>
+    <li><b>Open device links only on your own phone or computer.</b> A device link signs a new device in as you. Each
+      one works once, within an hour.</li>
+    <li><b>Say yes only to people you know.</b> Nothing is shared with anyone until you approve them as a friend.</li>
+    <li><b>Let it update itself</b>, so fixes reach your site. If you said no during setup, turn it on from the
+      <b>Update</b> page.</li>
+    <li><b>Home tells you when a new device is added.</b> If it wasn't you, remove it in <b>Your devices</b>.</li>
+  </ul>
+  <p class="meta">Locations are taken out of the photos you post. More in <a href="/how-it-works/#secure">Is it secure?</a></p>
+</section>
+
+<footer>
+  <p>The installer downloads afterwrd 0.58.2 from its <a href="https://github.com/afterwrd/afterwrd/releases/tag/v0.58.2">published release</a> and checks every file
+  against the fingerprint <code>89e6e15a6307…</code> before installing anything. Installing uses Cloudflare's own
+  sign-in for apps, for an hour; automatic updates and friends' checks last until you turn them off. What you've allowed
+  is under My Profile → Connected Applications in Cloudflare. <a href="https://github.com/afterwrd/afterwrd">Source code</a>.</p>
+  <p>afterwrd isn't affiliated with or endorsed by Meta. It only reads the "Download your information" file Facebook gives you.
+  Facebook and Meta are trademarks of Meta Platforms, Inc.</p>
+</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,257 @@
+<!doctype html>
+<!-- afterwrd's Connect page (https://afterwrd.app/connect/): the one address Cloudflare sends people back to after
+     they allow afterwrd to change their account for an hour. It does two things, both in the browser, with nothing
+     stored anywhere and no server behind it (this is a static page on GitHub Pages):
+       1. On the way out (?to=…&state=…&challenge=…, from a site's /_cloudflare/start): remembers which site asked,
+          in this tab only, and sends the browser to Cloudflare's sign-in.
+       2. On the way back (?code=…&state=…, from Cloudflare): checks the state is the one this tab started with, and
+          hands the one-time code to that same site (in the fragment, which no server or log sees). Only that site
+          holds the PKCE secret, so only it can turn the code into a token. See worker/src/cloudflare.js. -->
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
+<title>Connecting to Cloudflare · afterwrd</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%226%22%20fill%3D%22%23ff8a3d%22%2F%3E%3Cpath%20d%3D%22M12%204a8%208%200%201%201-4.7%2014.5L3.8%2020l1.2-3.6A8%208%200%200%201%2012%204z%22%20transform%3D%22translate(2.4%202.2)%20scale(0.8)%22%20fill%3D%22none%22%20stroke%3D%22%2316201b%22%20stroke-width%3D%223.6%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E">
+<style>
+  :root { --bg: #16201b; --surface: #1f2b25; --text: #ede6da; --muted: #a9a092; --accent: #ff8a3d; --accent-strong: #ffab73;
+          --round: ui-rounded, "SF Pro Rounded", "Nunito", "Quicksand", system-ui, sans-serif; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 480px; margin: 48px auto; background: var(--surface); border-radius: 24px; padding: 28px; }
+  .brand { display: flex; align-items: center; font: 900 1.35rem/1 var(--round); margin: 0 0 18px; letter-spacing: -0.02em; }
+  .brand .o { width: 0.82em; height: 0.82em; color: var(--accent); margin: 0 0.02em; }
+  p { margin: 8px 0; }
+  a { color: var(--accent-strong); }
+  .meta { color: var(--muted); font-size: 0.9rem; }
+  #error:empty { display: none; }
+  details.more summary { cursor: pointer; }
+  ul.plain { padding-left: 1.1rem; }
+  ul.plain li { margin: 0.4rem 0; }
+  #ask[hidden], #ask-check[hidden], #ask-auto[hidden], #ask-checks[hidden], #ask-both[hidden], #ask-recover[hidden] { display: none; }
+  /* Passing through (on the way back from Cloudflare, or straight on to it): nothing but the background unless it takes
+     a moment, so a page gone in a blink doesn't flash. Asking, or a problem, shows at once. */
+  body.passing main { animation: appear 0s 0.5s both; }
+  @keyframes appear { from { visibility: hidden; } }
+  #host, #check-host, #auto-host, #checks-host, #both-host, #recover-host { font: 800 1.15rem/1.3 var(--round); word-break: break-all; }
+  .grants { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.92rem; }
+  .grants th, .grants td { text-align: left; vertical-align: top; padding: 8px 6px; border-top: 1px solid #2e3d35; }
+  .grants thead th { color: var(--muted); font-weight: 600; border-top: 0; }
+  .grants tbody th { font-weight: 700; }
+  button { display: inline-block; padding: 10px 18px; border: 0; border-radius: 999px; background: var(--text); color: var(--bg);
+    font: inherit; font-weight: 700; cursor: pointer; margin-top: 8px; }
+</style>
+</head>
+<body class="passing">
+<main>
+<p class="brand" aria-label="afterwrd">afterw<svg class="o" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</p>
+<p id="status">One moment…</p>
+<section id="ask" hidden>
+  <p>Connect your afterwrd site to Cloudflare?</p>
+  <p id="host"></p>
+  <p class="meta">This lets your site update itself (or your groups) for <b>one hour</b>. Check the address above is
+  <b>your own</b> site: Cloudflare's next page won't show it. If it isn't yours, close this page.</p>
+  <details class="meta more"><summary>What exactly does it allow?</summary>
+    <p>For that hour, the site can make and change Workers (the small programs websites run on) and databases in your
+    Cloudflare account. Nothing is kept afterwards.</p></details>
+  <p><button id="continue">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-auto" hidden>
+  <p>Let your afterwrd site keep itself up to date?</p>
+  <p id="auto-host"></p>
+  <p class="meta">New afterwrd releases will install by themselves, a few days after they come out. This stays on until
+  you turn it off, on your site's Update page.</p>
+  <p class="meta">On Cloudflare's next page, leave <b>Background Access</b> ticked and press <b>Allow</b>. Only continue
+  if the address above is <b>your own</b> site.</p>
+  <details class="meta more"><summary>What exactly does it allow?</summary>
+    <p>Lasting access to change your Workers (Cloudflare calls it Workers Editor), and nothing else: it can't make or
+    read databases, read your account's settings or make tokens. You can also remove it in Cloudflare: My Profile →
+    Access Management → Connected Applications.</p></details>
+  <p><button id="continue-auto">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-both" hidden>
+  <p><b>Let your site look after itself?</b></p>
+  <p id="both-host"></p>
+  <ul class="meta plain">
+    <li><b>Keep itself up to date.</b> New afterwrd releases install by themselves, so you get fixes without doing
+      anything.</li>
+    <li><b>Let friends' sites check it.</b> Now and then, a friend's afterwrd site checks yours is the genuine afterwrd,
+      and tells you if anything's wrong. It can only look, never change anything.</li>
+  </ul>
+  <p class="meta">Both stay on until you turn them off, on your site's Update page. You can also say no on Cloudflare's
+  page, and turn them on later.</p>
+  <p class="meta">On each of the next two Cloudflare pages, leave <b>Background Access</b> ticked and press <b>Allow</b>.
+  Only continue if the address above is <b>your own</b> site.</p>
+  <details class="meta more"><summary>What exactly do they allow?</summary>
+  <p>Unlike the one-hour access that installed afterwrd, these last until you turn them off.</p>
+  <table class="grants">
+    <thead><tr><th></th><th>What it can do</th><th>How long</th></tr></thead>
+    <tbody>
+      <tr><th>Automatic updates</th><td>Install each new afterwrd release, once it's signed and has been out a few days.
+        It can change your Workers, but can't read your databases or your account's settings.</td><td>Until you turn it off</td></tr>
+      <tr><th>Friends' checks</th><td>Let your friends' afterwrd sites read your site's code, to confirm it's the real
+        afterwrd. Read-only: it can't change anything. Each friend's site gets a one-hour pass at a time.</td><td>Until you turn it off</td></tr>
+    </tbody>
+  </table>
+  <p>Turn either off any time on your site's Update page, or in Cloudflare under My Profile → Access Management →
+  Connected Applications.</p>
+  </details>
+  <p><button id="continue-both">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-checks" hidden>
+  <p>Let your friends' afterwrd sites check yours?</p>
+  <p id="checks-host"></p>
+  <p class="meta">Now and then, a friend's afterwrd site checks yours is the genuine afterwrd, and tells you if
+  anything's wrong. It can only look, never change anything. This stays on until you turn it off, on your site's Update
+  page.</p>
+  <p class="meta">On Cloudflare's next page, leave <b>Background Access</b> ticked and press <b>Allow</b>. Only continue
+  if the address above is <b>your own</b> site.</p>
+  <details class="meta more"><summary>What exactly does it allow?</summary>
+    <p>Lasting access to <b>read</b> the code of every Worker in your Cloudflare account (not only afterwrd's), and
+    nothing else: it can't change anything, or read your databases or your account's settings. Your site gives a
+    friend's site that asks a one-hour, read-only pass from it. You can also remove it in Cloudflare: My Profile →
+    Access Management → Connected Applications.</p></details>
+  <p><button id="continue-checks">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-check" hidden>
+  <p>Let this friend's afterwrd site check yours?</p>
+  <p id="check-host"></p>
+  <p class="meta">It looks at your site's code, and at the record Cloudflare keeps of changes to your account, to check
+  your site is the genuine afterwrd. It can only <b>read</b>, never change anything, and the access ends after an hour.
+  Only continue if this is the site of a friend who offered to check yours.</p>
+  <p><button id="continue-check">Continue to Cloudflare</button></p>
+</section>
+<section id="ask-recover" hidden>
+  <p>Get back into your afterwrd site?</p>
+  <p id="recover-host"></p>
+  <p class="meta">Cloudflare will ask to let afterwrd change your Workers for an hour. Your site uses that once, to prove
+  you're its owner, without changing anything, and keeps nothing. Then you can add the device you're on. <b>Only continue if this is your own site, and you asked
+  for this:</b> nobody else, friends included, ever needs it.</p>
+  <p><button id="continue-recover">Continue to Cloudflare</button></p>
+</section>
+<p id="error" role="alert"></p>
+</main>
+<script>
+  // The sign-in apps a site may ask through: this release's, then earlier ones (worker/src/cloudflare.js). The one the
+  // site says, as that's the one it swaps the code with; a site from before 0.51.0 says nothing, and used the first.
+  const CLIENTS = "b31941d48dae93f31e2d9a64a865d5e6 9a89827907d5681523b116176031302e".split(" ");
+  const UNSAID = "9a89827907d5681523b116176031302e";
+  // What Cloudflare is asked for depends only on where the browser goes back to, so a check can't be given more:
+  //   /_cloudflare/done  a site installing or updating itself (as in worker/src/cloudflare.js SCOPES). "Workers
+  //                      Admin", because "Workers Editor" can't create a Worker.
+  //   /_check/done       a friend's site checking yours (worker/src/checks.js): read-only, your Workers' code and the
+  //                      account's settings and audit log.
+  //   /_cloudflare/auto-done  your own site keeping itself up to date (worker/src/auto.js): Background Access to change
+  //                      Workers (Workers Editor) and nothing else: no databases, no account settings, no tokens.
+  //   /_cloudflare/checks-done  your own site letting friends' sites check it by themselves (worker/src/friendchecks.js):
+  //                      Background Access to read your Workers' code, and nothing else.
+  //   /_auth/recover/done  getting back into your own site without a passkey (worker/src/recover.js): an hour's access
+  //                      to change Workers, which the site proves it has by making its running version live again.
+  //                      Never read-only: anyone can start a recovery, so a code allowed for a check mustn't fit it.
+  const SCOPES = {
+    "/_cloudflare/done": "workers-scripts.admin d1.write account-settings.read",
+    "/_check/done": "workers-scripts.content_read account-settings.read",
+    "/_cloudflare/auto-done": "offline_access workers-scripts.edit",
+    "/_cloudflare/checks-done": "offline_access workers-scripts.content_read",
+    "/_auth/recover/done": "workers-scripts.edit",
+  };
+  const KEY = "afterwrd-connect";
+  const BOTH_KEY = "afterwrd-connect-both";
+  const BOTH_FOR_MS = 15 * 60 * 1000;
+  const status = document.getElementById("status");
+  const problem = document.getElementById("error");
+  const fail = (text) => { status.textContent = ""; problem.textContent = text; document.body.classList.remove("passing"); };
+  const params = new URLSearchParams(location.search);
+  history.replaceState(null, "", location.pathname); // neither the code nor the challenge belongs in the history
+
+  // The site that asked: an afterwrd site or installer at its workers.dev address (the only kind there is), at its
+  // own return paths (SCOPES), and nothing else. So a link can't send someone's code to an address elsewhere.
+  const HOST_RE = /^[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev$/;
+  const siteFrom = (to) => {
+    try {
+      const url = new URL(to);
+      if (url.protocol !== "https:" || !HOST_RE.test(url.hostname) || url.port || !Object.hasOwn(SCOPES, url.pathname)
+        || url.search || url.hash || url.username || url.password) return null;
+      return url;
+    } catch { return null; }
+  };
+  const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
+
+  if (params.has("to")) {
+    // On the way out.
+    const site = siteFrom(params.get("to"));
+    const state = params.get("state") ?? "";
+    const challenge = params.get("challenge") ?? "";
+    if (!site || !ID_RE.test(state) || !ID_RE.test(challenge)) {
+      fail("This page is only used while connecting an afterwrd site. Start from your site's Update or Groups page.");
+    } else {
+      try {
+        sessionStorage.setItem(KEY, JSON.stringify({ to: site.href, state }));
+      } catch {
+        fail("Your browser won't let this page remember which site asked (private browsing can do that). Try in an ordinary window.");
+      }
+      if (!problem.textContent) {
+        const toCloudflare = () => {
+          const auth = new URL("https://dash.cloudflare.com/oauth2/auth");
+          auth.searchParams.set("response_type", "code");
+          auth.searchParams.set("client_id", CLIENTS.includes(params.get("client")) ? params.get("client") : UNSAID);
+          auth.searchParams.set("redirect_uri", location.origin + location.pathname);
+          auth.searchParams.set("scope", SCOPES[site.pathname]);
+          auth.searchParams.set("state", state);
+          auth.searchParams.set("code_challenge", challenge);
+          auth.searchParams.set("code_challenge_method", "S256");
+          location.replace(auth.toString());
+        };
+        // Both lasting permissions at once (a new site's setup, or turning both on): automatic updates first, with
+        // what both are, then friends' checks. That second one, read-only, goes straight on to Cloudflare when this
+        // tab has just been through the first for the same site, so it isn't asked twice. Only once, and not for long.
+        const both = params.get("both") === "1" && site.pathname === "/_cloudflare/auto-done";
+        let shown = null;
+        try { shown = JSON.parse(sessionStorage.getItem(BOTH_KEY) || "null"); sessionStorage.removeItem(BOTH_KEY); } catch {}
+        if (site.pathname === "/_cloudflare/checks-done" && shown?.host === site.host && Date.now() - shown.at < BOTH_FOR_MS) {
+          status.textContent = "One moment…";
+          toCloudflare();
+        } else {
+          // The one place the person can see which site is being connected, so it asks before going on.
+          const kind = both ? ["both-host", "ask-both", "continue-both"] : { "/_check/done": ["check-host", "ask-check", "continue-check"],
+            "/_cloudflare/auto-done": ["auto-host", "ask-auto", "continue-auto"],
+            "/_cloudflare/checks-done": ["checks-host", "ask-checks", "continue-checks"],
+            "/_auth/recover/done": ["recover-host", "ask-recover", "continue-recover"] }[site.pathname] ?? ["host", "ask", "continue"];
+          status.textContent = "";
+          document.getElementById(kind[0]).textContent = site.host;
+          document.getElementById(kind[1]).hidden = false;
+          document.body.classList.remove("passing");
+          document.getElementById(kind[2]).addEventListener("click", () => {
+            if (both) {
+              try { sessionStorage.setItem(BOTH_KEY, JSON.stringify({ host: site.host, at: Date.now() })); } catch {}
+            }
+            toCloudflare();
+          });
+        }
+      }
+    }
+  } else if (params.has("code") || params.has("error")) {
+    // On the way back.
+    let started = null;
+    try { started = JSON.parse(sessionStorage.getItem(KEY) || "null"); sessionStorage.removeItem(KEY); } catch {}
+    const site = started && siteFrom(started.to);
+    if (!site || !ID_RE.test(started.state ?? "")) {
+      fail("This tab didn't start a connection, so there's nowhere to send you back to. Start again from your site.");
+    } else if (params.get("state") !== started.state) {
+      fail("This isn't the connection this tab started. Start again from your site.");
+    } else if (params.has("error")) {
+      location.replace(site.href + "#error=" + encodeURIComponent(params.get("error")));
+    } else {
+      status.textContent = "One moment…";
+      const back = new URLSearchParams({ code: params.get("code"), state: started.state });
+      location.replace(site.href + "#" + back.toString());
+    }
+  } else {
+    fail("This page is only used while connecting an afterwrd site to Cloudflare. There's nothing to see here.");
+  }
+</script>
+</body>
+</html>
