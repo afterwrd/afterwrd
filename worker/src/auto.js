@@ -594,10 +594,18 @@ async function groupStep(env, origin, body) {
   }
   if (body.step === "group-switch") {
     if (typeof body.versionId !== "string" || !/^[0-9a-f-]{36}$/.test(body.versionId)) throw new Error("Unknown version.");
-    const check = async () => {
-      const r = await fetch(`${group.origin}/_group/ping`, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(10_000) });
-      const ping = r.ok ? await r.json().catch(() => null) : null;
-      return { answered: r.status, healthy: ping?.version === VERSION };
+    // Healthy: the group's Worker answers as the new version (its /_version, answered by the Worker itself since
+    // 0.58.1), and the group still answers its members (/_group/ping). Not the ping's version: that's answered by the
+    // group's object, which may keep running the old code for minutes after a switch while it's kept busy (the checks
+    // themselves keep it busy), as 0.58.1's own groups found (docs/speed-and-scale-plan.md, "Scale test").
+    const ask = (path) => fetch(`${group.origin}${path}`, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(10_000) });
+    const check = async (versionId) => {
+      const v = await ask(`/_version?t=${Date.now()}`);
+      const live = v.ok ? (await v.json().catch(() => null))?.id : (await v.body?.cancel(), null);
+      if (live !== versionId) return { answered: v.status, healthy: false };
+      const r = await ask("/_group/ping");
+      const ping = r.ok ? await r.json().catch(() => null) : (await r.body?.cancel(), null);
+      return { answered: r.status, healthy: ping?.afterwrd === "group" };
     };
     return switchCarefully(env, origin, body.token, group.account, group.script, body.versionId, check);
   }

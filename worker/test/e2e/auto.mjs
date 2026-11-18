@@ -111,7 +111,10 @@ const server = createServer(async (req, res) => {
   const auth = (req.headers.authorization ?? "").replace(/^Bearer /, "");
   const api = url.pathname.replace(/^\/client\/v4/, "");
   asked.push(`${req.method} ${api} ${auth}`);
-  if (url.pathname === "/grp/_group/ping") return send(200, { version: grp.version });
+  // The group as a switch sees it: its Worker answers /_version as whichever version is live, while its ping, answered
+  // by the group's object, can still be the old code (on Cloudflare a busy object keeps it for minutes after a switch).
+  if (url.pathname === "/grp/_version") return send(200, { id: grp.live });
+  if (url.pathname === "/grp/_group/ping") return send(200, { afterwrd: "group", version: "0.1.0" });
   const gat = `/accounts/${ACCOUNT}/workers/scripts/localhost-grp`;
   if (api === `${gat}/settings`) {
     return send(200, { success: true, result: { bindings: [{ type: "d1", name: "DB", id: "grp-db" }, { type: "assets", name: "ASSETS" },
