@@ -2,7 +2,7 @@
 // them as decimals), everything else stays bound and renumbered, and anything that only looks like a placeholder
 // (in quotes, names in brackets, comments) is left alone.
 //   node test/sqlite.mjs
-import { inlineIntegers } from "../src/sqlite.js";
+import { frontIsNewer, inlineIntegers } from "../src/sqlite.js";
 
 const results = [];
 const check = (name, ok, extra = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}${extra ? `  (${extra})` : ""}`); };
@@ -30,5 +30,14 @@ for (const [name, sql, params, wantSql, wantParams] of cases) {
   const got = inlineIntegers(sql, params);
   check(name, got.sql === wantSql && JSON.stringify(got.params) === JSON.stringify(wantParams), JSON.stringify(got));
 }
+// frontIsNewer: the site's object restarts only for a newer Worker (outbox.js), never for its own version, an older
+// one (a switch back), or anything it can't read.
+const own = { id: "b", timestamp: "2026-11-18T10:00:00.000Z" };
+const front = (id, timestamp) => JSON.stringify({ id, timestamp });
+check("a newer Worker: restart", frontIsNewer(front("c", "2026-11-18T11:00:00.000Z"), own) === true);
+check("the same version: carry on", frontIsNewer(front("b", "2026-11-18T10:00:00.000Z"), own) === false);
+check("an older Worker (switched back): carry on", frontIsNewer(front("a", "2026-11-17T10:00:00.000Z"), own) === false);
+check("no header, or nonsense: carry on", [null, "", "{", "null", front(null, null), front("c", "not a date")].every((v) => frontIsNewer(v, own) === false));
+check("no version of its own (testing): carry on", frontIsNewer(front("c", "2026-11-18T11:00:00.000Z"), undefined) === false);
 console.log(`${results.filter(Boolean).length}/${results.length} passed`);
 process.exit(results.every(Boolean) ? 0 : 1);

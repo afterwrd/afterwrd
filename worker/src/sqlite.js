@@ -212,6 +212,25 @@ export const remote = (env) => client((statements, together) => siteObject(env).
 export const ZONE_HEADER = "Afterwrd-Zone";
 
 /**
+ * The header the Worker passes its own version in ({id, timestamp}: env.VERSION), to the site's object, which
+ * restarts itself when it's running older code (outbox.js). A Durable Object keeps the code it started with until it
+ * restarts, and one kept busy (as it is during an update) may not restart for minutes: tried on Cloudflare, 18 Nov 2026.
+ */
+export const FRONT_HEADER = "Afterwrd-Front";
+/** Why the site's object restarted itself (FRONT_HEADER): the Worker asks again once when it sees this. */
+export const OLDER_CODE = "The site's object was running older code than its Worker, so it has restarted.";
+
+/** Whether the Worker's version (FRONT_HEADER's value) is a newer one than `own` (this code's env.VERSION). */
+export function frontIsNewer(value, own) {
+  try {
+    const front = JSON.parse(value);
+    return typeof front?.id === "string" && front.id !== own?.id && Date.parse(front.timestamp) > Date.parse(own?.timestamp);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The database the site used before it moved into its object (sitecopy.js copies it once, then leaves it alone): the
  * Database object when self-hosted (selfhost/d1.js), or D1. Null if there's neither.
  */

@@ -16,7 +16,7 @@ import { handle, HEADERS } from "./app.js";
 import { refreshCopies } from "./feed.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
-import { local, oldDatabase, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
+import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
 import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
 
@@ -84,14 +84,19 @@ export class Outbox extends DurableObject {
 
   /**
    * In the "site" object: one request to the site, handed on by the Worker (index.js) and answered here with the
-   * database next to it (app.js). The visitor's time zone comes in ZONE_HEADER, which the Worker always sets.
+   * database next to it (app.js). The visitor's time zone comes in ZONE_HEADER, and the Worker's version in
+   * FRONT_HEADER, both always set by the Worker.
    */
   async fetch(request) {
     if (!this.isSite()) return new Response("Not found", { status: 404 });
+    // Running older code than the Worker in front (an update has just gone live): restart, so the Worker's asking
+    // again finds this object running the same version as itself (sqlite.js FRONT_HEADER).
+    if (frontIsNewer(request.headers.get(FRONT_HEADER), this.env.VERSION)) this.ctx.abort(OLDER_CODE);
     if (!(await this.ready())) return moving(request);
     const zone = request.headers.get(ZONE_HEADER) ?? "";
     const headers = new Headers(request.headers);
     headers.delete(ZONE_HEADER);
+    headers.delete(FRONT_HEADER);
     return handle(new Request(request, { headers, cf: zone ? { timezone: zone } : {} }), this.env,
       { waitUntil: (promise) => this.ctx.waitUntil(promise) });
   }
