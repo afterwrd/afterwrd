@@ -2,7 +2,7 @@
 // and identity checks (src/identity.js), through the real code bundled by run.sh, with a software passkey standing in
 // for a phone: it makes real WebAuthn assertions (P-256), as a browser would hand to the site.
 import { pathToFileURL } from "node:url";
-const { signed, checkDelegation, checkPasskeyProof, forked, readIdentity, SLOW_SECONDS } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+const { signed, checkDelegation, checkPasskeyProof, forked, readIdentity, SLOW_SECONDS, checkCall, signCall, CLOCK_SECONDS, checkProfile, parseChain } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 const { b64url, checkAs, concat, encode, fingerprintOf, fromB64url, newKeyPair, newRecoveryCode, publicKeyText, recoveryKey, sha256,
   signAs, statementsChallenge, tidyRecoveryCode, utf8 } = signed;
 
@@ -196,5 +196,58 @@ check("…and nothing counts after it", (await readIdentity([...cc, { bytes: aft
 
 check("oversized or malformed documents aren't identities", (await readIdentity([{ bytes: utf8("x".repeat(5000)), sig: {} }], seen(new Map()), NOW)) === null
   && (await readIdentity([{ bytes: utf8("{}"), sig: {} }], seen(new Map()), NOW)) === null);
+
+// --- signed calls between sites (signedcalls.js) ----------------------------------------------------------------
+
+{
+  const B = "https://bob.example";
+  const bobPerson = "b".repeat(43);
+  const bobHosting = await newKeyPair();
+  const bobPublic = await publicKeyText(bobHosting.publicKey);
+  const keyOf = async (person, from) => (person === bobPerson && from === B ? bobPublic : null);
+  const call = async (method, url, body = null, { at = NOW, signedUrl = url, key = bobHosting.privateKey, from = B, person = bobPerson } = {}) => {
+    const headers = new Headers(await signCall({ method, url: signedUrl, body, person, from, privateKey: key, at }));
+    return { method, url, headers, body: body == null ? null : utf8(body) };
+  };
+  const ok = (c, opts = {}) => checkCall(c, { ownOrigin: new URL(c.url).origin, hostingKeyOf: keyOf, at: NOW, ...opts });
+  check("a signed call says who's calling", (await ok(await call("GET", `${A}/_p/profile`)))?.person === bobPerson);
+  check("…with a body too", (await ok(await call("POST", `${A}/_p/records`, '{"a":1}')))?.from === B);
+  check("a call signed for one site can't be replayed to another", (await ok(await call("GET", "https://cat.example/_p/profile", null, { signedUrl: `${A}/_p/profile` }))) === null);
+  check("…nor to another address on the same site", (await ok(await call("GET", `${A}/_p/other`, null, { signedUrl: `${A}/_p/profile` }))) === null);
+  check("a call more than 5 minutes old (or ahead) is refused", (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW - CLOCK_SECONDS - 1 }))) === null
+    && (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW + CLOCK_SECONDS + 1 }))) === null
+    && (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW - CLOCK_SECONDS + 5 })))?.person === bobPerson);
+  const changed = await call("POST", `${A}/_p/records`, '{"a":1}');
+  changed.body = utf8('{"a":2}');
+  check("a changed body is refused", (await ok(changed)) === null);
+  const dropped = await call("POST", `${A}/_p/records`, '{"a":1}');
+  dropped.body = null;
+  check("…and so is one with its body taken away", (await ok(dropped)) === null);
+  check("a call signed with another key is refused", (await ok(await call("GET", `${A}/_p/profile`, null, { key: (await newKeyPair()).privateKey }))) === null);
+  const moved = await call("GET", `${A}/_p/profile`);
+  moved.headers.set("Afterwrd-From", "https://evil.example");
+  check("…as is one claiming to come from somewhere else", (await ok(moved)) === null);
+  check("…or from someone the receiver can't find", (await ok(await call("GET", `${A}/_p/profile`, null, { person: "c".repeat(43) }))) === null);
+  const bare = await call("GET", `${A}/_p/profile`);
+  bare.headers.delete("Signature");
+  check("an unsigned call is refused", (await ok(bare)) === null && (await ok({ method: "GET", url: `${A}/_p/profile`, headers: new Headers() })) === null);
+}
+
+// --- profiles (identities.js checkProfile) ------------------------------------------------------------------------
+
+{
+  const profile = (fields) => encode({ v: 2, kind: "profile", person: gFp, name: "Ann Example", at: NOW, ...fields });
+  const envelope = async (bytes, key = browser) => ({ bytes: b64url(bytes), key: await publicKeyText(key.publicKey),
+    signature: await signAs("profile", key.privateKey, bytes), delegation: { bytes: b64url(delegation), proof: setupProof } });
+  check("a profile signed by a browser key the person allowed says their name", (await checkProfile(await envelope(profile()), s0))?.name === "Ann Example");
+  check("…not if signed by any other key", (await checkProfile(await envelope(profile(), await newKeyPair()), s0)) === null);
+  check("…nor after that browser key ran out", (await checkProfile(await envelope(profile({ at: NOW + 31 * DAY })), s0)) === null);
+  check("…nor claiming to be someone else's", (await checkProfile(await envelope(profile({ person: "x".repeat(43) })), s0)) === null);
+  const edited = await envelope(profile());
+  edited.bytes = b64url(profile({ name: "Not Ann" }));
+  check("…nor with its name changed", (await checkProfile(edited, s0)) === null);
+  check("chains are read only in the right shape", parseChain([{ bytes: b64url(g), sig: {} }])?.length === 1 && parseChain("x") === null
+    && parseChain([{ bytes: "!!", sig: {} }]) === null && parseChain(Array.from({ length: 201 }, () => ({ bytes: b64url(g), sig: {} }))) === null);
+}
 
 process.exit(failed ? 1 : 0);

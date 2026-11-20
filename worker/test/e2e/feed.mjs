@@ -8,6 +8,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { signCall } from "../../src/signedcalls.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -630,6 +631,35 @@ check("a post among Bob's newest that her copy hasn't got: nothing to give back 
   JSON.stringify(bobAsOf()));
 check("…so the next refresh brings all of it, and says what it's as of again", await refreshed() && Boolean(bobAsOf().feed_since)
   && !marked() && JSON.parse(bobAsOf().copy_keys).length > 1);
+
+// afterwrd 2 (identities.js): Ann's identity is public, with keys only; her name (her profile, signed in the
+// background by her browser) goes only to a friend's site, in a call signed with that site's hosting key.
+{
+  const annName = sql(stateA, "SELECT name FROM users")[0].name;
+  const published = await fetch(`${A}/.well-known/afterwrd`);
+  const publishedText = await published.text();
+  check("Ann's identity is public, with no name in it", published.status === 200 && JSON.parse(publishedText).chain.length >= 1
+    && !publishedText.includes(annName) && !publishedText.includes("Ann"), publishedText.slice(0, 120));
+  const kept = sql(stateA, "SELECT profile FROM own_identity")[0]?.profile;
+  const said = kept && JSON.parse(Buffer.from(JSON.parse(kept).bytes, "base64url").toString());
+  check("…and her profile, her name, was signed in the background by her browser", said?.name === annName && said.kind === "profile", kept);
+  const bobPerson = sql(stateB, "SELECT person FROM own_identity")[0].person;
+  const bobHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateB, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
+    { name: "Ed25519" }, false, ["sign"]);
+  const profileUrl = `${A}/_p/profile`;
+  const signedByBob = await signCall({ method: "GET", url: profileUrl, person: bobPerson, from: B, privateKey: bobHosting });
+  const fromBob = await fetch(profileUrl, { headers: signedByBob });
+  const got = fromBob.status === 200 ? await fromBob.json() : null;
+  check("Bob's site, signing its call, gets Ann's signed profile", got?.profile && JSON.parse(Buffer.from(got.profile.bytes, "base64url").toString()).name === annName,
+    `${fromBob.status}`);
+  check("…having checked Bob's identity at his own address", sql(stateA, `SELECT origin, origin_checked_at FROM identities WHERE person = '${bobPerson}'`)[0]?.origin === B
+    && sql(stateA, `SELECT origin_checked_at FROM identities WHERE person = '${bobPerson}'`)[0].origin_checked_at > 0);
+  check("an unsigned call from Bob's site gets nothing", (await fetch(profileUrl, { headers: { "Afterwrd-From": B } })).status === 401);
+  check("…nor does a site that isn't Ann's friend, signed or not", (await fetch(profileUrl, { headers: { ...signedByBob, "Afterwrd-From": "http://localhost:8790" } })).status === 403
+    && (await fetch(profileUrl)).status === 403);
+  check("…nor Bob's signed call, sent again after 5 minutes", (await fetch(profileUrl, { headers: await signCall({ method: "GET", url: profileUrl, person: bobPerson, from: B,
+    privateKey: bobHosting, at: Math.floor(Date.now() / 1000) - 400 }) })).status === 401);
+}
 
 // Phone view of the Feed, then disconnect.
 await ann.setViewport({ width: 375, height: 800, isMobile: true });

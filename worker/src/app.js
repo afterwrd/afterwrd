@@ -5,6 +5,7 @@
 // without a session, apart from sign-in, a Connect link, and connected friends' sites and groups the owner's in, which
 // carry a key (connect.js, peers.js, membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
+import { handleIdentity } from "./identities.js";
 import { handleAdmin } from "./admin.js";
 import { handleComments } from "./archive/comments.js";
 import { renderArchive } from "./archive/routes.js";
@@ -121,6 +122,10 @@ async function route(request, env, work) {
   // A friend's Connect link, and their site's calls once connected, which carry a key instead of a session.
   if (url.pathname.startsWith("/_connect/")) return handleConnectLink(request, env, url);
   if (url.pathname.startsWith("/_peer/")) return handlePeer(request, env, url, work);
+  // afterwrd 2 (identities.js): the owner's identity, public; their profile, to friends' signed calls.
+  if (url.pathname === "/.well-known/afterwrd" || url.pathname === "/_p/profile") {
+    return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
+  }
   // A group the owner's in, calling with the key this site gave it.
   if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url, work);
   // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.

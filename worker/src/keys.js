@@ -32,7 +32,7 @@
 //   POST /_admin/keys/join/finish    {doc, delegation, token, response}
 import { checkDelegation, checkPasskeyProof, parseIdentity, readIdentity } from "./identity.js";
 import { readChallenge, safeNext, spendChallenge, withChallenge } from "./auth.js";
-import { b64url, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
+import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
 import { html, json, now, randomToken } from "./util.js";
 import { joinPage, keysPage } from "./views/pages.js";
 import { sha256 as sha256Hex } from "./util.js";
@@ -123,6 +123,7 @@ export async function handleKeys(request, env, url, owner) {
     return html(keysPage(next));
   }
   if (route === "GET /_admin/keys/join") return html(joinPage());
+  if (route === "POST /_admin/keys/profile") return await keepProfile(env, owner, await request.json().catch(() => ({})));
   const body = await request.json().catch(() => ({}));
   try {
     if (route === "POST /_admin/keys/start") return await start(env, url, owner, body);
@@ -421,4 +422,25 @@ export async function identitySummary(db) {
       at: effectiveAt,
     },
   };
+}
+
+// --- the owner's profile --------------------------------------------------------------------------------------------
+
+const PROFILE_SECONDS = 600;
+
+/** POST /_admin/keys/profile {bytes, key, signature}: a browser signed the owner's profile with its key. */
+async function keepProfile(env, owner, { bytes: text, key, signature }) {
+  const own = await env.DB.prepare("SELECT person FROM own_identity WHERE id = 1").first();
+  const bytes = typeof text === "string" ? fromB64url(text) : null;
+  const profile = bytes && decode(bytes);
+  if (!own || !profile || profile.v !== 2 || profile.kind !== "profile" || profile.person !== own.person || profile.name !== owner.name
+    || !Number.isSafeInteger(profile.at) || Math.abs(profile.at - now()) > PROFILE_SECONDS || !KEY_RE.test(key ?? "")) {
+    return json({ error: "That didn't work." }, 400);
+  }
+  // Only a browser key that signs for the owner here now, and its own signature.
+  const allowed = await env.DB.prepare("SELECT bytes, proof FROM delegations WHERE key = ? AND expires_at > ?").bind(key, now()).first();
+  if (!allowed || !(await checkAs("profile", key, bytes, String(signature ?? "")))) return json({ error: "That didn't work." }, 400);
+  await env.DB.prepare("UPDATE own_identity SET profile = ? WHERE id = 1").bind(JSON.stringify({ bytes: text, key, signature,
+    delegation: { bytes: String(allowed.bytes), proof: JSON.parse(String(allowed.proof)) } })).run();
+  return json({ ok: true });
 }

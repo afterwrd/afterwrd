@@ -7,6 +7,7 @@
 //   POST /_admin/profile                    role (profile|cover), hash, back (a form): any photo here
 // Only albums and photos made on afterwrd (source 'afterwrd') can change, and "Posted on afterwrd" (role 'posts', where
 // photos posted without an album go) is neither renamed nor deleted.
+import { profileToSign } from "./ownprofile.js";
 import { safeNext } from "./auth.js";
 import { addPhotos, checkPhotos, newPost, photoCommentsGone, removeUnusedFiles, roleAlbum, ROLE_ALBUMS } from "./posts.js";
 import { versionsGone } from "./edits.js";
@@ -26,8 +27,10 @@ const clean = (v, max) => (typeof v === "string" ? v.replace(/\r\n?/g, "\n").tri
  */
 /** The owner as the header on their own tools pages shows them (views/nav.js ownerHeader): name and picture. */
 export async function headerMe(db, owner) {
-  const picture = (await profilePictures(db)).profile;
-  return { name: owner.name, picture: picture ? `/files/${picture.thumb_hash ?? picture.hash}` : null };
+  const [pictures, signProfile] = await Promise.all([profilePictures(db), profileToSign(db, owner)]);
+  const picture = pictures.profile;
+  // signProfile: the owner's profile for this browser to sign in the background, when it needs signing (keys.js).
+  return { name: owner.name, picture: picture ? `/files/${picture.thumb_hash ?? picture.hash}` : null, signProfile };
 }
 
 export async function profilePictures(db) {

@@ -12,3 +12,5 @@ export { CLIENT_ID, EARLIER_CLIENTS, grantClient } from "../../src/cloudflare.js
 // What keys.mjs tests (afterwrd 2).
 export * as signed from "../../public/static/signed.js";
 export { checkDelegation, checkPasskeyProof, forked, readIdentity, SLOW_SECONDS } from "../../src/identity.js";
+export { checkCall, signCall, CLOCK_SECONDS } from "../../src/signedcalls.js";
+export { checkProfile, parseChain } from "../../src/identities.js";

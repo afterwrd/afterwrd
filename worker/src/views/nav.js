@@ -185,5 +185,7 @@ export const initial = (name) => [...String(name).trim()][0]?.toUpperCase() ?? "
  */
 export function ownerHeader(current, me = null) {
   return siteHeader({ main: ownerMain(), menu: ownerMenu(), current, updateKnown: false,
-    face: me ? { initial: initial(me.name), picture: me.picture } : {} });
+    face: me ? { initial: initial(me.name), picture: me.picture } : {} })
+    // The owner's profile, signed by this browser's key in the background when it needs it (keys.js profileToSign).
+    + (me?.signProfile ? `\n<script type="module">import(${JSON.stringify(asset("/static/signprofile.js"))}).then((m) => m.signProfile(${JSON.stringify(me.signProfile)})).catch(() => {});</script>` : "");
 }

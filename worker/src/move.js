@@ -47,8 +47,10 @@ const MAX_ID = 1e12; // as the Facebook import's ids (importer.js): room to spar
 // allowance for good, limits counting what's recent). A start, an end or a poll's closing time may be ahead.
 const PAST_RE = /^(created|edited|replaced|voted|changed|cancelled|closed|taken)_at$|^last_modified$/;
 // Longest text a column may hold: as afterwrd lets it be written. Posts written here are checked as rows (rows()).
-const LONGEST = { "comments.text": MAX_COMMENT, "comment_versions.text": MAX_COMMENT, "post_versions.text": MAX_POST_TEXT,
-  "comments.author_name": MAX_NAME, "poll_votes.name": MAX_NAME };
+// Looked up when used, not when this file starts: limits read from other files as it starts could be found before
+// they're set, if a change elsewhere altered the order files start in, and silently fall back to MAX_TEXT.
+const longest = (column) => ({ "comments.text": MAX_COMMENT, "comment_versions.text": MAX_COMMENT, "post_versions.text": MAX_POST_TEXT,
+  "comments.author_name": MAX_NAME, "poll_votes.name": MAX_NAME })[column];
 // What a row of one table points at in another, as in the Facebook import (schema.js refs): after the move, pointers
 // to rows the download didn't bring are removed (NOT NULL) or emptied, so nothing made later on this site picks up a
 // planted photo, poll or edit history by being given that number.
@@ -149,7 +151,7 @@ function checked(env, table, { name, type, required, key }, value) {
     if (PAST_RE.test(name) && (value < 0 || value > now() + 600)) bad();
   } else if (type.startsWith("REAL")) {
     if (typeof value !== "number" || !Number.isFinite(value)) bad();
-  } else if (typeof value !== "string" || value.length > (LONGEST[`${table}.${name}`] ?? MAX_TEXT)) bad();
+  } else if (typeof value !== "string" || value.length > (longest(`${table}.${name}`) ?? MAX_TEXT)) bad();
   const ok = RULES[`${table}.${name}`]?.(value, env) ?? true;
   return ok ? value : bad();
 }
