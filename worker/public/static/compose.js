@@ -90,7 +90,23 @@ form.addEventListener("submit", async (event) => {
     status.textContent = "Posting…";
     // Who it mentions, as picked (ui/mentions.js): the site keeps those whose @name is still in the words.
     const mentions = /** @type {HTMLInputElement | null} */ (form.querySelector("input[name=mentions]"))?.value ?? null;
-    await call(ACTION, { text, photos, ...(question && { poll: question }), ...(mentions && { mentions }) });
+    if (ACTION === "/_admin/posts" && !question) {
+      // afterwrd 2: the owner's own post is a record signed here, with this browser's key (src/items.js). (Polls and
+      // groups follow in later steps.)
+      const [{ makeRecord }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
+      const key = await savedKey();
+      if (!key?.person || key.expires < Date.now() / 1000) throw new Error(CANT_SIGN);
+      // Each photo is an item of its own (its own page and comments), signed first; the post lists them.
+      const fields = ["hash", "thumb_hash", "width", "height", "size"];
+      const own = { kind: "item", author: key.person, host: key.person };
+      const madePhotos = [];
+      for (const p of photos) madePhotos.push(await makeRecord(own, { type: "photo", ...Object.fromEntries(fields.map((f) => [f, p[f]])) }, key));
+      const listed = photos.map((p, i) => ({ item: madePhotos[i].fp, ...Object.fromEntries(fields.map((f) => [f, p[f]])) }));
+      const made = await makeRecord(own, { type: "post", text, photos: listed }, key);
+      await call("/_admin/items", { sent: made.sent, photos: madePhotos.map((m) => m.sent) });
+    } else {
+      await call(ACTION, { text, photos, ...(question && { poll: question }), ...(mentions && { mentions }) });
+    }
     window.afterwrdSent?.(form.text); // it's posted: no need to keep the words on this device (ui.js)
     location.href = location.pathname; // back to the page it was written on (Home or Posts), showing the new post
   } catch (err) {

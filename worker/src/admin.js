@@ -3,6 +3,7 @@
 // no one else needs a way in: friends see each other from their own sites (connect.js).
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
 import { handleKeys, identitySummary } from "./keys.js";
+import { handleItems } from "./items.js";
 import { forgetDeviceById, listDevices, pushDevicesSeen } from "./push.js";
 import { handleCheckAdmin } from "./checks.js";
 import { handleConnections } from "./connect.js";
@@ -22,6 +23,7 @@ export const DEVICE_LINK_SECONDS = 3600;
 
 export async function handleAdmin(request, env, url, owner) {
   if (url.pathname === "/_admin/keys" || url.pathname.startsWith("/_admin/keys/")) return handleKeys(request, env, url, owner);
+  if (url.pathname === "/_admin/items" || url.pathname.startsWith("/_admin/items/")) return handleItems(request, env, url, owner);
   if (url.pathname === "/_admin/import" || url.pathname.startsWith("/_admin/import/")) {
     return handleImport(request, env, url, owner);
   }

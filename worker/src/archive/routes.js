@@ -1,6 +1,8 @@
 // The site's pages for the owner: their posts and photos (made on afterwrd, and from their Facebook download, in the
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
+import * as itemViews from "../views/items.js";
+import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { groupPostId, postId as postAddress } from "../../public/static/activity.js";
 import { eventsFor, invitable, keepFriendEvents, oldEventsGone } from "../events.js";
 import { datesOf, FINISHED_SQL, finishedAt, icsFile, monthSpan, readDay, readMonth, readWeek, weekSpan } from "../calendar.js";
@@ -34,7 +36,7 @@ import * as groupViews from "../views/groups.js";
 import * as homeViews from "../views/home.js";
 
 // The signed-in pages' views, by area (each file in views/ draws one area).
-const views = { ...archiveViews, ...homeViews, ...friendViews, ...groupViews, ...eventViews };
+const views = { ...archiveViews, ...homeViews, ...friendViews, ...groupViews, ...eventViews, ...itemViews };
 
 const PAGE_SIZE = 50;
 export const AFTERWRD_KIND = "afterwrd"; // the Posts filter's choice for posts written here
@@ -74,6 +76,8 @@ const ROUTES = [
   [/^\/posts$/, "posts", posts, views.postsPage],
   // (Always shown: Posts is always published, for posts written here. So it can start alongside the header.)
   [/^\/posts\/(post-\d+-[0-9a-f]{8})$/, null, post, views.postPage],
+  // afterwrd 2: the owner's own signed posts (items.js), by their id.
+  [/^\/posts\/([A-Za-z0-9_-]{43})$/, null, itemPost, views.itemPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event$/, null, ownEventEdit, views.ownEventEditPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event\.ics$/, null, ownEventFile, null],
   [/^\/comments$/, "comments", comments, views.commentsPage],
@@ -382,7 +386,21 @@ async function posts(ctx, params) {
     all(db, `SELECT COALESCE(kind, '${AFTERWRD_KIND}') AS kind FROM posts ${own} GROUP BY 1 ORDER BY COUNT(*) DESC`).then((r) => r.map((k) => k.kind)),
     all(db, `SELECT DISTINCT strftime('%Y', created_at, 'unixepoch') AS y FROM posts ${own} ORDER BY y DESC`).then((r) => r.map((y) => y.y)),
   ]);
-  return { posts: await loadPosts(db, rows), paging, q, year, kind, years: postYears, kinds };
+  // afterwrd 2: the owner's signed posts (items.js), on the page whose dates they fall between, as posts here always
+  // were: the first page takes the newest, the last the oldest. "Written on afterwrd" lists only them.
+  let items = [];
+  if (kind === AFTERWRD_KIND || !kind) {
+    // Each page takes them down to its own oldest post, from the previous page's oldest (so none falls between).
+    const dates = rows.map((r) => r.created_at);
+    const oldest = paging.hasNext && dates.length ? dates.at(-1) : null;
+    const before = paging.page > 1
+      ? (await all(db, `${POST_SQL} ${f.sql} ORDER BY p.created_at DESC LIMIT 1 OFFSET ?`, [...f.params, (paging.page - 1) * PAGE_SIZE - 1]))[0]?.created_at ?? null
+      : null;
+    if (paging.page === 1 || before !== null) items = await ownItemsWhere(db, { from: oldest, to: before, q, year });
+  }
+  const hasItems = (await ownItemCount(db)) > 0;
+  return { posts: await loadPosts(db, rows), items, paging, q, year, kind, years: postYears,
+    kinds: hasItems && !kinds.includes(AFTERWRD_KIND) ? [...kinds, AFTERWRD_KIND] : kinds };
 }
 
 async function comments(ctx, params) {
@@ -505,6 +523,17 @@ async function photo(ctx, params, id) {
     db.prepare(`SELECT COUNT(*) AS n FROM media WHERE ${where} AND ${order} < (?, ?)`).bind(...setParams, ...position),
   ]);
   const before = index.results[0].n;
+  // afterwrd 2: a photo in a signed post (items.js) is an item of its own, with its own signed comments, shown with its
+  // post; opened from the post, it pages through the post's photos, and ✕ goes back there.
+  const item = m.item_id ? await photoItem(ctx.env, m.id) : null;
+  if (item) {
+    const inItem = params.get("in") === "post";
+    const back = inItem ? (params.get("back") ? safeNext(params.get("back"), ctx.url) : `/posts/${item.post.id}`) : null;
+    const album = { m, setKey, setTitle, prev: prev.results[0], next: next.results[0], index: before + 1,
+      total: (await setStats(db, where, setParams)).count, albumPage: Math.floor(before / PHOTO_PAGE_SIZE) + 1, back: null, stay: "" };
+    return { ...album, ...(inItem ? { prev: item.prev, next: item.next, index: item.index, total: item.total, setTitle: "Your post", back,
+      stay: `?${new URLSearchParams({ in: "post", back })}` } : {}), post: null, comment: null, key: null, thread: null, itemPost: item.post, photoItem: item };
+  }
   // The post a photo came with is shown for context; comments here are on the photo itself.
   const post = m.post_id
     ? (await loadPosts(db, await all(db, `${POST_SQL} WHERE p.id = ?`, [m.post_id]), { threads: false }))[0] : null;
@@ -574,6 +603,15 @@ async function post(ctx, params, key) {
   return { post: p };
 }
 
+/** One of the owner's own signed posts (afterwrd 2: items.js), with its comments. */
+async function itemPost(ctx, params, id) {
+  const item = await ownItem(ctx.db, id);
+  if (!item) return null;
+  const list = await loadThread(ctx.env, id);
+  if (!list) return null;
+  return { item, thread: itemComments(list.entries, { owner: item.author, item: id }), list: { ...item.list, seen: list.seen } };
+}
+
 /** Changing the owner's own event. */
 async function ownEventEdit(ctx, params, key) {
   const found = await findTarget(ctx.db, key);
@@ -622,8 +660,10 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
  */
 async function home(ctx, params) {
   const { db } = ctx;
-  const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
+  const [own, ownOld, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
     friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity] = await Promise.all([
+    ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
+    // …and their polls and events, still made the old way until step 4d (docs/signed-conversations.md).
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
     onThisDay(ctx, 2),
@@ -650,11 +690,11 @@ async function home(ctx, params) {
   const identityChange = identity?.pending ?? null;
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
-    return { own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    return { own, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
       newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange };
   }
   return {
-    own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    own, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,

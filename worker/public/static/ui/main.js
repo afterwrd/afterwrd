@@ -19,3 +19,4 @@ import "./arriving.js";
 import "./search.js";
 import "./mentions.js";
 import "./app.js";
+import "./threads.js";

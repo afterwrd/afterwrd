@@ -131,3 +131,15 @@ export async function readList(db, list, { host, after = 0 }) {
   return { owner: String(row.owner), entries, checkpoint,
     signedHead: await signHead(host.privateKey, { host: host.person, list, n: Number(row.n), head: String(row.head) }) };
 }
+
+/**
+ * Deletes a list this site hosts along with the item it belongs to: a photo in a post its owner deleted (items.js),
+ * whose delete covers it. Everything on it goes; its row stays as a tombstone, as a delete leaves one.
+ */
+export async function tombstone(db, list, at = Math.floor(Date.now() / 1000)) {
+  await db.batch([
+    db.prepare("UPDATE lists SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(at, list),
+    db.prepare("DELETE FROM list_pages WHERE list = ?").bind(list),
+    db.prepare("DELETE FROM checkpoints WHERE list = ?").bind(list),
+  ]);
+}

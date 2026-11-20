@@ -96,6 +96,15 @@ export async function fetchIdentity(env, origin) {
   return state;
 }
 
+/** How `person`'s identity reads now, from what this site knows (null if it knows nothing of them), with `frozen`. */
+export async function identityState(env, person) {
+  const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
+  const chain = row && parseChain(JSON.parse(String(row.chain)));
+  if (!chain) return null;
+  const state = await readIdentity(chain, await seenTimes(env.DB, chain), now());
+  return state && { ...state, frozen: Boolean(row.frozen_at) };
+}
+
 /** The hosting key `person` signs calls from `from` with: from what's known, or by fetching their identity from there. */
 export async function hostingKeyFor(env, person, from) {
   const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();

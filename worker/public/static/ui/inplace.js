@@ -1,4 +1,5 @@
 import { restoreDrafts } from "./drafts.js";
+import { signForm } from "./sign.js";
 
 // The things you do while reading (a comment, changing or deleting one, answering a poll or an event, editing or
 // deleting a post, putting a notice away) happen where you are: no new page, so nothing jumps. A form marked
@@ -115,12 +116,25 @@ document.addEventListener("submit", async (e) => {
   // Deleted from its own page, or one of its photos': the site says where next.
   const thisPagesPost = removing && Boolean(region?.dataset.region)
     && (location.pathname === region.dataset.region || location.pathname.startsWith(`${region.dataset.region}/`));
-  if (!region || nothingToRedraw || thisPagesPost) return; // sent the ordinary way
+  if (!region || nothingToRedraw || thisPagesPost) {
+    // Sent the ordinary way, but a signed form (ui/sign.js) is signed first.
+    if (!form.dataset.sign) return;
+    e.preventDefault();
+    try {
+      for (const [name, value] of Object.entries(await signForm(form, new FormData(form)))) {
+        form.append(Object.assign(document.createElement("input"), { type: "hidden", name, value }));
+      }
+      form.submit();
+    } catch (err) { sayUnder(form, err.message); }
+    return;
+  }
   e.preventDefault();
   // One thing at a time in each part: each send redraws it, so a second would land on a copy that's gone.
   if (region.dataset.sending) return;
   const here = location.pathname + location.search;
-  const source = (location.pathname === "/" && region.dataset.region) || here;
+  // A signed post (views/items.js) is drawn again from its own page wherever it's shown, so its comments stay open
+  // after commenting (behind their button elsewhere).
+  const source = ((location.pathname === "/" || region.matches("article[id^='i-']")) && region.dataset.region) || here;
   const body = new FormData(form);
   if (submitter?.name) body.append(submitter.name, submitter.value); // a poll's choice is the button pressed
   // Meanwhile the part waits: its buttons off, and its boxes not taking words that the redraw would lose.
@@ -149,6 +163,12 @@ document.addEventListener("submit", async (e) => {
     sayUnder(form, said); // and any words stay in their box, kept on this device
     finished(false);
   };
+  // A signed form: its record, signed in this browser, goes as `sent` (ui/sign.js).
+  if (form.dataset.sign) {
+    try {
+      for (const [name, value] of Object.entries(await signForm(form, body))) body.set(name, value);
+    } catch (err) { failed(err.message); return; }
+  }
   let res;
   try {
     // Afterwrd-Redraw: the page to redraw this part from, which the site sends back with its answer when it worked

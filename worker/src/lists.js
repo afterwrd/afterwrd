@@ -77,7 +77,8 @@ export class Rules {
     }
     if (record.item !== this.list) return "That belongs to something else.";
     if (this.closed && record.kind !== "remove") return "This is closed.";
-    if (!byHost && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) return "That's as many as anyone can add here.";
+    // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
+    if (!byHost && record.kind !== "delete" && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) return "That's as many as anyone can add here.";
     // seen: a real point in this list, before this entry.
     const seen = record.seen;
     if (!seen || seen.n >= n || (seen.n >= checkpointed && this.heads.get(seen.n) !== seen.h)) return "That says it saw something this list never was.";

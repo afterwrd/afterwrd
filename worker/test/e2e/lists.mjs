@@ -156,6 +156,8 @@ for (let i = 1; i <= PER_AUTHOR + 1 && !refusedAt; i++) {
   if (r.refused) refusedAt = i;
 }
 check(`one person can add ${PER_AUTHOR} entries to an item, not more`, refusedAt === PER_AUTHOR + 1, `refused at ${refusedAt}`);
+const lastOfBob = writes.get(mineOn(capped, bob));
+check("…but can always delete what's theirs, even then", !(await writeAndTake(bob, capped, { kind: "delete", about: lastOfBob }, undefined)).refused);
 
 // --- deleting, removing, closing --------------------------------------------------------------------------------------
 

@@ -173,7 +173,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // The parts public/static/ui/main.js imports, fetched alongside it rather than after it (a slow phone network would
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
-const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "arriving", "search", "mentions", "app"];
+const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "mentions", "app"];
 const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */

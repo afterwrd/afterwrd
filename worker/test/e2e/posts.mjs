@@ -51,6 +51,40 @@ const cards = (page) => page.$$eval("main article.card", (l) => l.map((a) => ({
   text: a.querySelector(".text")?.textContent, photos: a.querySelectorAll(".collage .tile").length,
   canDelete: Boolean(a.querySelector("header .delete")),
 })));
+// afterwrd 2: what a person's browser does, done in the page with its own key: a record signed from a form on an
+// item's page (its data-sign-* attributes), sent where that form sends it. Returns the site's answer (303 when done).
+const signedAct = (page, id, selector, text = null) => page.evaluate(async (id, selector, text) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const doc = new DOMParser().parseFromString(await (await fetch(`/posts/${id}`)).text(), "text/html");
+  const form = doc.querySelector(selector);
+  if (!form) return "no form";
+  const d = form.dataset;
+  const key = await savedKey();
+  const made = await makeRecord({ kind: d.sign, author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: d.signPrev || null, ...(d.signAbout ? { about: d.signAbout } : {}) }, text === null ? undefined : { text }, key);
+  const res = await fetch(form.getAttribute("action"), { method: "POST", redirect: "manual", body: new URLSearchParams({ sent: JSON.stringify(made.sent), back: "/posts" }) });
+  return res.type === "opaqueredirect" ? 303 : res.status;
+}, id, selector, text);
+// A post made in the page, signed with this browser's key (or `key`: "stranger", one nobody allowed), as the composer
+// makes it, with any changes `tamper` makes to its content first.
+const signedPost = (page, content, { photos = [], key = "own" } = {}) => page.evaluate(async (content, photos, which) => {
+  const [{ makeRecord }, { savedKey }, { newKeyPair, publicKeyText }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js"), import("/static/signed.js")]);
+  const own = await savedKey();
+  let key = own;
+  if (which === "stranger") { const pair = await newKeyPair(); key = { privateKey: pair.privateKey, publicKey: await publicKeyText(pair.publicKey) }; }
+  const fields = { kind: "item", author: own.person, host: own.person };
+  const made = [];
+  for (const p of photos) made.push(await makeRecord(fields, { type: "photo", ...p }, key));
+  const post = await makeRecord(fields, { ...content, photos: photos.map((p, i) => ({ item: made[i].fp, ...p })) }, key);
+  const res = await fetch("/_admin/items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sent: post.sent, photos: made.map((m) => m.sent) }) });
+  return res.status;
+}, content, photos, key);
+// Comments are behind the post's button now: pressed, and waited for, as a person would.
+const openComments = async (card) => {
+  if (!(await owner.$(`${card} details.comments[open]`))) await owner.click(`${card} details.comments summary`);
+  await owner.waitForSelector(`${card} details.comments .say textarea`, { timeout: 10_000 });
+};
+const itemIdOf = (text) => sql(`SELECT id FROM items WHERE type = 'post' AND json_extract(content, '$.text') = '${text}'`)[0]?.id;
 
 const owner = await person(newOwner(`Poster ${Date.now()}`));
 await setUpSigning(owner);
@@ -106,30 +140,25 @@ check("…with what it said before", (await owner.$eval(`${firstCard} .versions`
 check("…and it keeps its address, with no new page", (await owner.$eval(firstCard, (c) => c.id)) === postId && !new URL(owner.url()).hash);
 await editPost("   ");
 check("a post with no photos can't lose all its words", (await owner.$eval("body", (m) => m.textContent)).includes("needs words"));
-// At most 10 changes to any one post: a limit on what anyone can make the site keep.
-await owner.evaluate(() => fetch("/_admin/posts", { method: "POST", headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ text: "Change number 1" }) }));
-const [capped] = sql("SELECT id FROM posts WHERE text = 'Change number 1'");
+// One person can add at most 20 entries to anything (lists.js PER_AUTHOR): the post itself and 19 changes, here.
+check("a signed post made in the page is taken", (await signedPost(owner, { type: "post", text: "Change number 1" })) === 200);
+const capped = itemIdOf("Change number 1");
 const tries = [];
-for (let i = 2; i <= 11; i++) {
-  tries.push(await owner.evaluate((id, w) => fetch(`/_admin/posts/${id}/edit`, { method: "POST", redirect: "manual",
-    body: new URLSearchParams({ text: w, back: "/posts" }) }).then((r) => (r.type === "opaqueredirect" ? 303 : r.status)), capped.id, `Change number ${i}`));
-}
-check("a post can be changed 10 times, and no more", tries.slice(0, 9).every((st) => st === 303) && tries[9] === 403
-  && sql(`SELECT COUNT(*) AS n FROM post_versions WHERE post_id = ${capped.id}`)[0].n === 10, tries.join(","));
-await owner.evaluate((id) => fetch(`/_admin/posts/${id}/delete`, { method: "POST" }), capped.id);
-check("…and deleting it deletes its versions", sql(`SELECT COUNT(*) AS n FROM post_versions WHERE post_id = ${capped.id}`)[0].n === 0);
+for (let i = 2; i <= 21; i++) tries.push(await signedAct(owner, capped, `#edit-i-${capped} form`, `Change number ${i}`));
+check("a post can be changed 19 times, and no more", tries.slice(0, 19).every((st) => st === 303) && tries[19] === 400
+  && sql(`SELECT json_extract(content, '$.text') AS t FROM items WHERE id = '${capped}'`)[0].t === "Change number 20", tries.join(","));
+check("deleting it takes its list, leaving only a tombstone", (await signedAct(owner, capped, `#i-${capped} header form[data-sign="delete"]`)) === 303
+  && sql(`SELECT COUNT(*) AS n FROM items WHERE id = '${capped}'`)[0].n === 0 && sql(`SELECT COUNT(*) AS n FROM list_pages WHERE list = '${capped}'`)[0].n === 0
+  && sql(`SELECT deleted_at FROM lists WHERE id = '${capped}'`)[0].deleted_at > 0);
 await owner.goto(`${BASE}/posts`);
 
-// Fifteen minutes on, it can't be changed.
-const [textPost] = sql("SELECT id, key FROM posts WHERE source = 'afterwrd' ORDER BY id DESC LIMIT 1");
-sql(`UPDATE posts SET created_at = created_at - 901 WHERE id = ${textPost.id}`);
+// Fifteen minutes on, it isn't offered. (The site refusing a late edit is tested in lists.mjs: the times it goes by
+// are in the signed list, which a test can't move without breaking.)
+const textPost = itemIdOf("First post written on the site\nwith two lines, now changed");
+sql(`UPDATE items SET created_at = created_at - 901 WHERE id = '${textPost}'`);
 await owner.goto(`${BASE}/posts`);
 check("after 15 minutes there's no Edit", !(await owner.$(`${firstCard} > div.edit`)) && Boolean(await owner.$(`${firstCard} > details.edited`)));
-const late = await owner.evaluate((id) => fetch(`/_admin/posts/${id}/edit`, { method: "POST", redirect: "manual",
-  body: new URLSearchParams({ text: "too late", back: "/posts" }) }).then((r) => r.status), textPost.id);
-check("…and the site refuses it", late === 403 && sql(`SELECT text FROM posts WHERE id = ${textPost.id}`)[0].text.endsWith("now changed"));
-sql(`UPDATE posts SET created_at = created_at + 901 WHERE id = ${textPost.id}`);
+sql(`UPDATE items SET created_at = created_at + 901 WHERE id = '${textPost}'`);
 await owner.goto(`${BASE}/posts`);
 
 // A photo post: one 4000×3000 photo with a hidden location, one small one.
@@ -164,12 +193,13 @@ const inPost = await owner.evaluate(() => ({ counter: document.querySelector(".c
   close: document.getElementById("close").getAttribute("href"), prev: document.getElementById("prev")?.getAttribute("href"), next: Boolean(document.getElementById("next")) }));
 check("a photo opened from its post is among that post's photos", inPost.counter === "2 / 2" && inPost.album === "Your post" && !inPost.next
   && /^\/photos\/\d+\?in=post&back=/.test(inPost.prev), JSON.stringify(inPost));
-check("…and ✕ goes back to the post where it was", /^\/posts#p-post-\d+-[0-9a-f]{8}$/.test(inPost.close), inPost.close);
+check("…and ✕ goes back to the post where it was", /^\/posts#i-[\w-]{43}$/.test(inPost.close), inPost.close);
 await owner.goto(`${BASE}/photos/${stored[1].id}?in=post&back=${encodeURIComponent("//evil.example/")}`);
 check("…but never to another site", (await owner.$eval("#close", (a) => a.getAttribute("href"))) === "/");
 
 // Comments on the post and on a photo; everything survives a re-import.
 await owner.goto(`${BASE}/posts`);
+await openComments("main article.card:first-of-type");
 await owner.type("main article.card:first-of-type .say textarea", "Nice ones");
 await Promise.all([settled(owner), owner.click("main article.card:first-of-type .say button")]);
 await owner.goto(`${BASE}/photos/${stored[0].id}`);
@@ -180,22 +210,26 @@ await owner.goto(`${BASE}/posts`);
 const after = await cards(owner);
 check("both new posts survive a re-import", after[0].text === "Two photos" && after[1].text?.startsWith("First post"), after.slice(0, 2).map((c) => c.text).join(" | "));
 check("their photos are still stored", (await get(stored[0].hash)).ok && (await get(stored[1].thumb_hash)).ok);
-check("comments on them survive too", sql("SELECT COUNT(*) AS n FROM comments")[0].n === 2
-  && (await owner.$$eval("main article.card:first-of-type .comment", (l) => l.length)) === 1);
+await owner.click("main article.card:first-of-type details.comments summary");
+await owner.waitForSelector("main article.card:first-of-type details.comments .comment", { timeout: 10_000 }).catch(() => {});
+const photoComments = async () => { await owner.goto(`${BASE}/photos/${stored[0].id}`); return owner.$$eval(".info .comment", (l) => l.length); };
+check("comments on them survive too", (await owner.$$eval("main article.card:first-of-type .comment", (l) => l.length)) === 1 && (await photoComments()) === 1);
 
 // Who may do what.
 const api = (path, body, c, origin = BASE) => fetch(BASE + path, { method: "POST", redirect: "manual",
   headers: { Cookie: `__Host-session=${c}`, Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-check("signed out, nobody can post", ![200, 201].includes((await api("/_admin/posts", { text: "sneaky" }, "nobody")).status));
-const [ownPost] = sql("SELECT id FROM posts WHERE source = 'afterwrd' LIMIT 1");
-check("…or delete", ![200, 201, 303].includes((await api(`/_admin/posts/${ownPost.id}/delete`, {}, "nobody")).status));
-check("another site can't post as the owner", (await api("/_admin/posts", { text: "csrf" }, cookie, "https://evil.example")).status === 403);
-check("empty post refused", (await api("/_admin/posts", { text: "  " }, cookie)).status === 400);
-check("photo that was never uploaded refused", (await api("/_admin/posts", { text: "x", photos: [{ hash: "a".repeat(64),
-  thumb_hash: "b".repeat(64), width: 10, height: 10, size: 10 }] }, cookie)).status === 400);
-check("made-up photo details refused", (await api("/_admin/posts", { text: "x", photos: [{ hash: stored[0].hash,
-  thumb_hash: stored[0].thumb_hash, width: "<b>", height: 10, size: 10 }] }, cookie)).status === 400);
-check("only the two real posts exist", sql("SELECT COUNT(*) AS n FROM posts WHERE source = 'afterwrd'")[0].n === 2);
+check("signed out, nobody can post", ![200, 201].includes((await api("/_admin/items", { sent: {} }, "nobody")).status));
+const ownPost = itemIdOf("Two photos");
+check("…or delete", ![200, 201, 303].includes((await api(`/_admin/items/${ownPost}/records`, {}, "nobody")).status));
+check("another site can't post as the owner", (await api("/_admin/items", { sent: {} }, cookie, "https://evil.example")).status === 403);
+check("a post that isn't signed is refused", (await api("/_admin/items", { text: "unsigned" }, cookie)).status === 400);
+check("one signed with a key nobody allowed is refused", (await signedPost(owner, { type: "post", text: "forged" }, { key: "stranger" })) === 400);
+check("empty post refused", (await signedPost(owner, { type: "post", text: "" })) === 400);
+check("photo that was never uploaded refused", (await signedPost(owner, { type: "post", text: "x" }, { photos: [{ hash: "a".repeat(64),
+  thumb_hash: "b".repeat(64), width: 10, height: 10, size: 10 }] })) === 400);
+check("made-up photo details refused", (await signedPost(owner, { type: "post", text: "x" }, { photos: [{ hash: stored[0].hash,
+  thumb_hash: stored[0].thumb_hash, width: "<b>", height: 10, size: 10 }] })) === 400);
+check("only the two real posts exist", sql("SELECT COUNT(*) AS n FROM items WHERE type = 'post'")[0].n === 2);
 
 // The owner deletes the photo post: post, photos, files, album and comments all go.
 await owner.goto(`${BASE}/posts`);
@@ -207,7 +241,8 @@ const shared = sql(`SELECT COUNT(*) AS n FROM media WHERE thumb_hash = '${stored
 check("its own files are gone", [stored[0].hash, stored[0].thumb_hash, stored[1].hash].every(Boolean)
   && (await Promise.all([stored[0].hash, stored[0].thumb_hash, stored[1].hash].map(async (h) => (await get(h)).status))).every((s) => s === 404));
 check("a file an imported photo shares is kept", shared === 0 || (await get(stored[1].thumb_hash)).ok, `${shared} imported photo(s) use it`);
-check("its comments are gone", sql("SELECT COUNT(*) AS n FROM comments")[0].n === 0);
+check("its comments are gone, with its photos' lists", sql(`SELECT COUNT(*) AS n FROM list_pages WHERE list = '${ownPost}'`)[0].n === 0
+  && sql("SELECT COUNT(*) AS n FROM items WHERE type = 'photo'")[0].n === 0);
 await owner.goto(`${BASE}/photos`);
 check("the empty album is gone", !(await owner.$$eval(".albums a.album strong", (l) => l.map((s) => s.textContent))).includes("Posted on afterwrd"));
 check("imported photos untouched", (await owner.$$eval(".albums a.album", (l) => l.length)) >= 1);
@@ -218,24 +253,24 @@ await owner.type("#composer textarea", "Words and a photo");
 await (await owner.$("#composer input[type=file]")).uploadFile(`${fixtures}/photo1.jpg`);
 await Promise.all([owner.waitForNavigation({ timeout: 60_000 }), owner.click("#composer button.post")]);
 const address = await owner.$eval("main article.card:first-of-type a.when", (a) => a.getAttribute("href"));
+await openComments("main article.card:first-of-type");
 await owner.type("main article.card:first-of-type .say textarea", "Still here?");
 await Promise.all([settled(owner), owner.click("main article.card:first-of-type .say button")]);
-const [lone] = sql("SELECT m.id FROM media m JOIN posts p ON p.id = m.post_id WHERE p.text = 'Words and a photo'");
+const [lone] = sql(`SELECT m.id FROM media m JOIN item_photos ip ON ip.photo = m.item_id WHERE ip.post = '${itemIdOf("Words and a photo")}'`);
 await owner.goto(`${BASE}/photos/${lone.id}`);
 await Promise.all([owner.waitForNavigation(), owner.click(".photo-tools .danger")]);
 await owner.goto(BASE + address);
 check("deleting a post's only photo keeps the post, at the same address, with its comments",
   (await owner.$eval("article.card .text", (t) => t.textContent).catch(() => null)) === "Words and a photo"
-  && (await owner.$$eval("article.card .comment", (l) => l.length)) === 1, address);
+  && (await owner.$$eval("article.card .comment", (l) => l.length)) === 1 && (await owner.$$eval("article.card .collage .tile", (l) => l.length)) === 0, address);
 
-// Ids are never used twice: a post written after the newest is deleted doesn't take its number.
-const newest = sql("SELECT MAX(id) AS id FROM posts")[0].id;
+// A deleted post's id can't be used again: it stays as a tombstone (hosted.js), and its record is refused if sent again.
+const deletedId = itemIdOf("Words and a photo");
 await owner.goto(`${BASE}/posts`);
 await owner.click("main article.card:first-of-type header details.more summary");
 await Promise.all([settled(owner), owner.click("main article.card:first-of-type header .delete")]);
-await owner.type("#composer textarea", "After a delete");
-await Promise.all([owner.waitForNavigation(), owner.click("#composer button.post")]);
-check("a new post never takes a deleted one's id", sql("SELECT id FROM posts WHERE text = 'After a delete'")[0]?.id > newest);
+check("a deleted post's id stays a tombstone", sql(`SELECT deleted_at FROM lists WHERE id = '${deletedId}'`)[0]?.deleted_at > 0
+  && sql(`SELECT COUNT(*) AS n FROM items WHERE id = '${deletedId}'`)[0].n === 0);
 
 // Phone: composer with photos picked.
 await owner.setViewport({ width: 375, height: 800, isMobile: true });

@@ -46,7 +46,7 @@ export function justified(items) {
  * Facebook-style layout for the photos attached to a post or comment. A post's (`back`: where the post is shown) open
  * among that post's photos, and ✕ comes back here; a comment's open in their album.
  */
-function collage(items, { back = null } = {}) {
+export function collage(items, { back = null } = {}) {
   if (!items?.length) return "";
   const n = items.length;
   const stay = back ? `?${new URLSearchParams({ in: "post", back })}` : "";

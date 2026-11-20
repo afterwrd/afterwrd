@@ -3,6 +3,7 @@
 // this: home.js, friends.js, groups.js, events.js; layout.js and parts.js are what they share. Each view is given `ctx`,
 // the page's frame (routes.js frame(): who's signed in, the request URL, their picture, the published sections and the
 // menu's counts), and the data its loader gathered. Views only draw: they read nothing and change nothing.
+import { itemCard, itemThread, photoDelete } from "./items.js";
 import {
   dateRange, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
 
@@ -104,7 +105,10 @@ function profileHeader(ctx) {
 </section>`;
 }
 
-export function postsPage(ctx, { posts, paging, q, year, kind, years, kinds }) {
+export function postsPage(ctx, { posts, items = [], paging, q, year, kind, years, kinds }) {
+  // The owner's signed posts (views/items.js) among the archive's, newest first.
+  const cards = [...posts.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })), ...items.map((i) => ({ at: i.created_at, card: itemCard(ctx, i) }))]
+    .sort((a, b) => b.at - a.at);
   const fresh = paging.page === 1 && !q && !year && !kind;
   return page(ctx, "Posts", html`
 ${fresh && profileHeader(ctx)}
@@ -119,7 +123,7 @@ ${fresh && composer()}
   ${yearSelect(years, year)}
   <button>Search</button>
 </form>
-${feed(posts, (p) => postCard(ctx, p), fresh ? "No posts yet." : "No posts match.")}
+${feed(cards, (c) => c.card, fresh ? "No posts yet." : "No posts match.")}
 ${pager(ctx, paging)}`);
 }
 
@@ -244,7 +248,7 @@ export function taggedPage(ctx, { tagged, paging }) {
 ${pager(ctx, paging)}`);
 }
 
-export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, albumPage, post, comment, key, thread: comments, back: from = null, stay = "" }) {
+export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, albumPage, post, comment, key, thread: comments, back: from = null, stay = "", itemPost = null, photoItem = null }) {
   const back = from ?? `/photos/album/${setKey}${albumPage > 1 ? `?page=${albumPage}` : ""}`;
   const main = html`
 <main class="theatre">
@@ -280,11 +284,14 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
         <input type="hidden" name="back" value="${ctx.url.pathname}">
         <button class="chip">${role === "profile" ? "Make profile picture" : "Make cover"}</button>
       </form>`)}
-      ${m.source === "afterwrd" && html`<form method="post" action="/_admin/photos/${m.id}/delete"
+      ${m.source === "afterwrd" && !photoItem && html`<form method="post" action="/_admin/photos/${m.id}/delete"
         data-confirm="Delete this photo and its comments? This can’t be undone." data-confirm-ok="Delete"><button class="chip danger">Delete photo</button></form>`}
+      ${photoItem && photoDelete(photoItem, itemPost)}
     </div>`}
     ${key && html`<h2>Comments</h2>${thread(ctx, key, comments, { region: true })}`}
+    ${photoItem && html`<h2>Comments</h2>${itemThread(ctx, photoItem.photo, photoItem.thread, photoItem.list, { region: true })}`}
     ${post && html`<h2>Posted with</h2>${postCard(ctx, post)}`}
+    ${itemPost && html`<h2>Posted with</h2>${itemCard(ctx, itemPost)}`}
     ${comment && html`<h2>Attached to your comment</h2>${commentCard(ctx, comment)}`}
 
     <p class="original"><a href="${mediaUrl(m)}" target="_blank">Open original ↗</a></p>

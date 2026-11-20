@@ -105,8 +105,11 @@ export async function findTarget(db, target) {
   return post && { post };
 }
 
-/** Whether what findTarget found takes comments: only posts and photos made on afterwrd, for now. */
-export const commentable = (found) => (found?.post ?? found?.photo)?.source === "afterwrd";
+/**
+ * Whether what findTarget found takes comments here: only posts and photos made on afterwrd. Not a photo in a signed
+ * post (afterwrd 2: media.item_id): that's an item of its own, whose comments are signed records on its list (items.js).
+ */
+export const commentable = (found) => (found?.post ?? found?.photo)?.source === "afterwrd" && !found?.photo?.item_id;
 
 export async function handleComments(request, env, url, user) {
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
