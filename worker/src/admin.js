@@ -95,10 +95,13 @@ export async function handleAdmin(request, env, url, owner) {
  */
 export async function devicesSeen(env, owner) {
   if (!(await newDevices(env.DB, owner)).canConfirm) throw new Refusal("Confirm this from one of your older devices.", 403);
-  const seen = await env.DB.prepare("SELECT MAX(created_at) AS at FROM credentials WHERE user_id = ?").bind(owner.id).first();
+  const seen = await env.DB.prepare("SELECT created_at AS at, rowid AS row FROM credentials WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+    .bind(owner.id).first();
   if (seen?.at) {
-    await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('devices_seen', ?1)
-      ON CONFLICT (key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), ?1)`).bind(seen.at).run();
+    await env.DB.batch([
+      env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('devices_seen', ?)").bind(String(seen.at)),
+      env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('devices_seen_row', ?)").bind(String(seen.row)),
+    ]);
   }
 }
 
@@ -142,10 +145,14 @@ export async function deletePasskey(env, owner, credential) {
 const NEW_DEVICE_SECONDS = 14 * 86400;
 
 // A passkey is "new" while all of these hold: it was added in the last 14 days, it isn't the first one (made when
-// the site was set up), and the owner hasn't since said it was them (settings 'devices_seen').
+// the site was set up), and the owner hasn't since said it was them (settings 'devices_seen', 'devices_seen_row').
+// Which came first goes by the second it was added, then by the order it was stored: two passkeys added in the same
+// second are still told apart (a row's number alone isn't enough, as SQLite can give a deleted row's number again).
+// A 'devices_seen' from before 'devices_seen_row' counts everything in that second as seen, as it always did.
 const IS_NEW = `created_at > ?2
-  AND created_at > (SELECT MIN(created_at) FROM credentials WHERE user_id = ?1)
-  AND created_at > COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'devices_seen'), 0)`;
+  AND (created_at, rowid) > (SELECT created_at, rowid FROM credentials WHERE user_id = ?1 ORDER BY created_at, rowid LIMIT 1)
+  AND (created_at, rowid) > (COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'devices_seen'), 0),
+    COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'devices_seen_row'), 9223372036854775807))`;
 
 /**
  * For a notice on Home ("A new device was added… Not you? Remove it."): someone who got in would add their own

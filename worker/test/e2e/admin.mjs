@@ -108,6 +108,12 @@ check("no inviting other people", !(await phone.$("#invite")) && !(await phone.$
 
 const alerts = async (page) => { await page.goto(`${BASE}/`); return page.$$eval(".notice.alert", (n) => n.map((x) => x.textContent.replace(/\s+/g, " ").trim())); };
 check("the first passkey isn't a new device", (await alerts(phone)).length === 0);
+// One added in the very same second is still a new device: told apart by the order it was stored.
+const firstAt = sql("SELECT created_at FROM credentials")[0].created_at;
+sql(`INSERT INTO credentials (id, user_id, public_key, counter, transports, created_at) VALUES ('same-second', (SELECT id FROM users), 'x', 0, '[]', ${firstAt})`);
+check("a passkey added in the same second as the first is still a new device", (await alerts(phone)).some((t) => t.startsWith("A new device was added")),
+  (await alerts(phone)).join(" | "));
+sql("DELETE FROM credentials WHERE id = 'same-second'");
 // Add a laptop from the page.
 await phone.goto(`${BASE}/_admin`);
 await phone.click("#new-link");
