@@ -193,6 +193,9 @@ export async function friendPhoto(connection, hash) {
     prev: neighbour(data["afterwrd:prev"]),
     next: neighbour(data["afterwrd:next"]),
     post: data["afterwrd:postedWith"] ? parseNote(data["afterwrd:postedWith"], site, connection.name) : null,
+    // afterwrd 2: a photo in their signed post (share.js): opened there instead.
+    inItem: /^[A-Za-z0-9_-]{43}$/.test(data["afterwrd:item"]?.post ?? "") && Number.isSafeInteger(data["afterwrd:item"].index)
+      ? { post: data["afterwrd:item"].post, index: data["afterwrd:item"].index } : null,
     comments: parseThread(data.replies, `${site}/photos/sha256/${hash}`, site, connection.name),
   };
 }

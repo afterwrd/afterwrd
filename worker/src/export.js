@@ -46,7 +46,15 @@ export const TABLES = {
   post_versions: { columns: "*" },
   comment_versions: { columns: "*" },
   comments_elsewhere_versions: { columns: "*" },
-  connections: { columns: "id, origin, name, connected_at", where: "approved_at IS NOT NULL" },
+  connections: { columns: "id, origin, name, connected_at, identity", where: "approved_at IS NOT NULL" },
+  // afterwrd 2: the owner's signed posts and photos, the lists that prove what happened on them, what they've signed
+  // and sent to friends' posts, and their identity (public anyway). No private keys: those never leave a device or site.
+  items: { columns: "*" },
+  item_photos: { columns: "*" },
+  lists: { columns: "*" },
+  list_pages: { columns: "*" },
+  sent: { columns: "*" },
+  own_identity: { columns: "person, chain" },
   // Groups: which, and what the owner posted and said in them. No keys.
   groups: { columns: "id, name, about, origin, remote_id, host_name, joined_at, role", where: "joined_at IS NOT NULL" },
   group_mine: { columns: "*" },
@@ -58,7 +66,9 @@ export async function handleExport(request, env, url, owner) {
   if (request.method !== "GET") return new Response("Not found", { status: 404 });
   if (url.pathname === "/_admin/export") return html(exportPage(pageData(env, { me: await headerMe(env.DB, owner) })));
   if (url.pathname === "/_admin/export/about") {
-    return json({ format: 1, site: url.origin, version: pkg.version, database: DATABASE, tables: Object.keys(TABLES) });
+    // signed: how many signed posts and photos it has (afterwrd 2), which a move can't take yet (move.js).
+    const signed = Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM items").first())?.n ?? 0);
+    return json({ format: 1, site: url.origin, version: pkg.version, database: DATABASE, tables: Object.keys(TABLES), signed });
   }
   if (url.pathname === "/_admin/export/rows") {
     const table = url.searchParams.get("table");

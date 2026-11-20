@@ -88,6 +88,12 @@ async function ready(env, url, about) {
   const from = siteOrigin(about.site, env);
   if (!from) refuse("This download doesn't say which site it came from.");
   if (from === url.origin) refuse("This download is from this site.");
+  // afterwrd 2: signed posts and photos are signed by their owner's identity, which moves with a signed change of
+  // address and new passkeys at the new one (docs/signed-conversations.md). Until that's built, a download with any
+  // is refused, with nothing moved, rather than bringing them over without what proves them.
+  if (Number(about.signed) > 0) {
+    refuse("This download has signed posts. Moving them comes with moving your identity to the new site, which isn't ready yet. Nothing has been moved.");
+  }
   if (about.database !== DATABASE) {
     refuse(`This download was made by afterwrd ${String(about.version ?? "?").slice(0, 20)}, which keeps things differently from `
       + "this site's version. Update whichever of the two sites is older, so both run the same version, then make the download again.");

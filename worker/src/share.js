@@ -311,6 +311,12 @@ export async function sharePhoto(env, site, hash, peer) {
       "afterwrd:prev": prev.results[0]?.hash, "afterwrd:next": next.results[0]?.hash,
     });
   }
+  // afterwrd 2: a photo in a signed post is an item of its own, whose comments are signed (items.js): where it is, so
+  // the friend's site opens it there (and it takes no comments here).
+  if (m.item_id) {
+    const at = await db.prepare("SELECT post, position FROM item_photos WHERE photo = ?").bind(m.item_id).first();
+    if (at) return { ...await media(env, site, m, { friend: peer.id }), ...neighbours, "afterwrd:item": { post: String(at.post), index: Number(at.position) + 1 } };
+  }
   // The post it came with, if that's one the friend may see.
   const withPost = m.post_id && await postById(db, m.post_id);
   const post = withPost && (await postShared(db, withPost, peer.id)) ? withPost : null;

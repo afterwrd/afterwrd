@@ -126,6 +126,13 @@ await compose(ann, A, "Moving day soon", [`${fixtures}/photo1.jpg`, `${fixtures}
 await compose(ann, A, "Which cake?");
 await compose(ann, A, "Picnic in the park");
 await befriend(ann, A, bob, B);
+// afterwrd 2: Ann's posts are signed now, and moving them comes with moving her identity, which isn't built yet
+// (docs/signed-conversations.md). Until it is, a download with signed posts is refused with nothing moved (tested
+// below), and the rest of this suite, which moves a site's posts, comments, polls and events, waits behind
+// MOVE_IDENTITY. It's switched back on, rewritten for signed posts, when identity moving is built.
+const MOVE_IDENTITY = false;
+let cake, picnic;
+if (MOVE_IDENTITY) {
 for (const end = Date.now() + 20_000; Date.now() < end && !(await bob.$("article.from-friend .say textarea")); await new Promise((r) => setTimeout(r, 500))) {
   await bob.goto(`${B}/`);
 }
@@ -136,9 +143,8 @@ const card = await ann.evaluateHandle(() => [...document.querySelectorAll("artic
 await (await card.$(".say textarea")).type("Thanks, all!");
 await Promise.all([settled(ann), (await card.$(".say button")).click()]);
 const own = (text) => sql(stateA, `SELECT id, key FROM posts WHERE source = 'afterwrd' AND text = '${text}'`)[0];
-const cake = own("Which cake?");
-const picnic = own("Picnic in the park");
-const photo = sql(stateA, "SELECT hash, thumb_hash FROM media WHERE source = 'afterwrd' AND thumb_hash IS NOT NULL LIMIT 1")[0];
+cake = own("Which cake?");
+picnic = own("Picnic in the park");
 sql(stateA, `INSERT INTO polls (post_id, options, multiple) VALUES (${cake.id}, '["Lemon","Chocolate"]', 0);
   INSERT INTO poll_votes (post_id, voter, name, choices, voted_at) VALUES (${cake.id}, '${B}', 'Bob Example', 2, 1700000000);
   INSERT INTO events (post_id, title, starts_at, all_day, time_zone, place) VALUES (${picnic.id}, 'Picnic', 1900000000, 0, 'Europe/London', 'The park');
@@ -147,6 +153,9 @@ sql(stateA, `INSERT INTO polls (post_id, options, multiple) VALUES (${cake.id}, 
   INSERT OR REPLACE INTO settings (key, value) VALUES ('profile_hash', '${photo.hash}')`);
 check("Ann's site has a friend's comment and her own", count(stateA, "comments WHERE origin = 'site'") === 1
   && count(stateA, `comments WHERE origin = '${B}'`) === 1);
+
+}
+const photo = sql(stateA, "SELECT hash, thumb_hash FROM media WHERE source = 'afterwrd' AND thumb_hash IS NOT NULL LIMIT 1")[0];
 
 // Download everything carries the rows and thumbnails, and still no keys.
 const zip = await download(ann, A, "ann");
@@ -166,6 +175,10 @@ const ann2 = await owner(C, "Ann Example");
 await ann2.goto(`${C}/_admin/import`);
 check("Import offers to bring everything over from another site", Boolean(await ann2.$('a[href="/_admin/import/move"]')));
 const nothingMoved = () => count(stateC, "posts") === 0 && count(stateC, "media") === 0 && count(stateC, "comments") === 0;
+check("the download says it has signed posts", about.signed > 0, JSON.stringify(about));
+const signedProblem = await move(ann2, zip.file);
+check("a download with signed posts is refused, saying why, with nothing moved", signedProblem.includes("signed posts") && nothingMoved(), signedProblem);
+if (MOVE_IDENTITY) {
 
 const older = altered(zip, "older", "site/about.json", (a) => ({ ...a, database: "0001_schema.sql", version: "0.17.0" }));
 const olderProblem = await move(ann2, older);
@@ -240,6 +253,7 @@ check("Home opens", (await ann2.$("main")) !== null);
 
 const again = await move(ann2, zip.file);
 check("a site that has things on it can't take a move", again.includes("already has"), again);
+}
 check("no errors in the pages", errors.length === 0, errors.join(" | "));
 
 await browser.close();

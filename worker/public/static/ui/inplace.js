@@ -134,7 +134,7 @@ document.addEventListener("submit", async (e) => {
   const here = location.pathname + location.search;
   // A signed post (views/items.js) is drawn again from its own page wherever it's shown, so its comments stay open
   // after commenting (behind their button elsewhere).
-  const source = ((location.pathname === "/" || region.matches("article[id^='i-']")) && region.dataset.region) || here;
+  const source = ((location.pathname === "/" || region.dataset.ownPage !== undefined) && region.dataset.region) || here;
   const body = new FormData(form);
   if (submitter?.name) body.append(submitter.name, submitter.value); // a poll's choice is the button pressed
   // Meanwhile the part waits: its buttons off, and its boxes not taking words that the redraw would lose.

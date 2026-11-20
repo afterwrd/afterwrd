@@ -14,7 +14,13 @@ const EXTENSIONS = {
 const TABLES = ["settings", "facebook_people", "albums", "posts", "facebook_post_tags", "facebook_comments",
   "facebook_reactions", "media", "facebook_tagged_photos", "comments", "comments_elsewhere", "polls", "poll_votes",
   "connections", "friend_links", "users", "groups", "group_mine", "post_versions", "comment_versions",
-  "comments_elsewhere_versions", "events", "event_answers", "post_audience", "events_elsewhere"];
+  "comments_elsewhere_versions", "events", "event_answers", "post_audience", "events_elsewhere",
+  // afterwrd 2: signed posts and photos, their lists, and what the owner has signed and sent (src/export.js).
+  "items", "item_photos", "lists", "list_pages", "sent", "own_identity"];
+/** JSON from base64url (a signed record's content), or null. */
+const fromB64json = (text) => {
+  try { return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))); } catch { return null; }
+};
 
 const form = /** @type {HTMLFormElement} */ (document.getElementById("export"));
 const status = document.getElementById("status");
@@ -127,6 +133,49 @@ function documents(t) {
     return { ...eventFields(e), "afterwrd:invited": t.post_audience.filter((a) => a.post_id === p.id)
       .map((a) => ({ ...friend(a.connection_id), "afterwrd:answer": answer(a.connection_id) })) };
   };
+  // afterwrd 2: signed posts and photos (src/items.js). Each one's comments are worked out from its list, as its pages
+  // do: in order, with each comment's words now and what they were; deleted and removed ones left out. A signed
+  // comment's address is its item's, then # and the record's fingerprint, the same in whoever's download it's in.
+  const ownPerson = t.own_identity[0]?.person ?? null;
+  const byIdentity = new Map(t.connections.filter((c) => c.identity).map((c) => [c.identity, c]));
+  const authorOf = (person) => (person === ownPerson ? { type: "Person", id: actorId(site), name: owner.name }
+    : byIdentity.get(person) ? { type: "Person", id: actorId(byIdentity.get(person).origin), name: byIdentity.get(person).name }
+      : { type: "Person", "afterwrd:identity": person });
+  const entriesOf = (list) => t.list_pages.filter((pg) => pg.list === list).sort((a, b) => a.page - b.page)
+    .flatMap((pg) => JSON.parse(pg.entries));
+  const signedReplies = (list) => {
+    const comments = [];
+    const byFp = new Map();
+    for (const e of entriesOf(list)) {
+      if (!e.sent) continue;
+      const record = fromB64json(e.sent.record);
+      const content = e.sent.content ? fromB64json(e.sent.content) : null;
+      if (!record) continue;
+      if (record.kind === "comment") {
+        const c = { type: "Note", id: `${postId(site, list)}#${e.fp}`, attributedTo: authorOf(record.author), inReplyTo: postId(site, list),
+          published: iso(e.taken), mediaType: "text/plain", content: content?.text ?? "", earlier: [] };
+        byFp.set(e.fp, c);
+        comments.push(c);
+      } else if (record.kind === "edit" && byFp.has(record.about)) {
+        const c = byFp.get(record.about);
+        c.earlier.push({ text: c.content, replaced_at: e.taken });
+        c.content = content?.text ?? c.content;
+        c.edited_at = e.taken;
+      } else if ((record.kind === "delete" || record.kind === "remove") && byFp.has(record.about)) {
+        byFp.get(record.about).gone = true;
+      }
+    }
+    const items = comments.filter((c) => !c.gone).map(({ earlier, edited_at: at, gone, ...c }) => ({ ...c, ...editedFields({ edited_at: at, earlier }) }));
+    return items.length ? { type: "Collection", totalItems: items.length, items } : undefined;
+  };
+  const signedMedia = (photo) => t.media.find((m) => m.item_id === photo && m.hash);
+  const signedPosts = t.items.filter((i) => i.type === "post").map((i) => {
+    const content = JSON.parse(i.content);
+    const photos = t.item_photos.filter((p) => p.post === i.id).sort((a, b) => a.position - b.position).map((p) => signedMedia(p.photo)).filter(Boolean);
+    return { type: "Note", id: postId(site, i.id), attributedTo: actorId(site), published: iso(i.created_at), mediaType: "text/plain",
+      content: content.text ?? "", attachment: photos.map(media), "afterwrd:source": "afterwrd", "afterwrd:signed": true, created_at: i.created_at,
+      ...editedFields({ edited_at: i.edited_at, earlier: i.earlier ? JSON.parse(i.earlier) : [] }), replies: signedReplies(i.id) };
+  });
   const postIds = new Map();
   const posts = [...t.posts].sort(newest).map((p) => {
     const { key } = p;
@@ -163,8 +212,9 @@ function documents(t) {
   const photos = [...t.media].filter((m) => m.hash).sort(newest).map((m) => ({
     ...media(m),
     "afterwrd:album": albums.get(m.album_id)?.name,
-    "afterwrd:postedWith": postIds.get(m.post_id),
-    replies: replies(`photo-${m.hash}`),
+    "afterwrd:postedWith": m.item_id ? postId(site, t.item_photos.find((p) => p.photo === m.item_id)?.post ?? "") : postIds.get(m.post_id),
+    // A photo in a signed post has its own signed comments (src/items.js), at its own item's address.
+    ...(m.item_id ? { "afterwrd:item": postId(site, m.item_id), replies: signedReplies(m.item_id) } : { replies: replies(`photo-${m.hash}`) }),
   }));
 
   return {
@@ -180,7 +230,8 @@ function documents(t) {
       image: picture("cover_hash", me?.cover_media_id),
       "afterwrd:sections": JSON.parse(t.settings.find((s) => s.key === "sections")?.value ?? "[]"),
     },
-    "posts.json": collection(posts, { name: "Posts" }),
+    "posts.json": collection([...posts, ...signedPosts.map(({ created_at: at, ...p }) => ({ ...p, _at: at }))]
+      .sort((a, b) => (Date.parse(b.published ?? 0) || 0) - (Date.parse(a.published ?? 0) || 0)).map(({ _at, ...p }) => p), { name: "Posts" }),
     "photos.json": collection(photos, { name: "Photos and videos" }),
     "albums.json": collection(t.albums.map((a) => {
       const inIt = t.media.filter((m) => m.album_id === a.id && m.hash);
@@ -267,8 +318,37 @@ function documents(t) {
         mediaType: "text/plain",
         content: c.text,
         ...editedFields({ ...c, earlier: elsewhereEarlier(c.id) }),
-      })), { name: "Your comments on friends' sites (the originals are kept there)" }),
+      })).concat(sentComments()), { name: "Your comments on friends' sites (the originals are kept there)" }),
+    // afterwrd 2: what proves it all, as signed, for anyone to check (docs/signed-conversations.md): the owner's identity,
+    // every list this site holds (each entry's record exactly as signed), and what they've signed and sent elsewhere.
+    "signed.json": {
+      "afterwrd:identity": { person: ownPerson, chain: t.own_identity[0] ? JSON.parse(t.own_identity[0].chain) : [] },
+      "afterwrd:lists": t.lists.map((l) => ({ id: l.id, owner: l.owner, n: l.n, head: l.head, deleted: Boolean(l.deleted_at), entries: entriesOf(l.id) })),
+      "afterwrd:sent": t.sent.map((x) => ({ host: x.host, item: x.item, kind: x.kind, fp: x.fp, sent: JSON.parse(x.record), receipt: x.receipt ? JSON.parse(x.receipt) : null })),
+    },
   };
+
+  /** The owner's signed comments on friends' posts (sent), with their words now: edits applied, deleted ones left out. */
+  function sentComments() {
+    const out = new Map();
+    for (const x of [...t.sent].sort((a, b) => a.created_at - b.created_at)) {
+      const sent = JSON.parse(x.record);
+      const record = fromB64json(sent.record);
+      const content = sent.content ? fromB64json(sent.content) : null;
+      const host = [...byIdentity.values()].find((c) => c.identity === x.host);
+      if (!record || !host) continue;
+      if (x.kind === "comment") {
+        out.set(x.fp, { type: "Note", id: `${postId(host.origin, x.item)}#${x.fp}`, attributedTo: actorId(site), inReplyTo: postId(host.origin, x.item),
+          published: iso(x.created_at), mediaType: "text/plain", content: content?.text ?? "", "afterwrd:signed": true, earlier: [], edited_at: null });
+      } else if (x.kind === "edit" && out.has(record.about)) {
+        const c = out.get(record.about);
+        c.earlier.push({ text: c.content, replaced_at: x.created_at });
+        c.content = content?.text ?? c.content;
+        c.edited_at = x.created_at;
+      } else if (x.kind === "delete") out.delete(record.about);
+    }
+    return [...out.values()].map(({ earlier, edited_at: at, ...c }) => ({ ...c, ...editedFields({ edited_at: at, earlier }) }));
+  }
 }
 
 const README = (host, when, withMedia) => `afterwrd download of ${host}, made ${when}
@@ -281,6 +361,9 @@ fediverse uses. afterwrd's own extra terms start "afterwrd:" (https://afterwrd.a
   photos.json                every photo and video, with comments made on the site
   albums.json                albums, listing their photos by address
   comments-elsewhere.json    comments you've written on friends' afterwrd sites (the originals live there)
+  signed.json                what proves your posts and comments are as you wrote them: your identity (keys only), every
+                             signed list your site keeps (each comment, edit and delete exactly as its writer signed it),
+                             and what you've signed and sent to friends' posts, with their sites' receipts
   connections.json           friends' afterwrd sites you're connected with
   groups.json                the groups you're in (each is its own site, which keeps everything in it)
   groups-elsewhere.json      what you've posted and said in groups (the originals live on the group's site)

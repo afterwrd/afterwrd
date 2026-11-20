@@ -179,9 +179,9 @@ const friendInPost = await ann.evaluate(() => ({ counter: document.querySelector
   close: document.getElementById("close").getAttribute("href"), prev: document.getElementById("prev")?.getAttribute("href"),
   next: Boolean(document.getElementById("next")), album: document.querySelector(".info .album-link").getAttribute("href") }));
 check("a friend's photo opened from their post is among that post's photos", friendInPost.counter === "2 / 2" && !friendInPost.next
-  && /^\/friend\/\d+\/photos\/[0-9a-f]{64}\?in=post&back=/.test(friendInPost.prev ?? "")
-  && /^\/friend\/\d+\/photos\/album\//.test(friendInPost.album), JSON.stringify(friendInPost));
-check("…and ✕ goes back to the post on Home", /^\/#f\d+-post-\d+-[0-9a-f]{8}$/.test(friendInPost.close), friendInPost.close);
+  && /^\/friend\/\d+\/posts\/[\w-]{43}\/photos\/1\?in=post&back=/.test(friendInPost.prev ?? "")
+  && /^\/friend\/\d+\/posts\/[\w-]{43}$/.test(friendInPost.album), JSON.stringify(friendInPost));
+check("…and ✕ goes back to the post on Home", /^\/#fi\d+-[\w-]{43}$/.test(friendInPost.close), friendInPost.close);
 await Promise.all([ann.waitForNavigation(), ann.click("#prev")]);
 check("…and stays with the post going back a photo", (await ann.$eval(".counter", (c) => c.textContent)) === "1 / 2"
   && (await ann.$eval("#close", (a) => a.getAttribute("href"))) === friendInPost.close);
@@ -214,94 +214,103 @@ check("the photo loads straight from Bob's site, by a signed link", await ann.$e
 await ann.goto(`${A}/_admin/connections`);
 check("Ann's Connections lists Bob", (await ann.$eval("table.numbers tbody", (t) => t.textContent)).includes("Bob Example"));
 
-// Ann comments on Bob's post from her Feed; it's stored on Bob's site.
+// afterwrd 2: Ann comments on Bob's signed post from her Home. Her browser signs it; her site passes it on to Bob's in a
+// signed call, and keeps it, with Bob's site's receipt (friendcopies.js). Comments are behind the post's button.
+const openThread = async (page, card) => {
+  if (!(await page.$(`${card} details.comments[open]`))) await page.click(`${card} details.comments summary`);
+  await page.waitForSelector(`${card} .say textarea`, { timeout: 15_000 });
+};
+const bobPostOnA = () => sql(stateA, "SELECT id, connection_id FROM copies ORDER BY created_at DESC LIMIT 1")[0];
+const bobPostId = bobPostOnA().id;
+const bobsPostPage = `${A}/friend/${bobPostOnA().connection_id}/posts/${bobPostId}`;
+const threadOn = async (page, url) => {
+  await page.goto(url);
+  return (await page.$$eval("article.card", (l) => l.map((a) => ({ comments: [...a.querySelectorAll(".comment:not(.gone)")].map((c) => ({
+    name: c.querySelector("strong").textContent, text: c.querySelector(".said").textContent, canDelete: Boolean(c.querySelector(".under .delete")) })) }))))[0] ?? { comments: [] };
+};
 await ann.goto(`${A}/`);
+await openThread(ann, "article.from-friend");
 await ann.type("article.from-friend .say textarea", "Looks great, Bob!");
 await ann.evaluate(() => { window.samePage = true; });
 await Promise.all([settled(ann), ann.click("article.from-friend .say button")]);
 check("…sent without a new page (Home isn't loaded again)", await ann.evaluate(() => window.samePage === true));
 annFeed = await feedCards(ann);
-check("Ann's comment shows in her Feed, deletable", annFeed[0].comments.length === 1 && annFeed[0].comments[0].name === "Ann Example"
+check("Ann's comment shows under Bob's post, deletable", annFeed[0].comments.length === 1 && annFeed[0].comments[0].name === "Ann Example"
   && annFeed[0].comments[0].canDelete, JSON.stringify(annFeed[0].comments));
-check("it's stored on Bob's site, from Ann's", sql(stateB, "SELECT author_name, origin FROM comments").some((c) => c.author_name === "Ann Example" && c.origin === A));
-check("Ann keeps a copy", sql(stateA, "SELECT text FROM comments_elsewhere").map((c) => c.text).join() === "Looks great, Bob!");
-await bob.goto(`${B}/posts`);
-const onBob = await bob.$$eval("main article.card:first-of-type .comment", (l) => l.map((c) => ({ name: c.querySelector("strong").textContent, from: c.querySelector(".from")?.textContent })));
-check("Bob sees it under his post, without Ann's site address (she's his friend: it's on her page)", onBob.length === 1 && onBob[0].name === "Ann Example" && onBob[0].from === undefined, JSON.stringify(onBob));
-check("Bob's Activity counts it as new", (await bob.$eval('header.site a[href="/activity"] .count', (c) => c.firstChild.textContent)) === "1");
-
-// Ann's comment on Bob's post locks it: Bob can't change his words under her reply (edits.js).
-check("Bob can't change a post Ann has commented on", !(await bob.$("main article.card:first-of-type > div.edit")));
-// Ann changes her comment from her Feed; Bob's site decides, and keeps what it said before.
-await ann.goto(`${A}/`);
-const annComment = "article.from-friend .comment:first-of-type";
+check("it's kept on Bob's site, as a record signed by Ann", sql(stateB, `SELECT comments, others FROM items WHERE id = '${bobPostId}'`)[0]?.comments === 1);
+check("Ann keeps her own copy, with Bob's site's receipt", sql(stateA, "SELECT kind, receipt FROM sent").some((r) => r.kind === "comment" && r.receipt));
+await bob.goto(`${B}/posts/${bobPostId}`);
+const onBob = await bob.$$eval("article.card .comment:not(.gone)", (l) => l.map((c) => ({ name: c.querySelector("strong").textContent, from: c.querySelector(".from")?.textContent })));
+check("Bob sees it under his post, as Ann (she's his friend)", onBob.length === 1 && onBob[0].name === "Ann Example" && onBob[0].from === undefined, JSON.stringify(onBob));
+check("Bob can't change a post Ann has commented on", !(await bob.$("article.card > div.edit")));
+// Ann changes her comment; Bob's site takes the signed edit, and both show what it said before.
+await ann.goto(bobsPostPage);
+const annComment = "article.from-friend .comment:not(.gone)";
 check("Ann's own comment offers Edit", Boolean(await ann.$(`${annComment} div.edit`)));
 await ann.click(`${annComment} .under details.more summary`);
 await ann.click(`${annComment} .under details.more a[href^="#edit"]`);
 await ann.$eval(`${annComment} div.edit textarea`, (t) => { t.value = "Looks great, Bob! Where was it?"; });
 await Promise.all([settled(ann), ann.click(`${annComment} div.edit button`)]);
-check("…changed on Bob's site, keeping what it said before", sql(stateB, "SELECT text, edited_at FROM comments WHERE origin != 'site'")
-  .some((c) => c.text === "Looks great, Bob! Where was it?" && c.edited_at)
-  && sql(stateB, "SELECT text FROM comment_versions").map((v) => v.text).join() === "Looks great, Bob!");
-check("…and in Ann's own copy", sql(stateA, "SELECT text FROM comments_elsewhere")[0]?.text === "Looks great, Bob! Where was it?"
-  && sql(stateA, "SELECT text FROM comments_elsewhere_versions").map((v) => v.text).join() === "Looks great, Bob!");
-check("Ann's Feed shows it Edited, with what it said before", (await ann.$eval(`${annComment} details.edited`, (d) => d.textContent).catch(() => ""))
-  .includes("Looks great, Bob!"));
-await bob.goto(`${B}/posts`);
-check("Bob sees it Edited too", (await bob.$eval("main article.card:first-of-type .comment details.edited", (d) => d.textContent).catch(() => ""))
-  .includes("Looks great, Bob!"));
-
-// Bob replies on his own site; Ann sees the reply in her Feed but can't delete it.
-await bob.type("main article.card:first-of-type .say textarea", "Thanks Ann");
-await Promise.all([settled(bob), bob.click("main article.card:first-of-type .say button")]);
-// His site's note about it (Ann commented there too) has hers fetch his posts again: the doorbell (peers.js).
-annFeed = await homeUntil(ann, A, (cards) => cards[0]?.comments.length === 2);
+check("…changed on Bob's site, keeping what it said before", (await threadOn(bob, `${B}/posts/${bobPostId}`)).comments[0]?.text === "Looks great, Bob! Where was it?"
+  && (await bob.$eval("article.card .comment details.edited", (d) => d.textContent).catch(() => "")).includes("Looks great, Bob!"));
+check("…and in Ann's own copy", sql(stateA, "SELECT kind FROM sent").some((r) => r.kind === "edit"));
+check("Ann sees it Edited, with what it said before", (await threadOn(ann, bobsPostPage)).comments[0]?.text === "Looks great, Bob! Where was it?"
+  && (await ann.$eval(`${annComment} details.edited`, (d) => d.textContent).catch(() => "")).includes("Looks great, Bob!"));
+// Bob replies on his own site; Ann sees it, and can't delete it, or change her own any more.
+await bob.goto(`${B}/posts/${bobPostId}`);
+await bob.type("article.card .say textarea", "Thanks Ann");
+await Promise.all([settled(bob), bob.click("article.card .say button")]);
+annFeed = [await threadOn(ann, bobsPostPage)];
 check("Ann sees Bob's reply, not deletable by her", annFeed[0].comments.map((c) => c.text).join("|") === "Looks great, Bob! Where was it?|Thanks Ann"
-  && !annFeed[0].comments[1].canDelete);
-
-// Bob's reply locks Ann's comment: her site no longer offers Edit, and Bob's refuses it.
+  && !annFeed[0].comments[1].canDelete, JSON.stringify(annFeed[0].comments));
 check("once Bob has replied, Ann can't change her comment", !(await ann.$(`${annComment} div.edit`)));
-// With a fresh copy of Bob's posts, Home doesn't ask his site at all.
-const askedAt = sql(stateA, "SELECT feed_checked_at FROM connections")[0].feed_checked_at;
-await ann.goto(`${A}/`);
-check("Home with a fresh copy of a friend's posts doesn't wait on their site", sql(stateA, "SELECT feed_checked_at FROM connections")[0].feed_checked_at === askedAt
-  && (await feedCards(ann))[0]?.comments.length === 2);
-const annRemoteId = sql(stateA, "SELECT remote_id FROM comments_elsewhere")[0].remote_id;
-const lateEdit = await fetch(`${B}/_peer/comments/${annRemoteId}/edit`, { method: "POST",
-  headers: { Authorization: `Bearer ${sql(stateA, "SELECT their_key FROM connections")[0].their_key}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ type: "Note", content: "changed after Bob replied" }) });
-check("…Bob's site refuses it", lateEdit.status === 403 && !sql(stateB, "SELECT text FROM comments").some((c) => c.text === "changed after Bob replied"));
-const bobsOwn = sql(stateB, "SELECT id FROM comments WHERE origin = 'site' LIMIT 1")[0].id;
-const notAnns = await fetch(`${B}/_peer/comments/${bobsOwn}/edit`, { method: "POST",
-  headers: { Authorization: `Bearer ${sql(stateA, "SELECT their_key FROM connections")[0].their_key}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ type: "Note", content: "words Bob never wrote" }) });
-check("…and Ann's site can't change Bob's comment", notAnns.status === 404 && !sql(stateB, "SELECT text FROM comments").some((c) => c.text === "words Bob never wrote"));
+// What Ann's browser could still try to sign: a late edit, and changing Bob's words. Bob's site refuses both.
+const signAndSend = (page, url, fields, text) => page.evaluate(async (url, fields, text) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const doc = new DOMParser().parseFromString(await (await fetch(location.pathname)).text(), "text/html");
+  const d = doc.querySelector("form.say").dataset;
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "edit", author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: d.signPrev || null, ...fields }, { text }, key);
+  return (await fetch(url, { method: "POST", redirect: "manual", body: new URLSearchParams({ sent: JSON.stringify(made.sent), back: "/" }) })).status;
+}, url, fields, text);
+const relay = `/_admin/friend/${bobPostOnA().connection_id}/items/${bobPostId}/records`;
+const annsFp = (await ann.$$eval("article.from-friend .comment:not(.gone)", (l) => l.map((c) => c.id.slice(2))))[0];
+const bobsFp = (await ann.$$eval("article.from-friend .comment:not(.gone)", (l) => l.map((c) => c.id.slice(2))))[1];
+check("…a late edit is refused by Bob's site", (await signAndSend(ann, relay, { about: annsFp }, "changed after Bob replied")) === 400
+  && (await threadOn(bob, `${B}/posts/${bobPostId}`)).comments[0].text === "Looks great, Bob! Where was it?");
+await ann.goto(bobsPostPage);
+check("…and so is changing Bob's comment", (await signAndSend(ann, relay, { about: bobsFp }, "words Bob never wrote")) === 400
+  && (await threadOn(bob, `${B}/posts/${bobPostId}`)).comments[1].text === "Thanks Ann");
+// (Bob's site telling Ann's about his reply, and her Notifications, come with step 4c.)
 
-// Bob's site tells Ann's about the reply, because she commented there too: it's on her Notifications.
-check("Bob's site sends Ann a note about his reply", await waitFor(() => sql(stateA, "SELECT COUNT(*) AS n FROM inbox WHERE kind = 'comment'")[0].n === 1));
-await ann.goto(`${A}/posts`);
-check("…which counts on her Notifications", (await ann.$eval('header.site a[href="/activity"] .count', (c) => c.firstChild.textContent).catch(() => "")) === "1");
-await ann.goto(`${A}/activity`);
-const note = await ann.$eval(".activity.new", (a) => ({ what: a.querySelector(".what").textContent.replace(/\s+/g, " ").trim(),
-  text: a.querySelector(".text")?.textContent, href: a.querySelector(".what a").getAttribute("href") })).catch(() => ({}));
-check("…saying who replied, where, and what", note.what === "Bob Example replied on their post" && note.text === "Thanks Ann"
-  && /^\/friend\/\d+\/posts#f\d+-post-/.test(note.href ?? ""), JSON.stringify(note));
+// A host that changes what someone wrote, or drops it, is caught (lists.js checkList): Bob's site's database edited by
+// hand, as whoever runs it could.
+const bobPages = sql(stateB, `SELECT page, entries FROM list_pages WHERE list = '${bobPostId}'`);
+const tampered = JSON.parse(bobPages[0].entries);
+const annsEntry = tampered.find((e) => e.fp === annsFp);
+const wasContent = annsEntry.sent.content;
+annsEntry.sent.content = Buffer.from(JSON.stringify({ text: "Ann never said this" })).toString("base64url");
+sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(tampered).replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+await ann.goto(bobsPostPage);
+check("words changed by Bob's site fail their check on Ann's, and aren't shown", (await ann.$$eval("article.from-friend .comment.gone", (l) => l.map((c) => c.textContent)))
+  .some((t) => t.includes("didn't pass its check")) && !(await ann.$eval("article.from-friend", (a) => a.textContent)).includes("Ann never said this"));
+annsEntry.sent.content = wasContent;
+const dropped = tampered.filter((e) => e.fp !== annsFp);
+sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(dropped).replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+await ann.goto(bobsPostPage);
+check("a comment dropped by Bob's site: Ann's says the conversation doesn't add up", (await ann.$eval("article.from-friend .notice.alert", (n) => n.textContent).catch(() => ""))
+  .includes("doesn't add up"));
+sql(stateB, `UPDATE list_pages SET entries = '${bobPages[0].entries.replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+await ann.goto(bobsPostPage);
+check("…and with it put back, all's well again", !(await ann.$("article.from-friend .notice.alert")) && (await feedCards(ann))[0].comments.length === 2);
 
-// Comments from Bob's visitors (and other friends) stay on Bob's site.
-sql(stateB, `INSERT INTO comments (target, author_id, author_name, text, created_at, origin)
-  SELECT target, NULL, 'Bob''s visitor', 'For Bob''s eyes', strftime('%s','now'), 'site' FROM comments LIMIT 1`);
-// No note for that: Ann's copy, once it's a few minutes old, is shown once more and fetched again in the background.
-sql(stateA, "UPDATE connections SET copied_at = copied_at - 3600");
-await ann.goto(`${A}/`);
-check("an old copy is still shown while it's fetched again", !(await feedCards(ann))[0].comments.some((c) => c.text === "For Bob's eyes"));
-check("friends see the whole thread, visitors' comments included (as when visiting)",
-  (await homeUntil(ann, A, (cards) => cards[0]?.comments.some((c) => c.text === "For Bob's eyes")))[0]?.comments.some((c) => c.text === "For Bob's eyes"));
-
-// Ann deletes her comment from her Feed.
-await ann.click("article.from-friend .comment .under details.more summary");
-await Promise.all([settled(ann), ann.click("article.from-friend .comment .under .delete")]);
-check("Ann's comment deleted on Bob's site", sql(stateB, "SELECT COUNT(*) AS n FROM comments WHERE origin != 'site'")[0].n === 0
-  && sql(stateA, "SELECT COUNT(*) AS n FROM comments_elsewhere")[0].n === 0);
+// Ann deletes her comment.
+await ann.click(`${annComment} .under details.more summary`);
+await Promise.all([settled(ann), ann.click(`${annComment} .under .delete`)]);
+check("Ann's comment deleted on Bob's site, its words gone, a marker left", (await threadOn(bob, `${B}/posts/${bobPostId}`)).comments.map((c) => c.text).join("|") === "Thanks Ann"
+  && (await bob.$eval("article.card .comment.gone", (c) => c.textContent).catch(() => "")).includes("deleted")
+  && !sql(stateB, `SELECT entries FROM list_pages WHERE list = '${bobPostId}'`)[0].entries.includes(wasContent));
 
 // What a connection can and can't reach.
 const keyForB = sql(stateA, "SELECT their_key FROM connections")[0].their_key;
@@ -329,9 +338,8 @@ check("a photo Bob hasn't shared can't be fetched by its fingerprint", Boolean(u
 check("…or commented on", (await peer("/_peer/comments", keyForB, { type: "Note", inReplyTo: `${B}/photos/sha256/${unshared}`, content: "x" })).status === 404);
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '${sharedBefore.replace(/'/g, "''")}')`);
 check("…but can once his photos are shared", (await peer(`/_peer/photos/${unshared}`, keyForB)).status === 200);
-const bobsComment = sql(stateB, "SELECT id FROM comments WHERE origin = 'site' LIMIT 1")[0].id;
-await peer(`/_peer/comments/${bobsComment}/delete`, keyForB, {});
-check("can't delete Bob's own comments", sql(stateB, `SELECT COUNT(*) AS n FROM comments WHERE id = ${bobsComment}`)[0].n === 1);
+check("signed posts need a signed call from a friend's site", (await fetch(`${B}/_p/items`)).status === 403
+  && (await fetch(`${B}/_p/items`, { headers: { "Afterwrd-From": A } })).status === 401);
 check("a used Connect link is refused", (await (await browser.createBrowserContext()).newPage().then(async (p) => (await p.goto(link)).status())) === 404);
 check("Feed actions need the owner's session", (await fetch(`${A}/_feed/comments`, { method: "POST", redirect: "manual", headers: { Origin: A } })).status === 401);
 check("another site can't post Ann's comments", (await fetch(`${A}/_feed/comments`, { method: "POST", redirect: "manual",
@@ -412,15 +420,22 @@ const full = await ann.$eval(".stage img", (i) => ({ w: i.naturalWidth, src: i.g
 check("a photo opens on Ann's site, full size, from Bob's", full.w === 1200 && full.src.startsWith(`${B}/files/`), full.src.slice(0, 60));
 check("…with no comment box: it's from his Facebook download", Boolean(await ann.$(".info")) && !(await ann.$(".info .say")));
 const fullSrc = full.src;
-await ann.goto(A + bobAlbums.find((a) => a.name === "Posted on afterwrd").href);
-const ownTile = await ann.$eval(".justified a.tile", (a) => a.getAttribute("href"));
+// afterwrd 2: a photo Bob posted is an item of its own, with its own comments, opened from his post.
+const ownTile = `/friend/${bobId}/posts/${bobPostId}/photos/1`;
 await ann.goto(A + ownTile);
 await ann.type(".info .say textarea", "What a view");
 await Promise.all([settled(ann), ann.click(".info .say button")]);
 check("Ann comments on a photo Bob posted, from her site", new URL(ann.url()).pathname === ownTile
-  && (await ann.$$eval(".info .comment", (l) => l.map((c) => ({ t: c.querySelector(".said").textContent, d: Boolean(c.querySelector(".under .delete")) })))).some((c) => c.t === "What a view" && c.d));
-check("…stored on Bob's site against that photo", sql(stateB, "SELECT target, origin FROM comments WHERE text = 'What a view'")
-  .some((c) => c.target === `photo-${ownTile.split("/").pop()}` && c.origin === A));
+  && (await ann.$$eval(".info section.thread .comment:not(.gone)", (l) => l.map((c) => ({ t: c.querySelector(".said").textContent, d: Boolean(c.querySelector(".under .delete")) }))))
+    .some((c) => c.t === "What a view" && c.d));
+check("…kept on Bob's site against that photo", sql(stateB, "SELECT comments FROM items WHERE type = 'photo' ORDER BY created_at LIMIT 1")[0]?.comments === 1);
+// Opened from his album instead, it's the same photo page: its signed comments are there.
+await ann.goto(A + bobAlbums.find((a) => a.name === "Posted on afterwrd").href);
+await Promise.all([ann.waitForNavigation(), ann.click(".justified a.tile")]);
+check("a photo Bob posted, opened from his album, opens on its own page, with its signed comments",
+  /^\/friend\/\d+\/posts\/[\w-]{43}\/photos\/\d+$/.test(new URL(ann.url()).pathname)
+  && (await ann.$$eval(".info section.thread .comment:not(.gone) .said", (l) => l.map((x) => x.textContent))).length >= 1
+  && (await ann.$eval("#close", (a) => a.getAttribute("href"))).startsWith(`/friend/${bobId}/photos/album/`), ann.url());
 await ann.screenshot({ path: `${OUT}/friend-photo.png` });
 await ann.goto(`${A}/friend/${bobId}/posts`);
 await ann.screenshot({ path: `${OUT}/friend-posts.png`, fullPage: true });
@@ -491,7 +506,7 @@ check("Connections has no Visit button", !(await ann.$('a[href^="/_feed/visit"]'
 check("…and the old Visit link is gone", (await ann.goto(`${A}/_feed/visit?to=${encodeURIComponent(B)}`)).status() === 404);
 
 // Download everything, on both sites: Ann's copy of her comment and Bob's copy share one address.
-await ann.goto(`${A}/`);
+await ann.goto(bobsPostPage);
 await ann.type("article.from-friend .say textarea", "Kept forever");
 await Promise.all([settled(ann), ann.click("article.from-friend .say button")]);
 async function download(page, site, label) {
@@ -529,13 +544,23 @@ check("download has the documents and a README", ["README.txt", "profile.json", 
   "comments-elsewhere.json", "connections.json", "facebook-comments.json"].every((f) => annZip.list.some((x) => x.endsWith(`/${f}`))));
 const elsewhere = annZip.json("comments-elsewhere.json").orderedItems.find((c) => c.content === "Kept forever");
 const bobPosts = bobZip.json("posts.json");
+const fromB64 = (text) => { try { return JSON.parse(Buffer.from(text, "base64url").toString()); } catch { return null; } };
 const bobsNote = bobPosts.orderedItems.find((n) => n.content === "Bob's holiday");
 const reply = bobsNote?.replies?.items.find((c) => c.content === "Kept forever");
 check("Ann's copy and Bob's copy of her comment share one address", Boolean(elsewhere && reply && elsewhere.id === reply.id
   && elsewhere.inReplyTo === bobsNote.id && reply.inReplyTo === bobsNote.id), elsewhere?.id);
 check("Bob's copy says it's from Ann's site", reply?.attributedTo?.id === `${A}/` && reply?.attributedTo?.name === "Ann Example");
 check("posts are ActivityStreams Notes with permanent addresses", bobPosts["@context"][0] === "https://www.w3.org/ns/activitystreams"
-  && bobPosts.orderedItems.every((n) => n.type === "Note" && n.id.startsWith(`${B}/posts/post-`)));
+  && bobPosts.orderedItems.every((n) => n.type === "Note" && /^\/posts\/(post-\d+-[0-9a-f]{8}|[\w-]{43})$/.test(n.id.slice(B.length))));
+// afterwrd 2: what proves it, in each download (signed.json): Bob's post's list, with Ann's signed comment in it as
+// she signed it, and Ann's own record of sending it, with Bob's site's receipt.
+const bobSigned = bobZip.json("signed.json");
+const annSigned = annZip.json("signed.json");
+const annSent = annSigned["afterwrd:sent"].find((x) => x.kind === "comment" && fromB64(x.sent.content)?.text === "Kept forever");
+check("Ann's download has her signed comment, with Bob's site's receipt", Boolean(annSent?.receipt?.sig), JSON.stringify(annSent ?? {}).slice(0, 120));
+check("…and Bob's has the very same record in his post's list", bobSigned["afterwrd:lists"].some((l) => l.entries.some((e) => e.fp === annSent?.fp && e.sent?.record === annSent?.sent.record)));
+check("…and both have their identities (keys only)", Boolean(annSigned["afterwrd:identity"].chain.length && bobSigned["afterwrd:identity"].chain.length)
+  && !JSON.stringify(annSigned).includes("Ann Example"));
 check("afterwrd posts and imported posts are told apart", bobsNote?.["afterwrd:source"] === "afterwrd"
   && bobPosts.orderedItems.some((n) => n["afterwrd:source"] === "facebook"));
 const photo = bobsNote.attachment.find((a) => a.type === "Image");
@@ -548,89 +573,67 @@ const annKeys = sql(stateA, "SELECT their_key, key_hash FROM connections")[0];
 check("no keys in the download", !everything.includes(annKeys.their_key) && !everything.includes(annKeys.key_hash) && !everything.includes("key_hash"));
 check("Ann's connections list Bob by address", annZip.json("connections.json").orderedItems[0]?.id === `${B}/`);
 
-// Bob changes a new post's words; Ann's Home shows it Edited, with what it said before.
+// Bob changes a new post's words; Ann's Home shows it Edited, with what it said before, once her site asks his again
+// (hourly, in the background, or whenever she opens his page: friendcopies.js).
 await compose(bob, B, "Off to the coast");
 await bob.goto(`${B}/posts`);
 await bob.click("main article.card:first-of-type > header details.more summary");
 await bob.click("main article.card:first-of-type > header details.more a[href^='#edit']");
 await bob.$eval("main article.card:first-of-type > div.edit textarea", (t) => { t.value = "Off to the coast tomorrow"; });
 await Promise.all([settled(bob), bob.click("main article.card:first-of-type > div.edit button")]);
-copiesOld(stateA);
-await ann.goto(`${A}/`);
+const askAgain = () => sql(stateA, "UPDATE connections SET items_checked_at = 0");
+askAgain();
+await homeUntil(ann, A, (cards) => cards.some((c) => c.text === "Off to the coast tomorrow"));
 const edited = await ann.$$eval("article.from-friend", (l) => l.map((a) => ({ text: a.querySelector(".text")?.textContent,
   was: a.querySelector(":scope > details.edited")?.textContent ?? "" })).find((p) => p.text === "Off to the coast tomorrow"));
 check("Ann sees Bob's changed post, Edited, with what it said before", Boolean(edited) && edited.was.includes("Off to the coast"), JSON.stringify(edited));
 
-// Refreshing for less (peers.js feed): Bob's site says what his posts are as of; Ann's site gives that back next time,
-// and is told only that nothing's new, or sent only the posts that have changed, with the addresses of his newest. A
-// copy made old (as it would be within minutes), so Home asks Bob's site again in the background.
-const bobAsOf = () => sql(stateA, "SELECT feed_since, copy_keys, feed_checked_at FROM connections")[0];
-const ageCopy = () => sql(stateA, "UPDATE connections SET copied_at = copied_at - 3600, feed_checked_at = 0");
-const refreshed = async () => { ageCopy(); await ann.goto(`${A}/`); return waitFor(() => bobAsOf().feed_checked_at > 0); };
-// What's changed is told to the second, and a change in the same second as a copy is sent again rather than risk
-// missing it: so each step here starts in a new second, or these few quick steps would all share one.
-const tick = () => new Promise((r) => setTimeout(r, 1100));
-const ask = async (since) => (await fetch(`${B}/_peer/feed${since ? `?since=${encodeURIComponent(since)}` : ""}`,
-  { headers: { Authorization: `Bearer ${sql(stateA, "SELECT their_key FROM connections")[0].their_key}` } })).json();
-await tick();
-check("Ann's site keeps what Bob's posts are as of, and which are his newest", await refreshed() && await waitFor(() => /^[\w.+-]+\.\d+$/.test(bobAsOf().feed_since ?? "")
-  && JSON.parse(bobAsOf().copy_keys ?? "[]").length > 1), JSON.stringify(bobAsOf()));
-// A mark on Ann's copy of one of Bob's posts: it goes only if her site saves that post again.
-sql(stateA, "UPDATE friend_posts SET data = replace(data, 'Off to the coast tomorrow', 'Off to the coast tomorrow (as kept)')");
-const marked = () => sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%(as kept)%'")[0].n === 1;
-let since = bobAsOf().feed_since;
-check("…asked again, Bob's site says nothing's new, and nothing in her copy is saved again", await refreshed()
-  && bobAsOf().feed_since === since && marked(), JSON.stringify(bobAsOf()));
-const unchanged = await ask(since);
-check("…which is all it says", unchanged["afterwrd:unchanged"] === true && !unchanged.orderedItems, JSON.stringify(unchanged).slice(0, 120));
+// Asking for less (friendhost.js): Ann's site asks for Bob's posts changed since it last asked, in a signed call. Asked
+// again, nothing; a new post, only that; a comment, only the post it's on; a deleted post, its id among those gone.
+const asOf = () => Number(sql(stateA, "SELECT items_since FROM connections")[0].items_since ?? 0);
+const annPerson = sql(stateA, "SELECT person FROM own_identity")[0].person;
+const annHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateA, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
+  { name: "Ed25519" }, false, ["sign"]);
+const ask = async (since) => {
+  const url = `${B}/_p/items?since=${since}`;
+  return (await fetch(url, { headers: await signCall({ method: "GET", url, person: annPerson, from: A, privateKey: annHosting }) })).json();
+};
+const tick = () => new Promise((r) => setTimeout(r, 1100)); // what's changed is told to the second
+check("Ann's site keeps what Bob's posts are copied as of", asOf() > 0, String(asOf()));
+let since = asOf();
+const nothing = await ask(since);
+check("…asked again, Bob's site has nothing new", nothing.items?.length === 0 && nothing.gone?.length === 0 && nothing.until === since, JSON.stringify(nothing).slice(0, 160));
 await tick();
 await compose(bob, B, "Back from the coast");
+const newer = await ask(since);
+check("once Bob posts, asked as of before it, his site sends only the new post", newer.items?.length === 1 && newer.items[0].content.text === "Back from the coast",
+  JSON.stringify(newer).slice(0, 200));
+askAgain();
 const after = await homeUntil(ann, A, (cards) => cards.some((c) => c.text === "Back from the coast"));
-check("once Bob posts, the refresh his note brings sends only that: the rest of her copy stays as it was",
-  after.some((c) => c.text === "Back from the coast") && marked() && bobAsOf().feed_since !== since);
-const changes = await ask(since);
-const bobsNewest = changes["afterwrd:newest"] ?? [];
-check("asked as of before it, Bob's site sends only the new post, with the addresses of his newest",
-  changes["afterwrd:changedSince"] === since && changes.orderedItems?.length === 1 && changes.orderedItems[0].content === "Back from the coast"
-  && bobsNewest[0] === changes.orderedItems[0].id && bobsNewest.length > 1 && !changes.attributedTo, JSON.stringify(changes).slice(0, 200));
+check("…and Ann's Home shows it", after.some((c) => c.text === "Back from the coast"));
 // Bob comments on his newest post, on his own site.
-const bobComments = async (text) => {
-  await bob.goto(`${B}/posts`);
-  await bob.type("main article.card:first-of-type .say textarea", text);
-  await Promise.all([settled(bob), bob.click("main article.card:first-of-type .say button")]);
-};
 await tick();
-since = bobAsOf().feed_since;
-await bobComments("Lovely day for it");
+since = newer.until;
+await bob.goto(`${B}/posts`);
+await bob.click("main article.card:first-of-type details.comments summary");
+await bob.waitForSelector("main article.card:first-of-type .say textarea", { timeout: 10_000 });
+await bob.type("main article.card:first-of-type .say textarea", "Lovely day for it");
+await Promise.all([settled(bob), bob.click("main article.card:first-of-type .say button")]);
 const commented = await ask(since);
-check("a comment on one post sends only that post, with the comment", commented.orderedItems?.length === 1
-  && commented.orderedItems[0].replies?.items?.some((c) => c.content === "Lovely day for it"), JSON.stringify(commented).slice(0, 200));
-check("…and Ann's refresh keeps it, leaving the rest", await refreshed() && marked()
-  && sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%Lovely day for it%'")[0].n === 1);
+check("a comment on one post sends only that post, now with comments", commented.items?.length === 1 && commented.items[0].content.text === "Back from the coast"
+  && commented.items[0].comments === 1, JSON.stringify(commented).slice(0, 200));
+// A post gone, deleted by Bob: among those gone, and gone from Ann's copy at her site's next ask.
 await tick();
-// A post gone: not among the newest any more, so it goes from her copy too, with nothing else saved.
-sql(stateB, "DELETE FROM posts WHERE text = 'Back from the coast'");
-check("a post Bob deletes goes from Ann's copy at her next refresh", await refreshed() && marked()
-  && sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%Back from the coast%'")[0].n === 0);
-// Something every post shows (Bob's name, which his comments carry): the whole feed again.
-await tick();
-since = bobAsOf().feed_since;
-sql(stateB, "UPDATE users SET name = name");
-const whole = await ask(since);
-check("a change to what every post shows (his name) sends everything again", !whole["afterwrd:changedSince"] && Boolean(whole.attributedTo)
-  && (whole.orderedItems?.length ?? 0) > 1, JSON.stringify(whole).slice(0, 120));
-check("…as does what another version gave out", Boolean((await ask("0.0.1.1700000000")).attributedTo));
-// One of Bob's newest that Ann's copy hasn't got (as when a newer one goes and an older one comes into his newest):
-// her site can't show it from only what's changed, so it asks for everything next time.
-await tick();
-await refreshed();
-await tick();
-sql(stateA, "UPDATE connections SET copy_keys = json_remove(copy_keys, '$[#-1]')"); // his oldest of them, not the one commented on
-await bobComments("Packed already"); // on "Off to the coast tomorrow", his newest now
-check("a post among Bob's newest that her copy hasn't got: nothing to give back next time", await refreshed() && bobAsOf().feed_since === null,
-  JSON.stringify(bobAsOf()));
-check("…so the next refresh brings all of it, and says what it's as of again", await refreshed() && Boolean(bobAsOf().feed_since)
-  && !marked() && JSON.parse(bobAsOf().copy_keys).length > 1);
+since = commented.until;
+const goneId = commented.items[0].id;
+await bob.goto(`${B}/posts`);
+await bob.click("main article.card:first-of-type > header details.more summary");
+await Promise.all([settled(bob), bob.click("main article.card:first-of-type > header .delete")]);
+const deleted = await ask(since);
+check("a post Bob deletes is among those gone", deleted.gone?.includes(goneId), JSON.stringify(deleted).slice(0, 200));
+askAgain();
+await homeUntil(ann, A, (cards) => !cards.some((c) => c.text === "Back from the coast"));
+check("…and goes from Ann's copy", sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE id = '${goneId}'`)[0].n === 0);
 
 // afterwrd 2 (identities.js): Ann's identity is public, with keys only; her name (her profile, signed in the
 // background by her browser) goes only to a friend's site, in a call signed with that site's hosting key.
@@ -674,7 +677,7 @@ check("Remove friend removes it on both sites", sql(stateA, "SELECT COUNT(*) AS 
   && sql(stateB, "SELECT COUNT(*) AS n FROM connections")[0].n === 0);
 check("the old key stops working", (await peer("/_peer/feed", keyForB)).status === 401);
 check("…and so do Bob's photo links for Ann, at once", (await fetch(signed)).status === 403);
-check("Ann keeps her copies of what she said after disconnecting", sql(stateA, "SELECT site FROM comments_elsewhere").some((c) => c.site === B));
+check("Ann keeps her copies of what she said after disconnecting (her signed records, with Bob's receipts)", sql(stateA, "SELECT COUNT(*) AS n FROM sent WHERE receipt IS NOT NULL")[0].n > 0);
 check("disconnecting forgets who they were on Facebook", sql(stateA, "SELECT COUNT(*) AS n FROM friend_links")[0].n === 0);
 
 // Ann invites Facebook friends to afterwrd. Zoe's invite is passed on to Cara, so Ann declines it; Cara's own is
@@ -734,6 +737,10 @@ await cara.goto(`${C}/`);
 check("Cara's Home now has Ann's post", (await feedCards(cara)).some((c) => c.who === "Ann Example"));
 await ann.screenshot({ path: `${OUT}/friends-invited.png`, fullPage: true });
 
+// Notes (step 4c: docs/signed-conversations.md): a friend's new signed post reaching an open Home, and the Outbox
+// sending to many. Switched back on, and passing, as part of 4c; until then the notes these check aren't sent.
+const NOTES_4C = false;
+if (NOTES_4C) {
 // Ann has Home open when Cara posts: Cara's site sends a note, and Ann's page offers it without moving anything.
 await ann.goto(`${A}/`);
 await compose(cara, C, "Cara's first post");
@@ -768,6 +775,7 @@ check("a site nobody has checked doesn't nag about it on Home", (await ann.$("fo
 check("the friends column shows a dozen, then a link to the rest", (await ann.$$(".mini-friends li")).length === 12
   && (await ann.$eval('aside.side a[href="/friend"]', (a) => a.textContent).catch(() => "")) === "All 46 friends");
 sql(stateA, "DELETE FROM connections WHERE id < 0");
+}
 
 // Friends whose sites stop answering. Gail's hasn't for two days (and was asked just now); Ned's only just stopped.
 sql(stateA, `INSERT INTO connections (id, origin, name, their_key, key_hash, created_at, connected_at, approved_at, reached_at,

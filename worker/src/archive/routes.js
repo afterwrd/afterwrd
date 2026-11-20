@@ -1,8 +1,10 @@
 // The site's pages for the owner: their posts and photos (made on afterwrd, and from their Facebook download, in the
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
+import { friendItem, friendItems, friendThread, pullFriends, pullItems, pullNew } from "../friendcopies.js";
+import { ownHost } from "../items.js";
 import * as itemViews from "../views/items.js";
-import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
+import { loadThread, namesFor, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { groupPostId, postId as postAddress } from "../../public/static/activity.js";
 import { eventsFor, invitable, keepFriendEvents, oldEventsGone } from "../events.js";
 import { datesOf, FINISHED_SQL, finishedAt, icsFile, monthSpan, readDay, readMonth, readWeek, weekSpan } from "../calendar.js";
@@ -78,6 +80,9 @@ const ROUTES = [
   [/^\/posts\/(post-\d+-[0-9a-f]{8})$/, null, post, views.postPage],
   // afterwrd 2: the owner's own signed posts (items.js), by their id.
   [/^\/posts\/([A-Za-z0-9_-]{43})$/, null, itemPost, views.itemPage],
+  // …and a friend's, read and checked from their site (friendcopies.js).
+  [/^\/friend\/(\d+)\/posts\/([A-Za-z0-9_-]{43})$/, null, friendItemPost, views.friendItemPage],
+  [/^\/friend\/(\d+)\/posts\/([A-Za-z0-9_-]{43})\/photos\/(\d{1,2})$/, null, friendItemPhoto, views.friendItemPhotoPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event$/, null, ownEventEdit, views.ownEventEditPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event\.ics$/, null, ownEventFile, null],
   [/^\/comments$/, "comments", comments, views.commentsPage],
@@ -124,7 +129,7 @@ class Problem extends Error {
 export async function renderArchive(request, env, url, user, work) {
   const db = env.DB;
   const ctx = {
-    env, db, url, user,
+    env, db, url, user, work,
     zone: request.cf?.timezone ?? "Europe/London", // where the reader is, as near as Cloudflare can tell
     connected: Boolean(connectedToken(request)), // an hour's Cloudflare token from Connect (cloudflare.js), for groups
   };
@@ -603,13 +608,50 @@ async function post(ctx, params, key) {
   return { post: p };
 }
 
+/** A friend's signed post (afterwrd 2: friendcopies.js), its comments read from their site and checked. */
+async function friendItemPost(ctx, params, connectionId, id) {
+  const connection = await first(ctx.db, "SELECT * FROM connections WHERE id = ? AND approved_at IS NOT NULL", [Number(connectionId)]);
+  if (!connection) return null;
+  let item = await friendItem(ctx.db, connection.id, id);
+  if (!item) { await pullItems(ctx.env, ctx.url.origin, connection); item = await friendItem(ctx.db, connection.id, id); }
+  if (!item) return null;
+  return { item, ...(await friendComments(ctx, connection, id, item.author)) };
+}
+
+/** The comments on a friend's signed post or photo (its own list, `id`), read from their site and checked. */
+async function friendComments(ctx, connection, id, owner) {
+  const t = await friendThread(ctx.env, ctx.url.origin, connection, id);
+  if (t.error) return { thread: null, list: null, problem: t.error };
+  const comments = itemComments(t.entries.map((e) => ({ n: e.n, fp: e.fp, taken: e.taken, failed: e.state === "failed",
+    r: e.record ? { record: e.record, content: e.content } : null })), { owner, item: id });
+  const names = new Map(t.entries.filter((e) => e.by).map((e) => [e.by, e.name]));
+  for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
+  const me = await ownHost(ctx.env);
+  const problem = t.problem ? `${connection.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
+    : t.changed ? `${connection.name}'s site has changed this conversation since you last saw it.` : null;
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem };
+}
+
+/** A photo in a friend's signed post, from the post (afterwrd 2): its own comments, read from their site. */
+async function friendItemPhoto(ctx, params, connectionId, id, index) {
+  const connection = await first(ctx.db, "SELECT * FROM connections WHERE id = ? AND approved_at IS NOT NULL", [Number(connectionId)]);
+  const item = connection && (await friendItem(ctx.db, connection.id, id));
+  const at = Number(index);
+  if (!item || !(at >= 1 && at <= item.photos.length) || !item.photos[at - 1]?.item) return null;
+  const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/#fi${connection.id}-${id}`;
+  return { item, index: at, back, ...(await friendComments(ctx, connection, item.photos[at - 1].item, item.author)) };
+}
+
 /** One of the owner's own signed posts (afterwrd 2: items.js), with its comments. */
 async function itemPost(ctx, params, id) {
   const item = await ownItem(ctx.db, id);
   if (!item) return null;
   const list = await loadThread(ctx.env, id);
   if (!list) return null;
-  return { item, thread: itemComments(list.entries, { owner: item.author, item: id }), list: { ...item.list, seen: list.seen } };
+  const comments = itemComments(list.entries, { owner: item.author, item: id });
+  const names = await namesFor(ctx.db, comments.flatMap((c) => [c.author, c.removedBy]));
+  for (const c of comments) { if (c.author) c.name = names.get(c.author) ?? "Someone"; if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
+  return { item, thread: comments, list: { ...item.list, seen: list.seen } };
 }
 
 /** Changing the owner's own event. */
@@ -660,9 +702,11 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
  */
 async function home(ctx, params) {
   const { db } = ctx;
-  const [own, ownOld, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
+  await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
+  const [own, friendOwn, ownOld, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
     friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
+    friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
     // …and their polls and events, still made the old way until step 4d (docs/signed-conversations.md).
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
@@ -688,13 +732,15 @@ async function home(ctx, params) {
     identitySummary(db),
   ]);
   const identityChange = identity?.pending ?? null;
+  // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
+  ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
-    return { own, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    return { own, friendOwn, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
       newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange };
   }
   return {
-    own, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    own, friendOwn, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
@@ -754,6 +800,7 @@ async function fromFriend(ctx, id, load) {
     const data = await load(connection);
     connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection).run();
+    if (data instanceof Response) return data; // somewhere else to go (a photo in a signed post: friendPhoto)
     return { ...data, friend: withoutKeys(connection) };
   } catch (error) {
     connection.facebook = await facebook;
@@ -821,7 +868,10 @@ async function friendPosts(ctx, params, id) {
       keepFriendEvents(ctx.db, c, posts),
     ]);
     posts.forEach((p, i) => { p.comments = marked[i]; });
-    return { posts, paging };
+    // afterwrd 2: their signed posts, kept here (friendcopies.js), on the first page, asked for afresh first.
+    if (pageNumber(params) === 1) await pullItems(ctx.env, ctx.url.origin, c).catch(() => null);
+    const items = pageNumber(params) === 1 ? await friendItems(ctx.db, { connection: c.id }) : [];
+    return { posts, paging, items };
   });
 }
 
@@ -866,6 +916,11 @@ async function friendAlbum(ctx, params, id, key) {
 async function friendPhoto(ctx, params, id, hash) {
   return fromFriend(ctx, id, async (c) => {
     const m = await friend.friendPhoto(c, hash);
+    // afterwrd 2: a photo in their signed post opens on its own page there, with its signed comments (friendcopies.js).
+    if (m.inItem) {
+      const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : m.album ? `/friend/${c.id}/photos/album/${m.album.key}` : `/friend/${c.id}/photos`;
+      return Response.redirect(`${ctx.url.origin}/friend/${c.id}/posts/${m.inItem.post}/photos/${m.inItem.index}?${new URLSearchParams({ in: "post", back })}`, 302);
+    }
     m.comments = await markMine(ctx.db, c.id, `photo-${m.hash}`, m.comments, ctx.url.origin);
     const photos = m.post?.photos ?? [];
     const at = params.get("in") === "post" ? photos.findIndex((p) => p.hash === m.hash) : -1;

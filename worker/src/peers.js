@@ -112,7 +112,7 @@ export async function callSite(origin, path, { key, body, timeout = TIMEOUT_MS }
   return data;
 }
 
-async function readLimited(response, limit) {
+export async function readLimited(response, limit) {
   const reader = response.body?.getReader();
   if (!reader) return "";
   const parts = [];

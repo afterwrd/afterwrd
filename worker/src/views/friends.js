@@ -1,5 +1,6 @@
 // A connected friend's posts and photos, read from their site (friends.js, feed.js), and Friends. Views only draw:
 // they read nothing and change nothing.
+import { friendItemCard } from "./items.js";
 import { verdict } from "../checks.js";
 import { resultHtml } from "./checks.js";
 import { MAX_COMMENT } from "../archive/comments.js";
@@ -360,10 +361,13 @@ ${friendHead(ctx, c, "posts")}
 <div class="feed">${remoteCard(ctx, c, p)}</div>`);
 }
 
-export function friendPostsPage(ctx, { friend: c, posts, paging }) {
+export function friendPostsPage(ctx, { friend: c, posts, paging, items = [] }) {
+  // Their signed posts (afterwrd 2: views/items.js) among the others, newest first.
+  const cards = [...posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, c, p) })), ...items.map((i) => ({ at: i.created_at, card: friendItemCard(ctx, i) }))]
+    .sort((a, b) => b.at - a.at);
   return page(ctx, c.name, html`
 ${friendHead(ctx, c, "posts")}
-${feed(posts, (p) => remoteCard(ctx, c, p), "Nothing posted yet.")}
+${feed(cards, (x) => x.card, "Nothing posted yet.")}
 ${(paging.page > 1 || paging.hasNext) && pager(ctx, paging)}`);
 }
 

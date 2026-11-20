@@ -1,5 +1,5 @@
 // Home, Memories and Add to home screen. Views only draw: they read nothing and change nothing.
-import { itemCard } from "./items.js";
+import { friendItemCard, itemCard } from "./items.js";
 import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
 
@@ -40,10 +40,11 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, ownOld = [], feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
+    ...friendOwn.map((item) => ({ at: item.created_at, card: friendItemCard(ctx, item) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
   ].sort((a, b) => b.at - a.at);
   return page(ctx, "Home", html`

@@ -200,7 +200,7 @@ export async function recordOn(env, host, id, sent) {
     return { deleted: true };
   }
   await refreshItem(env.DB, id);
-  return { ok: true };
+  return { ok: true, receipt: answer.receipt, entry: answer.entry };
 }
 
 /**
@@ -268,6 +268,8 @@ export function thread(entries, { owner, item }) {
   const byFp = new Map();
   for (const e of entries) {
     const r = e.r;
+    // One whose signature doesn't check (a friend's site showed something its writer didn't sign): hidden, saying so.
+    if (e.failed) { comments.push({ fp: e.fp, n: e.n, state: "failed", taken: e.taken }); continue; }
     if (!r) {
       // Gone: a comment whose words were thrown away. What became of it is said by a delete or removal after it.
       const c = { fp: e.fp, n: e.n, state: "gone", taken: e.taken };
@@ -382,8 +384,31 @@ export async function photoItem(env, mediaId) {
   const neighbour = (position) => db.prepare(`SELECT m.* FROM item_photos ip JOIN media m ON m.item_id = ip.photo WHERE ip.post = ? AND ip.position = ?`)
     .bind(String(row.post), position).first();
   const [prev, next] = await Promise.all([neighbour(Number(row.position) - 1), neighbour(Number(row.position) + 1)]);
+  const comments = thread(list.entries, { owner: photo.author, item: photo.id });
+  const names = await namesFor(db, comments.flatMap((c) => [c.author, c.removedBy]));
+  for (const c of comments) { if (c.author) c.name = names.get(c.author) ?? "Someone"; if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
   return {
     photo, post, prev, next, index: Number(row.position) + 1, total: Number(row.total),
-    thread: thread(list.entries, { owner: photo.author, item: photo.id }), list: { ...photo.list, seen: list.seen },
+    thread: comments, list: { ...photo.list, seen: list.seen },
   };
+}
+
+/**
+ * Names for the people who wrote on the owner's items: a friend's as the owner knows them (connections), anyone else's
+ * as their signed profile says (identities, checked when it was kept). Missing ones are left out.
+ */
+export async function namesFor(db, people) {
+  const list = [...new Set(people.filter(Boolean))];
+  if (!list.length) return new Map();
+  const json = JSON.stringify(list);
+  const [friends, others] = await db.batch([
+    db.prepare("SELECT identity AS person, name FROM connections WHERE identity IN (SELECT value FROM json_each(?))").bind(json),
+    db.prepare("SELECT person, profile FROM identities WHERE person IN (SELECT value FROM json_each(?)) AND profile IS NOT NULL").bind(json),
+  ]);
+  const names = new Map();
+  for (const r of others.results) {
+    try { const p = JSON.parse(String(r.profile)); const said = JSON.parse(new TextDecoder().decode(fromB64url(p.bytes))); if (typeof said.name === "string") names.set(String(r.person), said.name.slice(0, 100)); } catch {}
+  }
+  for (const r of friends.results) names.set(String(r.person), String(r.name));
+  return names;
 }

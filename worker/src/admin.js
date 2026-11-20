@@ -4,6 +4,7 @@
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
 import { handleKeys, identitySummary } from "./keys.js";
 import { handleItems } from "./items.js";
+import { relayRecord } from "./friendcopies.js";
 import { forgetDeviceById, listDevices, pushDevicesSeen } from "./push.js";
 import { handleCheckAdmin } from "./checks.js";
 import { handleConnections } from "./connect.js";
@@ -24,6 +25,9 @@ export const DEVICE_LINK_SECONDS = 3600;
 export async function handleAdmin(request, env, url, owner) {
   if (url.pathname === "/_admin/keys" || url.pathname.startsWith("/_admin/keys/")) return handleKeys(request, env, url, owner);
   if (url.pathname === "/_admin/items" || url.pathname.startsWith("/_admin/items/")) return handleItems(request, env, url, owner);
+  // afterwrd 2: the owner's signed comments on friends' posts, passed on to their sites (friendcopies.js).
+  const relayed = /^\/_admin\/friend\/(\d+)\/items\/([A-Za-z0-9_-]{43})\/records$/.exec(url.pathname);
+  if (relayed && request.method === "POST") return relayRecord(request, env, url, Number(relayed[1]), relayed[2]);
   if (url.pathname === "/_admin/import" || url.pathname.startsWith("/_admin/import/")) {
     return handleImport(request, env, url, owner);
   }
