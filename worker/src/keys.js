@@ -12,11 +12,30 @@
 //                              and signed together by one passkey in the browser
 //   POST /_admin/keys/finish   {identity, delegation, response} -> {person, expires}
 // Signing in afterwards makes each browser's delegation in the sign-in prompt itself (auth.js loginOptions).
-import { checkDelegation, parseIdentity, readIdentity } from "./identity.js";
+//
+// Changing the identity (from Your devices; each a new identity document: src/identity.js says when each counts):
+//   POST /_admin/keys/change/start   {change: "allow" | "remove" | "recovery" | "cancel", credential?, recovery?}
+//                                    -> {nonce, doc, allow}: the next document, for one of the identity's passkeys to sign
+//   POST /_admin/keys/change/finish  {doc, response}
+//     allow     every passkey the owner has here signs for them (at once)
+//     remove    one stops (after 7 days); Your devices also removes it from signing in, at once
+//     recovery  a new recovery code (after 7 days)
+//     cancel    a change that's waiting doesn't happen
+//   POST /_admin/keys/recover/start  {change: "devices" | "cancel"} -> {doc}: signed in the browser with the recovery
+//   POST /_admin/keys/recover/finish {doc, signature}                    code's key, never a passkey
+//     devices   the passkeys this site has now are the ones that sign (after 7 days): back in after losing every device
+// Adding a device that signs straight away (device links made on a device that signs):
+//   POST /_admin/keys/enrol/start    {link} -> {nonce, statement, allow}: this device's passkey allows that link's token
+//   POST /_admin/keys/enrol/finish   {statement, response}
+//   GET  /_admin/keys/join           on the new device, after its passkey: one more prompt adds it, and this browser
+//   POST /_admin/keys/join/start     {browserKey} -> {nonce, doc, delegation, allow}
+//   POST /_admin/keys/join/finish    {doc, delegation, token, response}
+import { checkDelegation, checkPasskeyProof, parseIdentity, readIdentity } from "./identity.js";
 import { readChallenge, safeNext, spendChallenge, withChallenge } from "./auth.js";
-import { b64url, decode, encode, fingerprintOf, fromB64url, newKeyPair } from "../public/static/signed.js";
+import { b64url, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
 import { html, json, now, randomToken } from "./util.js";
-import { keysPage } from "./views/pages.js";
+import { joinPage, keysPage } from "./views/pages.js";
+import { sha256 as sha256Hex } from "./util.js";
 
 export const DELEGATION_SECONDS = 30 * 86400; // as long as a session
 const KEY_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -103,10 +122,19 @@ export async function handleKeys(request, env, url, owner) {
     if (await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1").first()) return Response.redirect(`${url.origin}${next}`, 303);
     return html(keysPage(next));
   }
+  if (route === "GET /_admin/keys/join") return html(joinPage());
   const body = await request.json().catch(() => ({}));
   try {
     if (route === "POST /_admin/keys/start") return await start(env, url, owner, body);
     if (route === "POST /_admin/keys/finish") return await finish(request, env, url, owner, body);
+    if (route === "POST /_admin/keys/change/start") return await changeStart(env, url, owner, body);
+    if (route === "POST /_admin/keys/change/finish") return await changeFinish(request, env, body);
+    if (route === "POST /_admin/keys/recover/start") return await recoverStart(env, url, owner, body);
+    if (route === "POST /_admin/keys/recover/finish") return await recoverFinish(env, body);
+    if (route === "POST /_admin/keys/enrol/start") return await enrolStart(env, url, body);
+    if (route === "POST /_admin/keys/enrol/finish") return await enrolFinish(request, env, body);
+    if (route === "POST /_admin/keys/join/start") return await joinStart(env, url, owner, body);
+    if (route === "POST /_admin/keys/join/finish") return await joinFinish(request, env, url, owner, body);
   } catch (error) {
     console.error(`${route}: ${error.message}`);
     return json({ error: "That didn't work. Try again." }, 400);
@@ -169,4 +197,228 @@ async function finish(request, env, url, owner, { identity: identityText, delega
 /** Whether the owner has set up signing yet. */
 export async function hasIdentity(db) {
   return Boolean(await db.prepare("SELECT 1 FROM own_identity WHERE id = 1").first());
+}
+
+// --- changing the identity ------------------------------------------------------------------------------------------
+
+/** A passkey's proof from what the browser sent back (auth's credentialJSON) for `statements` under `nonce`. */
+function proofFrom(response, nonce, statements) {
+  const r = response?.response ?? {};
+  return { credential: String(response?.id ?? ""), nonce, statements,
+    response: { authenticatorData: r.authenticatorData, clientDataJSON: r.clientDataJSON, signature: r.signature, ...(r.userHandle ? { userHandle: r.userHandle } : {}) } };
+}
+
+/** The next identity document after `own`'s last: `fields` over what's in effect now. */
+async function nextDocument(own, fields) {
+  const { current } = own.state;
+  return encode({ v: 2, kind: "identity", seq: own.chain.length, prev: await fingerprintOf("identity", own.chain.at(-1).bytes),
+    origin: current.origin, passkeys: current.passkeys, recovery: current.recovery, hosting: current.hosting, ...fields });
+}
+
+/**
+ * Adds `entry` ({bytes, sig}) to the owner's identity if the chain still reads cleanly with it, and only if no one else
+ * added one meanwhile. Returns the identity as it reads now, or null.
+ */
+async function appendDocument(env, own, entry) {
+  const fp = await fingerprintOf("identity", entry.bytes);
+  const chain = [...own.chain, entry];
+  const { results } = await env.DB.prepare("SELECT fp, first_seen FROM identity_seen").all();
+  const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
+  const at = now();
+  const state = await readIdentity(chain, (f) => seen.get(f) ?? at, at);
+  if (!state || state.problem) return null;
+  const stored = JSON.stringify(chain.map(({ bytes, sig }) => ({ bytes: b64url(bytes), sig })));
+  const [updated] = await env.DB.batch([
+    env.DB.prepare("UPDATE own_identity SET chain = ? WHERE id = 1 AND json_array_length(chain) = ?").bind(stored, own.chain.length),
+    env.DB.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(fp, at),
+  ]);
+  return updated.meta.changes ? state : null;
+}
+
+/** The owner's passkeys on this site, as an identity document lists them. */
+async function sitePasskeys(env, url, owner) {
+  return passkeysOf(env, url, owner);
+}
+
+const waiting = (own) => own.state.pending
+  ? json({ error: `Your identity is already changing, until ${new Date(own.state.effectiveAt * 1000).toUTCString().slice(0, 16)}. Cancel that first, or wait.` }, 409)
+  : null;
+
+async function changeStart(env, url, owner, { change, credential, recovery }) {
+  const own = await ownIdentity(env.DB);
+  if (!own) return json({ error: "Set up signing first." }, 409);
+  const { current } = own.state;
+  let doc;
+  if (change === "cancel") {
+    if (!own.state.pending) return json({ error: "Nothing is waiting to change." }, 409);
+    if (own.state.pendingByRecovery) return json({ error: "That change was made with your recovery code, so only your recovery code can cancel it." }, 403);
+    doc = await nextDocument(own, { cancels: own.state.pendingFp });
+  } else {
+    const busy = waiting(own);
+    if (busy) return busy;
+    if (change === "allow") {
+      const mine = await sitePasskeys(env, url, owner);
+      const added = mine.filter((p) => !current.passkeys.some((c) => c.id === p.id));
+      if (!added.length) return json({ error: "Every passkey here already signs for you." }, 409);
+      doc = await nextDocument(own, { passkeys: [...current.passkeys, ...added] });
+    } else if (change === "remove") {
+      const left = current.passkeys.filter((p) => p.id !== credential);
+      if (left.length === current.passkeys.length) return json({ error: "That passkey doesn't sign for you." }, 404);
+      if (!left.length) return json({ error: "That's the only passkey that signs for you." }, 409);
+      doc = await nextDocument(own, { passkeys: left });
+    } else if (change === "recovery") {
+      if (!KEY_RE.test(recovery ?? "") || recovery === current.recovery) return json({ error: "That didn't work. Try again." }, 400);
+      doc = await nextDocument(own, { recovery });
+    } else {
+      return json({ error: "That didn't work. Try again." }, 400);
+    }
+  }
+  const nonce = randomToken();
+  return withChallenge(env, "change", nonce, json({ nonce, doc: b64url(doc), allow: current.passkeys.map((p) => p.id) }));
+}
+
+async function changeFinish(request, env, { doc: docText, response }) {
+  const nonce = await readChallenge(request, env, "change");
+  if (!nonce) return json({ error: "That took too long. Try again." }, 400);
+  const own = await ownIdentity(env.DB);
+  const bytes = typeof docText === "string" ? fromB64url(docText) : null;
+  if (!own || !bytes || !parseIdentity(bytes)) return json({ error: "That didn't work. Try again." }, 400);
+  const proof = proofFrom(response, nonce, [await fingerprintOf("identity", bytes)]);
+  if (!(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
+  const state = await appendDocument(env, own, { bytes, sig: { passkey: proof } });
+  if (!state) return json({ error: "Your passkey's signature didn't check, or something changed meanwhile. Try again." }, 400);
+  return json({ ok: true, effectiveAt: state.effectiveAt });
+}
+
+async function recoverStart(env, url, owner, { change }) {
+  const own = await ownIdentity(env.DB);
+  if (!own) return json({ error: "Set up signing first." }, 409);
+  let doc;
+  if (change === "cancel") {
+    if (!own.state.pending) return json({ error: "Nothing is waiting to change." }, 409);
+    doc = await nextDocument(own, { cancels: own.state.pendingFp });
+  } else if (change === "devices") {
+    const busy = waiting(own);
+    if (busy) return busy;
+    const mine = await sitePasskeys(env, url, owner);
+    const same = mine.length === own.state.current.passkeys.length && mine.every((p) => own.state.current.passkeys.some((c) => c.id === p.id));
+    if (!mine.length || same) return json({ error: "The passkeys here already sign for you." }, 409);
+    doc = await nextDocument(own, { passkeys: mine });
+  } else {
+    return json({ error: "That didn't work. Try again." }, 400);
+  }
+  return json({ doc: b64url(doc) });
+}
+
+async function recoverFinish(env, { doc: docText, signature }) {
+  const own = await ownIdentity(env.DB);
+  const bytes = typeof docText === "string" ? fromB64url(docText) : null;
+  if (!own || !bytes || !parseIdentity(bytes) || typeof signature !== "string") return json({ error: "That didn't work. Try again." }, 400);
+  const state = await appendDocument(env, own, { bytes, sig: { recovery: signature } });
+  if (!state) return json({ error: "That isn't your recovery code, or something changed meanwhile." }, 400);
+  return json({ ok: true, effectiveAt: state.effectiveAt });
+}
+
+// --- a new device that signs straight away --------------------------------------------------------------------------
+
+const TOKEN_RE = /\/_auth\/device\/([\w-]{20,100})$/;
+
+async function enrolStart(env, url, { link }) {
+  const own = await ownIdentity(env.DB);
+  const token = TOKEN_RE.exec(typeof link === "string" ? link : "")?.[1];
+  if (!own || !token) return json({ error: "That didn't work. Try again." }, 400);
+  const busy = waiting(own);
+  if (busy) return busy;
+  const found = await env.DB.prepare("SELECT 1 FROM device_links WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?")
+    .bind(await sha256Hex(token), now()).first();
+  if (!found) return json({ error: "That link has expired or been used." }, 404);
+  const statement = encode({ v: 2, kind: "enrol", person: own.person, token: b64url(await sha256(utf8(token))) });
+  const nonce = randomToken();
+  return withChallenge(env, "enrol", nonce, json({ nonce, statement: b64url(statement), allow: own.state.current.passkeys.map((p) => p.id) }));
+}
+
+async function enrolFinish(request, env, { statement: text, response }) {
+  const nonce = await readChallenge(request, env, "enrol");
+  const own = await ownIdentity(env.DB);
+  const statement = typeof text === "string" ? fromB64url(text) : null;
+  const enrol = statement && decode(statement);
+  if (!nonce || !own || !enrol || enrol.kind !== "enrol" || enrol.person !== own.person || typeof enrol.token !== "string") {
+    return json({ error: "That didn't work. Try again." }, 400);
+  }
+  const proof = proofFrom(response, nonce, [await fingerprintOf("enrol", statement)]);
+  const passkey = own.state.current.passkeys.find((p) => p.id === proof.credential);
+  if (!passkey || !(await checkPasskeyProof(proof, passkey, proof.statements[0])) || !(await spendChallenge(env, nonce))) {
+    return json({ error: "Your passkey's signature didn't check. Try again." }, 400);
+  }
+  // The statement names the token by its SHA-256 in base64url; the link is kept by the same hash in hex.
+  const hex = [...(fromB64url(enrol.token) ?? [])].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const done = await env.DB.prepare("UPDATE device_links SET enrolment = ? WHERE token_hash = ? AND used_at IS NULL")
+    .bind(JSON.stringify({ statement: text, proof }), hex).run();
+  return done.meta.changes ? json({ ok: true }) : json({ error: "That link has expired or been used." }, 404);
+}
+
+/** The enrolment the passkey this device signed in with came with, if it hasn't joined yet. */
+async function enrolmentOf(env, owner) {
+  if (!owner.session_credential) return null;
+  const row = await env.DB.prepare("SELECT id, public_key, enrolment FROM credentials WHERE id = ? AND user_id = ? AND enrolment IS NOT NULL")
+    .bind(owner.session_credential, owner.id).first();
+  try { return row ? { id: String(row.id), key: String(row.public_key), enrolment: JSON.parse(String(row.enrolment)) } : null; } catch { return null; }
+}
+
+async function joinStart(env, url, owner, { browserKey }) {
+  const own = await ownIdentity(env.DB);
+  const mine = await enrolmentOf(env, owner);
+  if (!own || !mine || !KEY_RE.test(browserKey ?? "")) return json({ error: "This device can't be added that way. Let it sign from a device that already does." }, 409);
+  const busy = waiting(own);
+  if (busy) return busy;
+  if (own.state.current.passkeys.some((p) => p.id === mine.id)) return json({ error: "This device already signs for you." }, 409);
+  const doc = await nextDocument(own, { passkeys: [...own.state.current.passkeys, { id: mine.id, key: mine.key, origin: url.origin }] });
+  const delegation = encode({ v: 2, kind: "delegation", person: own.person, key: browserKey, origin: url.origin, expires: now() + DELEGATION_SECONDS });
+  const nonce = randomToken();
+  return withChallenge(env, "join", nonce, json({ nonce, doc: b64url(doc), delegation: b64url(delegation), allow: [mine.id] }));
+}
+
+async function joinFinish(request, env, url, owner, { doc: docText, delegation: delegationText, token, response }) {
+  const nonce = await readChallenge(request, env, "join");
+  const own = await ownIdentity(env.DB);
+  const mine = await enrolmentOf(env, owner);
+  const bytes = typeof docText === "string" ? fromB64url(docText) : null;
+  const delegation = typeof delegationText === "string" ? fromB64url(delegationText) : null;
+  if (!nonce || !own || !mine || !bytes || !delegation || typeof token !== "string") return json({ error: "That didn't work. Try again." }, 400);
+  const statements = [await fingerprintOf("identity", bytes), await fingerprintOf("delegation", delegation)];
+  const proof = proofFrom(response, nonce, statements);
+  if (proof.credential !== mine.id || !(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
+  const state = await appendDocument(env, own, { bytes, sig: { enrolment: { ...mine.enrolment, token }, passkey: proof } });
+  const key = state && (await checkDelegation(delegation, proof, state, now()));
+  if (!state || !key) return json({ error: "That didn't check. Let this device sign from one that already does." }, 400);
+  const { expires } = decode(delegation);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE credentials SET enrolment = NULL WHERE id = ?").bind(mine.id),
+    env.DB.prepare(`INSERT OR REPLACE INTO delegations (key, bytes, proof, credential_id, session_hash, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(key, b64url(delegation), JSON.stringify(proof), mine.id, owner.session_hash ?? null, expires, now()),
+  ]);
+  return json({ person: own.person, expires });
+}
+
+// --- for pages ------------------------------------------------------------------------------------------------------
+
+/**
+ * The owner's identity for Your devices and Home: which passkeys sign for them, and any change waiting (what it does,
+ * when it takes effect, and whether only the recovery code can cancel it). null before signing is set up.
+ */
+export async function identitySummary(db) {
+  const own = await ownIdentity(db);
+  if (!own) return null;
+  const { current, pending, effectiveAt, pendingByRecovery } = own.state;
+  const ids = (d) => d.passkeys.map((p) => p.id);
+  return {
+    signing: ids(current),
+    pending: pending && {
+      added: ids(pending).filter((id) => !ids(current).includes(id)),
+      removed: ids(current).filter((id) => !ids(pending).includes(id)),
+      recovery: pending.recovery !== current.recovery,
+      byRecovery: pendingByRecovery,
+      at: effectiveAt,
+    },
+  };
 }

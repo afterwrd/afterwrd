@@ -1,4 +1,5 @@
 // Home, Memories and Add to home screen. Views only draw: they read nothing and change nothing.
+import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
 
 import { icon } from "./nav.js";
@@ -38,7 +39,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false }) {
+export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
   const stream = [
     ...own.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
@@ -83,6 +84,8 @@ export function homePage(ctx, { own, feed, onThisDay, friends, newDevices = { de
       You got back into your site on ${fmtDate(recovered)}, without a passkey. Every other device was signed out and its
       passkey removed, so a lost one can't sign in. To use another of your phones or computers again, add it in
       <a href="/_admin">Your devices</a>. <button class="link">Done</button></form>`}
+    ${identityChange && html`<p class="notice alert" id="identity-change">Your identity is changing: ${identityChangeWords(identityChange)},
+      on ${fmtDate(identityChange.at)}. Not you? <a href="/_admin#identity-change">Cancel it in Your devices</a>.</p>`}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">
       ${newDevices.devices.length === 1
         ? html`A new device was added to your site on ${fmtDate(newDevices.devices[0].created_at)}.`

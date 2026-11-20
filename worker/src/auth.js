@@ -148,10 +148,10 @@ async function registerVerify(request, env, url, { token, response }) {
   const recovery = (await recovering(env.DB))?.link === link.token_hash;
   const [, , count] = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO credentials (id, user_id, public_key, counter, transports, created_at, last_used_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO credentials (id, user_id, public_key, counter, transports, created_at, last_used_at, enrolment)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).bind(credential.id, link.user_id, toBase64Url(credential.publicKey), credential.counter,
-      JSON.stringify(credential.transports ?? []), now(), now()),
+      JSON.stringify(credential.transports ?? []), now(), now(), link.enrolment ?? null),
     // The first passkey ends setup: any other unused link for the owner (setup can be posted more than once) goes.
     env.DB.prepare(`DELETE FROM device_links WHERE user_id = ?1 AND used_at IS NULL
       AND (SELECT COUNT(*) FROM credentials WHERE user_id = ?1) = 1`).bind(link.user_id),
@@ -160,7 +160,9 @@ async function registerVerify(request, env, url, { token, response }) {
   ]);
   // The first passkey is the end of a new site's setup: the page goes on to its permissions (setupPermissionsPage).
   const first = /** @type {{ n: number } | undefined} */ (count.results?.[0])?.n === 1;
-  return startSession(env, link.user_id, json({ ok: true, first }), credential.id);
+  // enrol: a device that signs for the owner allowed this link (keys.js), so this device's page goes on to join, and
+  // can sign straight away.
+  return startSession(env, link.user_id, json({ ok: true, first, enrol: Boolean(link.enrolment) && !first }), credential.id);
 }
 
 // --- sign-in ---------------------------------------------------------------
@@ -309,7 +311,7 @@ async function verify(env, text, mac) {
 async function findDeviceLink(env, token) {
   if (!token) return null;
   return env.DB.prepare(
-    `SELECT l.token_hash, u.id AS user_id, u.name FROM device_links l JOIN users u ON u.id = l.user_id
+    `SELECT l.token_hash, l.enrolment, u.id AS user_id, u.name FROM device_links l JOIN users u ON u.id = l.user_id
      WHERE l.token_hash = ? AND l.used_at IS NULL AND l.expires_at > ?`,
   ).bind(await sha256(String(token)), now()).first();
 }

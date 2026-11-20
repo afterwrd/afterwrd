@@ -2,7 +2,7 @@
 // another, signing out everywhere), and every other owner page is routed from here. Only the owner signs in, so
 // no one else needs a way in: friends see each other from their own sites (connect.js).
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
-import { handleKeys } from "./keys.js";
+import { handleKeys, identitySummary } from "./keys.js";
 import { forgetDeviceById, listDevices, pushDevicesSeen } from "./push.js";
 import { handleCheckAdmin } from "./checks.js";
 import { handleConnections } from "./connect.js";
@@ -179,5 +179,6 @@ async function devicesData(db, owner) {
     db.prepare("SELECT COUNT(*) AS n FROM device_links WHERE user_id = ? AND used_at IS NULL AND expires_at > ?").bind(owner.id, now()),
     db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?").bind(owner.id, now()),
   ]);
-  return { owner: owner.name, passkeys, openLinks: links.results[0].n, sessions: sessions.results[0].n, notifying: await listDevices(db) };
+  return { owner: owner.name, passkeys, openLinks: links.results[0].n, sessions: sessions.results[0].n, notifying: await listDevices(db),
+    identity: await identitySummary(db), thisCredential: owner.session_credential ?? null };
 }

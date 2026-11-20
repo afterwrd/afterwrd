@@ -38,6 +38,7 @@ import m0023 from "../migrations/0023_feed_copies.sql";
 import m0024 from "../migrations/0024_group_counts.js";
 import m0025 from "../migrations/0025_feed_changed.js";
 import m0026 from "../migrations/0026_keys.sql";
+import m0027 from "../migrations/0027_enrolment.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -68,6 +69,7 @@ const MIGRATIONS = [
   ["0024_group_counts", m0024],
   ["0025_feed_changed", m0025],
   ["0026_keys.sql", m0026],
+  ["0027_enrolment.sql", m0027],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

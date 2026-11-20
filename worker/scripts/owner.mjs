@@ -24,8 +24,18 @@ const siteUrl = (option("--url") ?? process.env.AFTERWRD_URL ?? (local ? "http:/
 const [name] = args;
 const now = Math.floor(Date.now() / 1000);
 // Tests only: a local site's database, in its object (src/sqlite.js), or (self-hosted) the site object's file.
-const objectDatabase = local || process.env.AFTERWRD_SELFHOST ? (await import("../test/e2e/helpers.mjs")).objectFile(process.env.AFTERWRD_SELFHOST
-  ? join(process.env.AFTERWRD_SELFHOST, "outbox") : join(process.cwd(), ".wrangler", "state", "v3", "do")) : null;
+const findObjectDatabase = async () => (await import("../test/e2e/helpers.mjs")).objectFile(process.env.AFTERWRD_SELFHOST
+  ? join(process.env.AFTERWRD_SELFHOST, "outbox") : join(process.cwd(), ".wrangler", "state", "v3", "do"));
+let objectDatabase = local || process.env.AFTERWRD_SELFHOST ? await findObjectDatabase() : null;
+// A new local site makes its database on its first request, so open it once here rather than fail on a missing table.
+if (local && !process.env.AFTERWRD_SELFHOST && !objectDatabase) {
+  const answer = await fetch(`${siteUrl}/_auth/login`).catch(() => null);
+  if (!answer) fail(`Your site isn't running at ${siteUrl}. Start it with \`npm run dev\` (in worker), then run this again.`);
+  for (let i = 0; i < 20 && !objectDatabase; i++) {
+    objectDatabase = await findObjectDatabase();
+    if (!objectDatabase) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
 if (!local && !process.env.AFTERWRD_SELFHOST) {
   fail("A deployed site keeps its database in its own object now, which this can't reach. To add a device, use Your devices "
     + "on a phone or computer that's signed in; to get back in without one, use the sign-in page's way back in through Cloudflare.");

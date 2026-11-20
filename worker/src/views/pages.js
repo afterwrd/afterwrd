@@ -193,9 +193,12 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
     const credential = await navigator.credentials.create({ publicKey: {
       ...options, challenge: dec(options.challenge), user: { ...options.user, id: dec(options.user.id) },
       excludeCredentials: ids(options.excludeCredentials) } });
-    const { first } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
+    const { first, enrol } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
     // A site's first passkey: next, the recovery code and signing (keysPage), which then carries on as afterPasskey.
     if (first) return location.replace("/_admin/keys" + (fromSetup ? "#setup" : ""));
+    // A device the owner allowed to sign when they made the link: one more prompt adds it (joinPage). The token goes
+    // after the #, so it reaches that page but no server log.
+    if (enrol) return location.replace("/_admin/keys/join#" + token);
     afterPasskey(false);
   });`);
 }
@@ -253,6 +256,34 @@ what it was later.</p>
       if (fromSetup) afterPasskey(true); else location.replace(next);
     });
   })().catch((e) => { document.getElementById("error").textContent = "This browser can't set up signing: " + e.message; });`);
+}
+
+/**
+ * A new device joining the owner's identity (keys.js), straight after making its passkey from a link a signing device
+ * allowed: one prompt signs the identity document adding this passkey, and this browser's key, together.
+ */
+export function joinPage() {
+  return page("One more step", `
+<h1>One more step</h1>
+<p>Let this device sign for you, so what you post and comment from it is yours: one more face, fingerprint or PIN.</p>
+<button id="go">Continue</button>
+<p id="error" role="alert"></p>
+<p class="small"><a href="/">Not now</a> (it can still sign in; let it sign later from Your devices)</p>`, `
+  const token = location.hash.slice(1);
+  history.replaceState(null, "", "/_admin/keys/join");
+  run(document.getElementById("go"), async () => {
+    const [S, keys] = await signing();
+    const key = await keys.newBrowserKey();
+    const start = await post("/_admin/keys/join/start", { browserKey: key.publicKey });
+    const doc = S.fromB64url(start.doc), delegation = S.fromB64url(start.delegation);
+    if (S.decode(delegation)?.key !== key.publicKey) throw new Error("Something didn't match. Try again.");
+    const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("identity", doc), await S.fingerprintOf("delegation", delegation)]);
+    const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
+      allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
+    const done = await post("/_admin/keys/join/finish", { doc: start.doc, delegation: start.delegation, token, response: credentialJSON(credential) });
+    await keys.keyAllowed(key, done.person, done.expires);
+    afterPasskey(false);
+  });`);
 }
 
 /** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */

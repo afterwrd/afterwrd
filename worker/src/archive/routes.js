@@ -16,6 +16,7 @@ import * as groups from "../membership.js";
 import { ownerName } from "../peers.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
+import { identitySummary } from "../keys.js";
 import { recoveredHere } from "../recover.js";
 import { newPushDevices, pushKey } from "../push.js";
 import { checkRequests, recentChecks } from "../checks.js";
@@ -622,7 +623,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   const [own, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity] = await Promise.all([
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
     loadFeed(db, ctx.url.origin, ctx.env),
     onThisDay(ctx, 2),
@@ -643,15 +644,18 @@ async function home(ctx, params) {
     selfHosted(ctx.env) ? null : lookAfterFacts(db),
     // The Facebook archive was too big to move into the site's own object (sitecopy.js): import it again.
     first(db, "SELECT 1 AS dropped FROM settings WHERE key = 'archive_dropped'").then((row) => Boolean(row)),
+    // A change to the owner's identity waiting to take effect (keys.js): shown until it does, or is cancelled.
+    identitySummary(db),
   ]);
+  const identityChange = identity?.pending ?? null;
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange };
   }
   return {
     own, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or

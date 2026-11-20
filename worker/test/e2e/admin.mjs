@@ -43,6 +43,7 @@ const passkeys = (page) => page.$$eval(".devices li", (l) => l.map((li) => ({
 
 // The owner joins via the terminal, as on a brand-new site.
 const ownerName = `Owner ${Date.now()}`;
+const newRecoveryCodeLike = () => Array.from({ length: 5 }, () => Array.from({ length: 5 }, () => "0123456789ABCDEFGHJKMNPQRSTVWXYZ"[Math.floor(Math.random() * 32)]).join("")).join("-");
 const phone = await device();
 await register(phone, newOwner(ownerName));
 check("a site's first passkey goes on to its recovery code", new URL(phone.url()).pathname === "/_admin/keys");
@@ -113,12 +114,23 @@ await phone.click("#new-link");
 await phone.waitForSelector("#link:not([hidden])");
 const link = await phone.$eval("#link-url", (i) => i.value);
 check("Add a device shows a one-time link", /\/_auth\/device\/[\w-]{40,}$/.test(link), link.slice(0, 60) + "…");
+// On a device that signs, one prompt there lets the new device sign straight away (keys.js enrolment).
+await phone.waitForFunction(() => document.getElementById("link-note").textContent.trim(), { timeout: 15_000 });
+check("…and, on a device that signs, lets the new one sign straight away", (await phone.$eval("#link-note", (p) => p.textContent))
+  === "It can sign for you as soon as it's added.", await phone.$eval("#link-note", (p) => p.textContent));
 const laptop = await device();
 await laptop.goto(link);
 check("the link says it's adding a device", (await laptop.title()).startsWith("Add this device") && (await laptop.$eval("main, body", (m) => m.textContent)).includes("Add this phone or computer"));
 await Promise.all([laptop.waitForNavigation(), laptop.click("#go")]);
+check("after its passkey, the laptop is asked once more, to sign for the owner", new URL(laptop.url()).pathname === "/_admin/keys/join"
+  && !new URL(laptop.url()).hash);
+await Promise.all([laptop.waitForNavigation({ timeout: 30_000 }), laptop.click("#go")]);
 check("the laptop is signed in as the owner", (await navLabels(laptop)).includes("Your devices"), await navLabels(laptop));
-check("…but its browser can't sign for the owner yet (its passkey isn't in the identity)", sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 1);
+const docs = () => JSON.parse(sql("SELECT chain FROM own_identity")[0].chain).map((d) => JSON.parse(Buffer.from(d.bytes, "base64url").toString()));
+const laptopBrowserKey = await browserKeyOf(laptop);
+check("…and signs for them: its passkey added to the identity, its browser allowed", docs().length === 2 && docs()[1].passkeys.length === 2
+  && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 2 && laptopBrowserKey?.person === identity.person && laptopBrowserKey.extractable === false,
+  JSON.stringify(docs().map((d) => d.passkeys.length)));
 const reuse = await (await device()).goto(link);
 check("the link only works once", reuse.status() === 404);
 
@@ -146,6 +158,62 @@ const phoneCookie = (await phone.cookies()).find((c) => c.name === "__Host-sessi
 await fetch(`${BASE}/_admin/devices/delete-passkey`, { method: "POST", headers: { Cookie: `__Host-session=${phoneCookie}`, Origin: BASE,
   "Content-Type": "application/json" }, body: JSON.stringify({ credential: spareKey }) });
 check("the laptop, no longer new, has nothing to hear", (await alerts(laptop)).length === 0);
+
+// Changing the owner's identity from Your devices (keys.js). A device added with a link made by API, without a prompt
+// from a device that signs, can sign in but not sign; "Let every passkey here sign for you" adds it, at once.
+const desk = await device();
+await register(desk, (await (await fromLaptop("/_admin/devices/link")).json()).link);
+check("a device added without a signing device's say-so signs in, but can't sign", new URL(desk.url()).pathname === "/"
+  && docs().length === 2 && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 2);
+const deskKey = sql("SELECT id FROM credentials ORDER BY rowid DESC LIMIT 1")[0].id;
+const statusOf = async (page, id) => { await page.goto(`${BASE}/_admin`); return page.$eval(`li[data-credential="${id}"] .meta`, (m) => m.textContent).catch(() => ""); };
+check("Your devices says so", (await statusOf(phone, deskKey)).includes("can't sign for you yet"), await statusOf(phone, deskKey));
+const reloaded = (page) => page.waitForNavigation({ timeout: 30_000 });
+await Promise.all([reloaded(phone), phone.click("button[data-sign=allow]")]);
+check("…and \"Let every passkey here sign for you\" adds it, at once", docs().length === 3 && docs()[2].passkeys.some((p) => p.id === deskKey)
+  && (await statusOf(phone, deskKey)).includes("signs for you"));
+// Removing a passkey that signs: it stops signing in at once, and stops signing after 7 days, which Home says.
+await Promise.all([reloaded(phone), phone.click(`button[data-action=delete-passkey][data-credential="${deskKey}"]`)]);
+await phone.goto(`${BASE}/_admin`);
+const waitingCard = async (page) => page.$eval("#identity-change", (c) => c.textContent.replace(/\s+/g, " ").trim()).catch(() => "");
+check("removing a passkey that signs waits 7 days, and says so", docs().length === 4 && /Waiting until .* 1 passkey will stop signing for you/.test(await waitingCard(phone))
+  && sql("SELECT COUNT(*) AS n FROM credentials WHERE id = '" + deskKey + "'")[0].n === 0, await waitingCard(phone));
+check("…and so does Home, on every device", (await alerts(laptop)).some((t) => t.startsWith("Your identity is changing: 1 passkey will stop signing for you")),
+  (await alerts(laptop)).join(" | "));
+await phone.goto(`${BASE}/_admin`);
+await Promise.all([reloaded(phone), phone.click("button[data-sign=cancel]")]);
+check("a device that signs can cancel it", docs().length === 5 && docs()[4].cancels && !(await waitingCard(phone)) && (await alerts(phone)).every((t) => !t.startsWith("Your identity")));
+// Lost every device that signs: the recovery code makes the passkeys here the ones that sign, after 7 days; only the
+// code can cancel that. (Here the desk's passkey, gone from the site, drops out.)
+const useCode = async (page, code, waitFor = () => reloaded(page)) => {
+  await page.goto(`${BASE}/_admin`);
+  await page.click("#recovery summary");
+  await page.type("#recovery-code", code);
+  await Promise.all([waitFor(), page.click("button[data-recovery]")]);
+};
+await useCode(laptop, newRecoveryCodeLike(), () => laptop.waitForFunction(() => document.getElementById("error").textContent.trim(), { timeout: 15_000 }));
+check("a recovery code that isn't the owner's is refused", (await laptop.$eval("#error", (e) => e.textContent)).includes("isn't your recovery code") && docs().length === 5,
+  await laptop.$eval("#error", (e) => e.textContent));
+await useCode(laptop, recoveryCode.toLowerCase().replace(/-/g, " "));
+check("the owner's recovery code (however it's typed) makes the passkeys here the ones that sign, after 7 days",
+  docs().length === 6 && docs()[5].passkeys.length === 2 && /1 passkey will stop signing for you \(asked with your recovery code\)/.test(await waitingCard(laptop)),
+  await waitingCard(laptop));
+const changeApi = (page) => page.evaluate(async () => (await fetch("/_admin/keys/change/start", { method: "POST",
+  headers: { "Content-Type": "application/json" }, body: JSON.stringify({ change: "cancel" }) })).status);
+check("…which a passkey can't cancel", !(await phone.$("button[data-sign=cancel]")) && (await changeApi(phone)) === 403);
+await useCode(phone, recoveryCode);
+check("…but the recovery code can", docs().length === 7 && !(await waitingCard(phone)));
+// A new recovery code: shown once, kept, then the change waits 7 days (cancelled here, to put things back).
+await phone.goto(`${BASE}/_admin`);
+await phone.click("#recovery summary");
+await phone.click("button[data-sign=new-code]");
+const newCode = await phone.$eval("#new-code-text", (c) => c.textContent);
+await Promise.all([reloaded(phone), phone.click("button[data-sign=new-code-kept]")]);
+check("a new recovery code waits 7 days too", /^([0-9A-Z]{5}-){4}[0-9A-Z]{5}$/.test(newCode) && docs().length === 8
+  && docs()[7].recovery !== docs()[6].recovery && /your recovery code will change/.test(await waitingCard(phone)), await waitingCard(phone));
+await phone.goto(`${BASE}/_admin`);
+await Promise.all([reloaded(phone), phone.click("button[data-sign=cancel]")]);
+check("…and can be cancelled", docs().length === 9 && !(await waitingCard(phone)));
 
 // A release that fixes a security problem: Home says so, and so does the Update page. (A made-up release, saved as
 // if the owner's site had just checked GitHub.)
@@ -207,6 +275,7 @@ const tablet = await device();
 await phone.goto(`${BASE}/_admin`);
 await phone.click("#new-link");
 await phone.waitForSelector("#link:not([hidden])");
+await phone.waitForFunction(() => document.getElementById("link-note").textContent.trim(), { timeout: 15_000 });
 await register(tablet, await phone.$eval("#link-url", (i) => i.value));
 await phone.goto(`${BASE}/_admin`);
 await Promise.all([phone.waitForNavigation(), phone.click("button[data-action=sign-out]")]);

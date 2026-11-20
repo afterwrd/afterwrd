@@ -6,7 +6,28 @@ function day(ts) {
   return ts ? new Date(ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
 }
 
-export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = [], me = null }) {
+/** What a change to the owner's identity that's waiting does, in words (keys.js identitySummary). */
+export function identityChange(pending) {
+  const n = (count, one) => `${count} ${one}${count === 1 ? "" : "s"}`;
+  const parts = [
+    pending.removed.length && `${n(pending.removed.length, "passkey")} will stop signing for you`,
+    pending.added.length && `${n(pending.added.length, "passkey")} will start signing for you`,
+    pending.recovery && "your recovery code will change",
+  ].filter(Boolean);
+  return (parts.join(", and ") || "your identity will change") + (pending.byRecovery ? " (asked with your recovery code)" : "");
+}
+
+export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = [], me = null, identity = null, thisCredential = null }) {
+  const signs = (id) => Boolean(identity?.signing.includes(id));
+  const thisSigns = signs(thisCredential);
+  const pending = identity?.pending ?? null;
+  const status = (k) => {
+    if (!identity) return "";
+    if (pending?.removed.includes(k.id)) return `, stops signing for you on ${day(pending.at)}`;
+    if (pending?.added.includes(k.id)) return `, starts signing for you on ${day(pending.at)}`;
+    return signs(k.id) ? ", signs for you" : ", can sign in, but can't sign for you yet";
+  };
+  const letItSign = identity && thisSigns && !pending && passkeys.some((k) => !signs(k.id));
   return `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -26,6 +47,9 @@ ${FAVICON}
   .row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 1.25rem; }
   #error { color: var(--danger); font-weight: 700; }
   #error:empty { display: none; }
+  .code { font: 600 1.2rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.04em; word-break: break-all; margin: 0; }
+  #recovery-form { display: flex; flex-direction: column; gap: 0.6rem; align-items: flex-start; }
+  #recovery-form input[type=text] { width: 100%; font: inherit; padding: 0.55rem 0.95rem; border: 1px solid var(--border); border-radius: 999px; background: var(--sunken); color: var(--text); }
 </style>
 </head>
 <body>
@@ -40,15 +64,38 @@ link here and open it on that device: it works once, for an hour, and gives owne
   <strong>Open this on your other device</strong>
   <input id="link-url" readonly aria-label="Link to add a device">
   <div class="row"><button class="chip primary" id="copy">Copy link</button><button class="chip" id="share" hidden>Share…</button></div>
+  <p class="meta" id="link-note"></p>
 </section>
 <ul class="devices">
-  ${passkeys.map((k, i) => `<li class="card"><span><strong>Passkey ${i + 1}</strong><span class="meta"> · added ${day(k.created_at)}${k.last_used_at ? `, last used ${day(k.last_used_at)}` : ""}</span></span>
+  ${passkeys.map((k, i) => `<li class="card" data-credential="${escape(k.id)}"><span><strong>Passkey ${i + 1}</strong>${k.id === thisCredential ? " (this device)" : ""}<span class="meta"> · added ${day(k.created_at)}${k.last_used_at ? `, last used ${day(k.last_used_at)}` : ""}${status(k)}</span></span>
     <button class="chip danger" data-action="delete-passkey" data-credential="${escape(k.id)}" ${passkeys.length === 1 ? 'disabled title="Your only passkey"' : ""}>Remove</button></li>`).join("")}
 </ul>
+${letItSign ? '<div class="row"><button class="chip primary" data-sign="allow">Let every passkey here sign for you</button></div>' : ""}
 <div class="row">
   ${openLinks ? `<button class="chip" data-action="cancel-links">Cancel ${openLinks} unused link${openLinks === 1 ? "" : "s"}</button>` : ""}
   ${sessions ? '<button class="chip" data-action="sign-out">Sign out everywhere</button>' : ""}
 </div>
+<h2>Signing</h2>
+${!identity ? `<p class="meta">What you post and comment isn't signed yet. <a href="/_admin/keys?next=/_admin">Set up signing</a>:
+it takes your recovery code and one face, fingerprint or PIN.</p>` : `
+<p class="meta">What you post and comment is signed on the devices above that sign for you, so nobody can change your
+words. ${thisSigns ? "This device signs for you." : "This device can't sign for you yet: let it from one that does, or use your recovery code below."}</p>
+${pending ? `<section class="card" id="identity-change"><strong>Waiting until ${day(pending.at)}</strong>
+  <p>${escape(identityChange(pending))}. If that wasn't you, cancel it.</p>
+  <div class="row">${!pending.byRecovery && thisSigns ? '<button class="chip danger" data-sign="cancel">Cancel it</button>' : ""}
+  <span class="meta">${pending.byRecovery ? "Only your recovery code can cancel this:" : "Or with your recovery code:"} below.</span></div></section>` : ""}
+<details class="card" id="recovery"><summary><strong>Your recovery code</strong></summary>
+  ${thisSigns && !pending ? `<p class="meta">Lost it, or think someone else has seen it? Make a new one. Your old code keeps working for 7 days.</p>
+  <div class="row"><button class="chip" data-sign="new-code">Make a new recovery code</button></div>
+  <div id="new-code" hidden><p class="code" id="new-code-text"></p>
+    <p class="meta">Write it down, or keep it in your password manager. Your site doesn't keep it.</p>
+    <div class="row"><button class="chip primary" data-sign="new-code-kept">I've kept it: use this code</button></div></div>` : ""}
+  <form id="recovery-form"><p class="meta">${pending
+    ? "Type your recovery code to cancel the change that's waiting."
+    : "Lost every device that signs for you? Type your recovery code to make the passkeys here the ones that sign for you. It takes effect after 7 days, and your other devices are told, in case it isn't you."}</p>
+    <input type="text" id="recovery-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX" aria-label="Recovery code">
+    <button class="chip" data-recovery="${pending ? "cancel" : "devices"}">${pending ? "Cancel the change" : "Use my recovery code"}</button></form>
+</details>`}
 <h2>Notifications about events and mentions</h2>
 <p class="meta">The phones and computers that tell you when a friend invites you to an event, one you haven't said no
 to changes, or someone mentions you (unless that device has mentions turned off). Turn one on in
@@ -74,6 +121,8 @@ ${notifying.length ? `<ul class="devices" id="notifying">
       linkUrl.value = (await post("/_admin/devices/link")).link;
       document.getElementById("link").hidden = false;
       linkUrl.select();
+      // On a device that signs: one prompt allows the new device to sign straight away (the module below).
+      if (window.afterwrdSigning) document.getElementById("link-note").textContent = await window.afterwrdSigning.enrol(linkUrl.value);
     } catch (err) { error.textContent = err.message; }
   });
   const confirmations = {
@@ -86,6 +135,8 @@ ${notifying.length ? `<ul class="devices" id="notifying">
     const ask = confirmations[button.dataset.action];
     if (ask && !(await askFirst(ask, { ok: button.dataset.action === "sign-out" ? "Sign out" : "Remove" }))) return;
     try {
+      // A passkey that signs for the owner stops signing too, after 7 days (a signed change: the module below).
+      if (button.dataset.action === "delete-passkey" && window.afterwrdSigning) await window.afterwrdSigning.removing(button.dataset.credential);
       await post("/_admin/devices/" + button.dataset.action, { credential: button.dataset.credential });
       location.assign(button.dataset.action === "sign-out" ? "/_auth/login" : "/_admin");
     } catch (err) { error.textContent = err.message; }
@@ -101,6 +152,71 @@ ${notifying.length ? `<ul class="devices" id="notifying">
     share.addEventListener("click", () => navigator.share({ title: "Add a device to afterwrd", url: linkUrl.value }).catch(() => {}));
   }
 </script>
+${identity ? `<script type="application/json" id="signing-data">${JSON.stringify({ identity, thisSigns }).replace(/</g, "\\u003c")}</script>
+<script type="module">
+  // Changing the owner's identity (keys.js): a passkey that signs for them, or their recovery code, signs each change.
+  import * as S from ${JSON.stringify(asset("/static/signed.js"))};
+  import { passkeySigns } from ${JSON.stringify(asset("/static/passkey.js"))};
+  const { identity, thisSigns } = JSON.parse(document.getElementById("signing-data").textContent);
+  const error = document.getElementById("error");
+  async function post(path, body) {
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Something went wrong.");
+    return data;
+  }
+  async function change(body) {
+    const start = await post("/_admin/keys/change/start", body);
+    const response = await passkeySigns(start.nonce, [await S.fingerprintOf("identity", S.fromB64url(start.doc))], start.allow);
+    return post("/_admin/keys/change/finish", { doc: start.doc, response });
+  }
+  const cancelled = (e) => e?.name === "NotAllowedError";
+  window.afterwrdSigning = {
+    /** Lets the device a new link adds sign straight away; returns what to say under the link. */
+    async enrol(link) {
+      if (!thisSigns || identity.pending) return "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added.";
+      try {
+        const start = await post("/_admin/keys/enrol/start", { link });
+        const response = await passkeySigns(start.nonce, [await S.fingerprintOf("enrol", S.fromB64url(start.statement))], start.allow);
+        await post("/_admin/keys/enrol/finish", { statement: start.statement, response });
+        return "It can sign for you as soon as it's added.";
+      } catch (e) {
+        return cancelled(e) ? "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added." : e.message;
+      }
+    },
+    /** Before a passkey is removed from signing in: if it signs for the owner, it stops, after 7 days. */
+    async removing(credential) {
+      if (thisSigns && !identity.pending && identity.signing.includes(credential)) await change({ change: "remove", credential });
+    },
+  };
+  let newCode = null;
+  document.querySelector("main").addEventListener("click", async (e) => {
+    const button = e.target.closest("button[data-sign], button[data-recovery]");
+    if (!button) return;
+    e.preventDefault();
+    error.textContent = "";
+    try {
+      if (button.dataset.sign === "new-code") {
+        newCode = S.newRecoveryCode();
+        document.getElementById("new-code-text").textContent = newCode;
+        document.getElementById("new-code").hidden = false;
+        return;
+      }
+      if (button.dataset.sign === "new-code-kept") {
+        await change({ change: "recovery", recovery: (await S.recoveryKey(newCode)).publicKey });
+      } else if (button.dataset.sign) {
+        await change({ change: button.dataset.sign });
+      } else {
+        const key = await S.recoveryKey(document.getElementById("recovery-code").value);
+        if (!key) throw new Error("That isn't a recovery code: five groups of five letters and numbers.");
+        const start = await post("/_admin/keys/recover/start", { change: button.dataset.recovery });
+        const signature = await S.signAs("identity", key.privateKey, S.fromB64url(start.doc));
+        await post("/_admin/keys/recover/finish", { doc: start.doc, signature });
+      }
+      location.reload();
+    } catch (err) { error.textContent = cancelled(err) ? "Cancelled." : err.message; }
+  });
+</script>` : ""}
 </body>
 </html>`;
 }
