@@ -29,6 +29,7 @@ import { html, json, now, pageData, randomToken, Refusal, sha256, withoutKeys } 
 import { headerMe } from "./photos.js";
 import { confirmPage, connectionsMessage, connectionsPage, introducedPage, introducePage, togetherPage } from "./views/connections.js";
 import { rateWindow } from "./limits.js";
+import { friendPerson } from "./calls.js";
 
 // A friend link lasts 30 days, enough for someone new to set up their own site first (and wait for Facebook's
 // download, if they want it). It works once, and only asks: nothing is shared until its owner approves.
@@ -407,7 +408,7 @@ export async function decideRequest(env, id, approving) {
   const db = env.DB;
   const connection = await db.prepare("SELECT * FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NULL")
     .bind(id).first();
-  if (connection && approving) await approve(db, connection);
+  if (connection && approving) await approve(env, connection);
   else if (connection) {
     await callSite(connection.origin, "/_peer/disconnect", { key: connection.their_key, body: {} }).catch(() => {});
     await db.batch([
@@ -497,6 +498,9 @@ async function handshake(env, url, origin, path, extra = {}) {
         .bind(name, reply.key, now(), now(), origin),
       db.prepare("DELETE FROM declined_asks WHERE origin = ?").bind(origin),
     ]);
+    // Their identity (afterwrd 2), which their signed posts are checked against and mentions name them by.
+    const made = await db.prepare("SELECT * FROM connections WHERE origin = ?").bind(origin).first();
+    if (made) await friendPerson(env, made).catch(() => null);
     return { name };
   } catch (error) {
     await db.prepare("DELETE FROM connections WHERE origin = ? AND connected_at IS NULL").bind(origin).run();
@@ -504,8 +508,9 @@ async function handshake(env, url, origin, path, extra = {}) {
   }
 }
 
-/** Approves someone's request: they're friends now. */
-async function approve(db, connection) {
+/** Approves someone's request: they're friends now, tied to their identity if their site says it (calls.js). */
+async function approve(env, connection) {
+  const db = env.DB;
   await db.batch([
     db.prepare("UPDATE connections SET approved_at = ? WHERE id = ?").bind(now(), connection.id),
     db.prepare("DELETE FROM introductions WHERE origin = ?").bind(connection.origin),
@@ -513,6 +518,7 @@ async function approve(db, connection) {
     ...(connection.invited_as ? [db.prepare("INSERT OR REPLACE INTO friend_links (connection_id, person_name, created_at) VALUES (?, ?, ?)")
       .bind(connection.id, connection.invited_as, now())] : []),
   ]);
+  await friendPerson(env, connection).catch(() => null);
 }
 
 /**
@@ -527,7 +533,7 @@ export async function askToBeFriends(env, here, { origin: asked, group: groupId 
   if (!origin || origin === url.origin) throw new Refusal("That isn't someone to ask.");
   const theirs = await db.prepare("SELECT * FROM connections WHERE origin = ? AND connected_at IS NOT NULL").bind(origin).first();
   if (theirs?.invited_as && !theirs.approved_at) return { decideOnFriends: true };
-  if (theirs && !theirs.approved_at) await approve(db, theirs);
+  if (theirs && !theirs.approved_at) await approve(env, theirs);
   if (theirs) return {};
   let via;
   let name = host(origin);

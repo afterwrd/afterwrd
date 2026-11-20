@@ -309,7 +309,8 @@ export const feed = (items, render, empty) =>
 /** The owner's box for a new post, top of Posts. compose.js does the work; without it, it does nothing. */
 /** Write a post, with photos. In a group, `action` is where it goes, and `max` how many photos it takes. */
 export function composer({ action = null, max = null, placeholder = "Write something, or add photos" } = {}) {
-  return html`<form class="card composer" id="composer" ${action && html`data-action="${action}" data-max="${max}"`}>
+  // The owner's own composer signs its posts (afterwrd 2: compose.js), so its @ list is of people with an identity.
+  return html`<form class="card composer" id="composer" ${action ? html`data-action="${action}" data-max="${max}"` : raw(" data-signs")}>
   <textarea name="text" data-draft="post:${action ?? "here"}" rows="2" maxlength="5000" placeholder="${placeholder}" aria-label="New post"></textarea>
   <ul class="picked" hidden></ul>
   <fieldset class="poll-maker" hidden>

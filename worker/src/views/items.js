@@ -35,12 +35,12 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
  * up to, and this person's newest record on it, for the signed forms). `region`: the comments are what's drawn again
  * when something's sent from them (a photo's page), not the post they're in.
  */
-export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records` } = {}) {
+export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
   const sign = { item: item.id, host: list.host, seen: list.seen, prev: list.mine };
   const name = (c) => (c.author === list.me ? ctx.ownerName : c.name ?? "Someone");
   return html`<section class="thread" id="t-${item.id}" aria-label="Comments"${region && raw(' data-region=""')}>
-  ${comments.map((c) => (c.state === "ok" ? html`<div class="comment" id="c-${c.fp}">
+  ${comments.map((c) => (c.state === "ok" ? html`<div class="comment" id="c-${c.fp}"${c.author !== list.me && raw(` data-person="${c.author}"`)}${c.author !== list.me && html` data-name="${name(c)}"`}>
     ${c.author === list.me ? ownerFace(ctx) : html`<span class="who who-${c.n % 6}" aria-hidden="true">${initial(name(c))}</span>`}
     <div class="bubble"><strong>${name(c)}</strong><span class="said">${linkify(c.text, c.mentions)}</span></div>
     <div class="under">
@@ -53,7 +53,7 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
   </div>` : html`<p class="comment gone meta" id="c-${c.fp}">${c.state === "deleted" ? "A comment was deleted."
       : c.state === "removed" ? (c.removedBy === list.me ? "You removed a comment." : c.removedByName ? `A comment was removed by ${c.removedByName}.` : "A comment was removed.")
         : c.state === "failed" ? "A comment here didn't pass its check, so it isn't shown." : "A comment here was left out."}</p>`))}
-  <form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}>
+  <form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
     <input type="hidden" name="back" value="${back}">
     <textarea name="text" data-draft="comment:${item.id}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
     <button>Post</button>
@@ -77,7 +77,7 @@ export function itemCard(ctx, item, { thread = null, list = item.list ?? null, o
     ${sign && moreMenu([item.editable && menuEdit(`edit-i-${item.id}`),
       signedDelete(action, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back, inplace: "remove" })])}
   </header>
-  ${item.text && html`<div class="text">${linkify(item.text, [])}</div>`}
+  ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
   ${edited(item)}
   ${sign && item.editable && signedEdit(`edit-i-${item.id}`, `i-${item.id}`, action, item.text, back, MAX_POST_TEXT, sign, { required: !item.media?.length })}
   ${collage(item.media, { back: `${back}#i-${item.id}` })}
@@ -127,7 +127,7 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
     <span class="what"><a href="/friend/${c.id}/posts"><strong>${c.name}</strong></a></span>
     <a class="when" href="${page}" title="${fmtDatetime(item.created_at)}"><time>${fmtAgo(item.created_at)}</time></a>
   </header>
-  ${item.text && html`<div class="text">${linkify(item.text, [])}</div>`}
+  ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
   ${edited(item)}
   ${n > 0 && html`<div class="collage collage-${Math.min(n, 4)}">
     ${item.photos.slice(0, 4).map((m, i) => html`<a href="${page}/photos/${i + 1}${stay}" class="tile"><img src="${m.thumbSrc}" alt="" loading="lazy"${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
@@ -136,7 +136,7 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${page}">
     <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
-    ${thread && list ? itemThread(ctx, item, thread, list, { action: `/_admin/friend/${c.id}/items/${item.id}/records` })
+    ${thread && list ? itemThread(ctx, item, thread, list, { action: `/_admin/friend/${c.id}/items/${item.id}/records`, owner: { name: c.name, person: item.author } })
       : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
 </article>`;
@@ -174,7 +174,8 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
     <p class="meta"><a href="/friend/${c.id}/posts">${c.name}</a></p>
     <h2>Comments</h2>
     ${problem && html`<p class="notice alert">${problem}</p>`}
-    ${thread && list && itemThread(ctx, { id: m.item }, thread, list, { region: true, action: `/_admin/friend/${c.id}/items/${m.item}/records` })}
+    ${thread && list && itemThread(ctx, { id: m.item }, thread, list, { region: true, action: `/_admin/friend/${c.id}/items/${m.item}/records`,
+      owner: { name: c.name, person: item.author } })}
     <h2>Posted with</h2>${friendItemCard(ctx, item, { back })}
   </aside>
 </main>

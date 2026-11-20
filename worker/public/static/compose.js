@@ -93,7 +93,7 @@ form.addEventListener("submit", async (event) => {
     if (ACTION === "/_admin/posts" && !question) {
       // afterwrd 2: the owner's own post is a record signed here, with this browser's key (src/items.js). (Polls and
       // groups follow in later steps.)
-      const [{ makeRecord }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
+      const [{ makeRecord, pickedMentions }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
       const key = await savedKey();
       if (!key?.person || key.expires < Date.now() / 1000) throw new Error(CANT_SIGN);
       // Each photo is an item of its own (its own page and comments), signed first; the post lists them.
@@ -102,7 +102,10 @@ form.addEventListener("submit", async (event) => {
       const madePhotos = [];
       for (const p of photos) madePhotos.push(await makeRecord(own, { type: "photo", ...Object.fromEntries(fields.map((f) => [f, p[f]])) }, key));
       const listed = photos.map((p, i) => ({ item: madePhotos[i].fp, ...Object.fromEntries(fields.map((f) => [f, p[f]])) }));
-      const made = await makeRecord(own, { type: "post", text, photos: listed }, key);
+      // Who it mentions: in the record by identity, and named in its content.
+      const picked = pickedMentions(text, mentions);
+      const made = await makeRecord({ ...own, ...(picked.mentions.length && { mentions: picked.mentions }) },
+        { type: "post", text, photos: listed, ...(picked.shown.length && { mentions: picked.shown }) }, key);
       await call("/_admin/items", { sent: made.sent, photos: madePhotos.map((m) => m.sent) });
     } else {
       await call(ACTION, { text, photos, ...(question && { poll: question }), ...(mentions && { mentions }) });

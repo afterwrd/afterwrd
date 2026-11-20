@@ -12,7 +12,7 @@ import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
 import { parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
-import { ownHost } from "./items.js";
+import { ownHost, shownMentions } from "./items.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { html, now } from "./util.js";
@@ -40,19 +40,11 @@ export async function pullItems(env, from, connection) {
   for (let page = 0; page < PAGES; page++) {
     let data;
     try { data = await callFriend(env, from, String(connection.origin), `/_p/items?since=${since}`); } catch { return count || null; }
-    const lookups = lookupsWith(env, data.delegations);
     const statements = [];
     for (const item of Array.isArray(data.items) ? data.items : []) {
-      if (!ID_RE.test(item?.id ?? "")) continue;
-      const got = await checkRecord(item.sent, { ...lookups, at: Number(item.taken) });
-      if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.author !== person || got.record.host !== person) continue;
-      const content = { text: typeof item.content?.text === "string" ? item.content.text.slice(0, 5000) : "",
-        photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")) };
-      statements.push(env.DB.prepare(`INSERT INTO copies (id, connection_id, author, record, content, earlier, edited_at, comments, created_at, changed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content, earlier = excluded.earlier,
-        edited_at = excluded.edited_at, comments = excluded.comments, changed_at = excluded.changed_at`)
-        .bind(item.id, connection.id, person, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
-          Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, Number(item.taken), Number(item.changed_at) || now()));
+      const kept = await keepItem(env, connection, person, item, data.delegations);
+      if (!kept) continue;
+      statements.push(kept.statement);
       count++;
     }
     for (const id of Array.isArray(data.gone) ? data.gone : []) {
@@ -64,6 +56,26 @@ export async function pullItems(env, from, connection) {
     if (!data.more) break;
   }
   return count;
+}
+
+/**
+ * A friend's post as their site sent it (`/_p/items?since`, or a new-post note: notes.js), checked: its first record
+ * must be theirs (`person`), on their own site, and be what its id says. Returns {statement (keeping the copy), record,
+ * content} or null.
+ */
+export async function keepItem(env, connection, person, item, delegations) {
+  if (!ID_RE.test(item?.id ?? "")) return null;
+  const got = await checkRecord(item.sent, { ...lookupsWith(env, delegations), at: Number(item.taken) });
+  if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.author !== person || got.record.host !== person) return null;
+  const content = { text: typeof item.content?.text === "string" ? item.content.text.slice(0, 5000) : "",
+    photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")),
+    ...(Array.isArray(got.content?.mentions) && { mentions: shownMentions(got.record, got.content) }) };
+  const statement = env.DB.prepare(`INSERT INTO copies (id, connection_id, author, record, content, earlier, edited_at, comments, created_at, changed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content, earlier = excluded.earlier,
+    edited_at = excluded.edited_at, comments = excluded.comments, changed_at = excluded.changed_at`)
+    .bind(item.id, connection.id, person, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
+      Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, Number(item.taken), Number(item.changed_at) || now());
+  return { statement, record: got.record, content };
 }
 
 /** Asks every friend's site not asked in the last hour (in the background, from Home). */
@@ -102,7 +114,7 @@ function copyFromRow(r) {
   const content = JSON.parse(String(r.content));
   return { id: String(r.id), connection: { id: Number(r.connection_id), name: String(r.name), origin: String(r.origin),
     avatar: r.avatar_url ? { thumbSrc: String(r.avatar_url) } : null },
-    author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
+    author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [], earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
     edited_at: r.edited_at ? Number(r.edited_at) : null, comments: Number(r.comments), created_at: Number(r.created_at),
     checked: r.checked_n ? { n: Number(r.checked_n), head: String(r.checked_head) } : null };
 }
@@ -162,10 +174,13 @@ export async function relayRecord(request, env, url, connectionId, id) {
   // This site passes on only what its owner's browsers signed: the delegation behind it, kept here.
   const delegation = await env.DB.prepare("SELECT bytes, proof FROM delegations WHERE key = ? AND expires_at > ?").bind(record.key, now()).first();
   if (!delegation) return refused("This browser can't sign for you any more. Sign out and sign in again.");
+  // With the owner's signed name, so the host can name them to everyone else in the thread, friends of theirs or not.
+  const own = await env.DB.prepare("SELECT profile FROM own_identity WHERE id = 1").first();
   let answer;
   try {
     answer = await callFriend(env, url.origin, String(connection.origin), "/_p/records",
-      { body: { sent, delegation: { bytes: String(delegation.bytes), proof: JSON.parse(String(delegation.proof)) } } });
+      { body: { sent, delegation: { bytes: String(delegation.bytes), proof: JSON.parse(String(delegation.proof)) },
+        ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) } });
   } catch (error) { return refused(`Couldn't send it: ${error.message}`); }
   await env.DB.prepare(`INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(await fingerprintOf("record", fromB64url(sent.record)), record.host, id, record.kind,

@@ -6,6 +6,7 @@
 // carry a key (connect.js, peers.js, membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
+import { receiveNotes } from "./notes.js";
 import { handleIdentity } from "./identities.js";
 import { handleAdmin } from "./admin.js";
 import { handleComments } from "./archive/comments.js";
@@ -128,7 +129,8 @@ async function route(request, env, work) {
     return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   }
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
-  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleFriendItems(request, env, url);
+  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleFriendItems(request, env, url, work);
+  if (url.pathname === "/_p/notes" && request.method === "POST") return receiveNotes(request, env, url, work);
   // A group the owner's in, calling with the key this site gave it.
   if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url, work);
   // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.

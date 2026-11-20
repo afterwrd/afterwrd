@@ -4,28 +4,15 @@
 // an ActivityStreams Mention tag ({ type: "Mention", href: "<their site>/", name: "@Ann Example" }), and @here is
 // "afterwrd:here": true. Whoever holds the post decides who's told: only people who can see it.
 import { siteOrigin } from "./peers.js";
+import { says } from "../public/static/records.js";
+
+export { says };
 
 export const MAX_MENTIONS = 10;
 export const HERE = "here";
 const MAX_NAME = 100;
 
 /** @typedef {{ name: string, origin: string }} Mention */
-
-const WORD = /[A-Za-z0-9_]/;
-
-/**
- * Whether `text` says @`name`, as a whole name (not the start of a longer one, nor part of an address like a@b). A plain
- * search, not a pattern built per name: a friend's site could send many names and long words, and this runs on each.
- */
-function says(text, name) {
-  const wanted = `@${name}`;
-  for (let i = text.indexOf(wanted); i !== -1; i = text.indexOf(wanted, i + 1)) {
-    const before = i > 0 ? text[i - 1] : "";
-    const after = text[i + wanted.length] ?? "";
-    if (!WORD.test(before) && before !== "@" && !WORD.test(after)) return true;
-  }
-  return false;
-}
 
 /**
  * The mentions a post or comment was sent with (`given`: from the browser, a list or its JSON), kept only where the

@@ -9,6 +9,7 @@ import { createECDH, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { signCall } from "../../src/signedcalls.js";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const [, , stateA, stateB, stateC, stateG] = process.argv.slice(2);
@@ -94,7 +95,6 @@ async function mention(page, box, typed) {
   return offered;
 }
 const mentionsField = (page, form) => page.$eval(`${form} input[name=mentions]`, (i) => JSON.parse(i.value)).catch(() => []);
-const inbox = (state, kind) => n(state, `inbox WHERE kind = '${kind}'`);
 const groupInbox = (state, kind) => n(state, `group_inbox WHERE kind = '${kind}'`);
 /** Home opened until a friend's card has `words`, as its copy of their posts catches up (feed.js). */
 async function friendCard(page, site, words) {
@@ -117,36 +117,66 @@ check("Ann is friends with Bob and Cat, who aren't friends", n(stateA, "connecti
 check("Bob's and Cat's phones say yes to notifications", (await phone(bob, B, "bob")).on === true && (await phone(cat, C, "cat")).on === true);
 check("…and to mentions, unless they say otherwise", (await post(cat, "/_push/devices/state", { endpoint: `${PUSH}/push/cat` })).mentions === true);
 
-// --- a post that mentions a friend ---------------------------------------------------------------------------------------
+// --- a post that mentions a friend (signed: step 4c, docs/signed-conversations.md) -------------------------------------------
+
+const personOf = (state, origin) => sql(state, `SELECT identity FROM connections WHERE origin = '${origin}'`)[0]?.identity;
+const ownPerson = (state) => sql(state, "SELECT person FROM own_identity")[0].person;
+const notices = (state, kind) => n(state, `notices WHERE kind = '${kind}'`);
+check("making friends tied each to the other's identity", personOf(stateA, B) === ownPerson(stateB) && personOf(stateA, C) === ownPerson(stateC)
+  && personOf(stateB, A) === ownPerson(stateA));
 
 await ann.goto(`${A}/posts`);
 const offered = await mention(ann, "#composer textarea", "Walk on Saturday, @Bo");
 check("typing @ offers friends, narrowing as you type", offered.join() === "@Bob Example", offered.join());
 check("…and picking one writes their whole name", (await ann.$eval("#composer textarea", (t) => t.value)) === "Walk on Saturday, @Bob Example ");
-check("…noting who that is", JSON.stringify(await mentionsField(ann, "#composer")) === JSON.stringify([{ name: "Bob Example", origin: B }]));
+check("…noting who that is, by their identity", JSON.stringify(await mentionsField(ann, "#composer"))
+  === JSON.stringify([{ name: "Bob Example", origin: B, person: ownPerson(stateB) }]));
 await ann.type("#composer textarea", "who's in?");
 await Promise.all([ann.waitForNavigation({ timeout: 60_000 }), ann.click("#composer button.post")]);
 check("Ann's post shows the mention", (await ann.$eval("article.own .text strong.mention", (s) => s.textContent).catch(() => "")) === "@Bob Example");
-check("Bob's site is told he's mentioned", await waitFor(() => inbox(stateB, "mention") === 1));
+check("…and its signed record names Bob by his identity", sql(stateA, "SELECT content FROM items WHERE type = 'post'")
+  .some((r) => JSON.parse(r.content).mentions?.[0]?.person === ownPerson(stateB)));
+check("Bob's site is told he's mentioned", await waitFor(() => notices(stateB, "mention") === 1));
 check("…and his phone", await waitFor(() => toPhone("bob") === 1), String(toPhone("bob")));
-check("…but not Cat, who isn't mentioned", inbox(stateC, "mention") === 0 && toPhone("cat") === 0);
+check("…but not Cat, who isn't mentioned", notices(stateC, "mention") === 0 && toPhone("cat") === 0);
 await bob.goto(`${B}/activity`);
 check("Bob's Notifications says Ann mentioned him", (await text(bob)).includes("Ann Example mentioned you on their post"));
+const walkOnBob = await friendCard(bob, B, "Walk on Saturday");
+check("…and his Home shows her post with the mention", (await bob.$eval(`${walkOnBob} .text strong.mention`, (s) => s.textContent).catch(() => "")) === "@Bob Example");
 
-// Names typed by hand, or not in the words, mention nobody.
+// Names typed by hand, or not in the words, mention nobody; and Ann's site takes mentions only of those who can see it.
 await ann.goto(`${A}/posts`);
 await ann.$eval("#composer textarea", (t) => { t.value = "Hi @Cat Example, typed by hand"; });
 await Promise.all([ann.waitForNavigation({ timeout: 60_000 }), ann.click("#composer button.post")]);
 check("a name typed by hand isn't a mention", !(await ann.$eval("article.own", (a) => Boolean(a.querySelector("strong.mention")))));
-check("…the site says the same of one whose name isn't in the words", (await post(ann, "/_admin/posts", { text: "Hello", mentions: [{ name: "Cat Example", origin: C }] })).status === 200);
+/** Signs a post in `page`'s browser mentioning `mentions` ([{name, person}]) and sends it as the composer does. */
+const signPost = (page, words, mentions) => page.evaluate(async (words, mentions) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "item", author: key.person, host: key.person, mentions: mentions.map((m) => m.person) },
+    { type: "post", text: words, photos: [], mentions }, key);
+  const res = await fetch("/_admin/items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sent: made.sent, photos: [] }) });
+  return { status: res.status, ...(await res.json().catch(() => ({}))) };
+}, words, mentions);
+const notSaid = await signPost(ann, "Hello", [{ name: "Cat Example", person: ownPerson(stateC) }]);
+check("…the site refuses a mention its words don't say", notSaid.status === 400 && /its words don't/.test(notSaid.error ?? ""), JSON.stringify(notSaid));
+const stranger = await signPost(ann, "Hello @Zed Stranger", [{ name: "Zed Stranger", person: "z".repeat(43) }]);
+check("…or of someone who can't see it", stranger.status === 400 && /can see this/.test(stranger.error ?? ""), JSON.stringify(stranger));
 await new Promise((r) => setTimeout(r, 3000));
-check("…and neither tells anyone", inbox(stateC, "mention") === 0);
+check("…and neither tells anyone", notices(stateC, "mention") === 0);
 
 // --- comments: on a friend's post, and passed on by the site that holds the post --------------------------------------------
 
-check("Bob posts", (await post(bob, "/_admin/posts", { text: "Anyone for tennis?" })).status === 200);
+const openThread = async (page, card) => {
+  if (!(await page.$(`${card} details.comments[open]`))) await page.click(`${card} details.comments summary`);
+  await page.waitForSelector(`${card} .say textarea`, { timeout: 15_000 });
+};
+await bob.goto(`${B}/posts`);
+await bob.type("#composer textarea", "Anyone for tennis?");
+await Promise.all([bob.waitForNavigation({ timeout: 60_000 }), bob.click("#composer button.post")]);
 const tennis = await friendCard(ann, A, "Anyone for tennis?");
-check("…and it reaches Ann's Home", Boolean(tennis));
+check("Bob posts, and it reaches Ann's Home", Boolean(tennis));
+await openThread(ann, tennis);
 const notThere = await mention(ann, `${tennis} .say textarea`, "@Ca");
 check("on a friend's post, the @ list doesn't offer your other friends", notThere.length === 0, notThere.join());
 await ann.$eval(`${tennis} .say textarea`, (t) => { t.value = ""; });
@@ -154,78 +184,83 @@ const asked = await mention(ann, `${tennis} .say textarea`, "@Bo");
 check("…only its writer and those already in its thread", asked.join() === "@Bob Example", asked.join());
 await ann.type(`${tennis} .say textarea`, "count me in");
 await Promise.all([settled(ann), ann.click(`${tennis} .say button`)]);
-check("Ann's comment on Bob's post mentions him, on his site", sql(stateB, "SELECT mentions FROM comments WHERE origin != 'site'")
-  .some((c) => (c.mentions ?? "").includes(B)));
-check("…which tells Bob's phone, as its owner", await waitFor(() => toPhone("bob") === 2), String(toPhone("bob")));
+check("Ann's comment on Bob's post mentions him, and his site tells him", await waitFor(() => sql(stateB, "SELECT own, actor FROM notices WHERE kind = 'mention'")
+  .some((r) => r.own === 1 && r.actor === "Ann Example")));
+check("…and his phone, as its owner", await waitFor(() => toPhone("bob") === 2), String(toPhone("bob")));
 check("…and shows as a mention under his post, on Ann's Home", await ann.$eval(`${tennis} .comment strong.mention`, (s) => s.textContent).catch(() => "") === "@Bob Example");
 
 // Cat comments on Ann's post; Bob, who can see it but isn't Cat's friend, mentions her there. Ann's site holds the
 // post, and Cat can see it, so Ann's site tells her.
 const walkCat = await friendCard(cat, C, "Walk on Saturday");
+await openThread(cat, walkCat);
 await cat.type(`${walkCat} .say textarea`, "Count me in");
 await Promise.all([settled(cat), cat.click(`${walkCat} .say button`)]);
-const catComments = inbox(stateC, "comment");
-sql(stateB, "UPDATE connections SET copy_until = 0"); // so Bob's Home has Cat's comment (no note tells his site)
+const catComments = notices(stateC, "comment");
 const walkBob = await friendCard(bob, B, "Walk on Saturday");
+await openThread(bob, walkBob);
 const fromThread = await mention(bob, `${walkBob} .say textarea`, "@Ca");
 check("the @ list has people already on the post, friends or not", fromThread.join() === "@Cat Example", fromThread.join());
 await bob.type(`${walkBob} .say textarea`, "see you there");
 await Promise.all([settled(bob), bob.click(`${walkBob} .say button`)]);
-check("Ann's site tells Cat, who can see the post", await waitFor(() => inbox(stateC, "mention") === 1));
+check("Ann's site tells Cat, who can see the post", await waitFor(() => notices(stateC, "mention") === 1));
 check("…and her phone", await waitFor(() => toPhone("cat") === 1), String(toPhone("cat")));
-check("…once: not a comment note as well", inbox(stateC, "comment") === catComments);
-// On someone else's post, its site only takes mentions of its writer and of those already in the thread, whatever's sent.
-const hello = sql(stateA, "SELECT key FROM posts WHERE text = 'Hello'")[0].key;
-const annForBob = sql(stateB, `SELECT id FROM connections WHERE origin = '${A}'`)[0].id;
-await bob.evaluate(async (connection, target, c) => {
-  const body = new URLSearchParams({ connection: String(connection), target, text: "@Cat Example look at this", back: "/",
-    mentions: JSON.stringify([{ name: "Cat Example", origin: c }]) });
-  await fetch("/_feed/comments", { method: "POST", body, redirect: "manual" });
-}, annForBob, hello, C);
-await new Promise((r) => setTimeout(r, 3000));
-check("…so mentioning someone who isn't there tells no one", inbox(stateC, "mention") === 1
-  && sql(stateA, `SELECT mentions FROM comments WHERE target = '${hello}'`).every((c) => !(c.mentions ?? "").includes(C)));
+check("…once: not a comment note as well", notices(stateC, "comment") === catComments);
+check("…and Ann hears Bob commented on her post", await waitFor(() => sql(stateA, "SELECT own, actor FROM notices WHERE kind = 'comment'")
+  .some((r) => r.own === 1 && r.actor === "Bob Example")));
 await cat.goto(`${C}/activity`);
 check("Cat's Notifications says who mentioned her, and where", (await text(cat)).includes("Bob Example mentioned you on Ann Example's post"));
+
+// On someone else's post, its site only takes mentions of its writer and of those already in the thread, whatever's signed.
+const typedPost = sql(stateA, "SELECT id FROM items WHERE type = 'post' AND content LIKE '%typed by hand%'")[0].id;
+const annForBob = sql(stateB, `SELECT id FROM connections WHERE origin = '${A}'`)[0].id;
+const signComment = (page, path, words, mentions) => page.evaluate(async (path, words, mentions) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const doc = new DOMParser().parseFromString(await (await fetch(path)).text(), "text/html");
+  const form = doc.querySelector("form.say");
+  const d = form.dataset;
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "comment", author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: d.signPrev || null, mentions: mentions.map((m) => m.person) }, { text: words, mentions }, key);
+  const body = new URLSearchParams({ sent: JSON.stringify(made.sent), back: path });
+  return (await fetch(form.getAttribute("action"), { method: "POST", body, redirect: "manual" })).status;
+}, path, words, mentions);
+const sneaked = await signComment(bob, `/friend/${annForBob}/posts/${typedPost}`, "@Cat Example look at this", [{ name: "Cat Example", person: ownPerson(stateC) }]);
+await new Promise((r) => setTimeout(r, 3000));
+check("…so mentioning someone who isn't there is refused, and tells no one", sneaked === 400 && notices(stateC, "mention") === 1, String(sneaked));
 
 // Cat says no to mentions on her phone: she's still told, but her phone isn't.
 check("a phone can turn mentions off", (await post(cat, "/_push/devices/mentions", { endpoint: `${PUSH}/push/cat`, mentions: false })).ok === true
   && (await post(cat, "/_push/devices/state", { endpoint: `${PUSH}/push/cat` })).mentions === false);
-await bob.goto(`${B}/`);
 const again = await friendCard(bob, B, "Walk on Saturday");
+await openThread(bob, again);
 await mention(bob, `${again} .say textarea`, "@Ca");
 await bob.type(`${again} .say textarea`, "bring a flask");
 await Promise.all([settled(bob), bob.click(`${again} .say button`)]);
-check("…then she's told on her site", await waitFor(() => inbox(stateC, "mention") === 2));
+check("…then she's told on her site", await waitFor(() => notices(stateC, "mention") === 2));
 await new Promise((r) => setTimeout(r, 2000));
 check("…but her phone isn't", toPhone("cat") === 1, String(toPhone("cat")));
 
-// A friend's site can only say its own posts mention someone.
-const bobsKeyForAnn = sql(stateB, `SELECT their_key FROM connections WHERE origin = '${A}'`)[0].their_key;
-const forged = await call(A, "/_peer/notify", bobsKeyForAnn, { type: "Create", object: { type: "Note", "afterwrd:mention": true,
-  inReplyTo: `${C}/posts/post-1762164000-0b918c1b`, content: "forged" } });
-check("a mention note about someone else's post is refused", forged.status === 400, String(forged.status));
-check("…and nothing's kept", inbox(stateA, "mention") === 0);
-
-// A friend's notes can't make Ann's site fetch their posts over and over (feed.js BACKGROUND_DAILY): 48 times a day.
-const bobAtAnn = sql(stateA, `SELECT id FROM connections WHERE origin = '${B}'`)[0].id;
-const today = Math.floor(Date.now() / 86_400_000);
-const refreshes = () => sql(stateA, `SELECT refreshes FROM connections WHERE id = ${bobAtAnn}`)[0].refreshes;
-let made = 0;
-const postNotes = async (count) => {
-  for (let i = 0; i < count; i++, made++) {
-    await call(A, "/_peer/notify", bobsKeyForAnn, { type: "Create", object: { type: "Note",
-      id: `${B}/posts/post-${1762164000 + made}-0b918c1b`, content: "news" } });
-  }
-  await new Promise((r) => setTimeout(r, 4000));
+// A friend's site can only send notes about its own posts, and only comments its receipts vouch for. Bob's site, signing
+// as itself (its hosting key), tries both on Ann's.
+const bobHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateB, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
+  { name: "Ed25519" }, false, ["sign"]);
+const asBob = async (body) => {
+  const url = `${A}/_p/notes`;
+  const text = JSON.stringify(body);
+  const headers = await signCall({ method: "POST", url, body: text, person: ownPerson(stateB), from: B, privateKey: bobHosting });
+  return (await fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: text })).status;
 };
-sql(stateA, `UPDATE connections SET refreshes = 0, refresh_day = ${today} WHERE id = ${bobAtAnn}`);
-await postNotes(2);
-check("a friend's note fetches their posts, counted for the day", refreshes() >= 1 && refreshes() <= 2, String(refreshes()));
-sql(stateA, `UPDATE connections SET refreshes = 48 WHERE id = ${bobAtAnn}`);
-const before = sql(stateA, `SELECT copied_at FROM connections WHERE id = ${bobAtAnn}`)[0].copied_at;
-await postNotes(2);
-check("…and not past the day's allowance", refreshes() === 48 && sql(stateA, `SELECT copied_at FROM connections WHERE id = ${bobAtAnn}`)[0].copied_at === before);
+const annsPost = sql(stateB, "SELECT id, record, created_at FROM copies LIMIT 1")[0]; // Bob's copy of one of Ann's
+const mentionsBefore = notices(stateA, "mention");
+check("a new-post note about someone else's post is refused", (await asBob({ v: 2, kind: "item",
+  item: { id: annsPost.id, sent: JSON.parse(annsPost.record), taken: annsPost.created_at, content: { text: "forged" } } })) === 400);
+const realEntry = sql(stateB, "SELECT entries FROM list_pages ORDER BY rowid DESC LIMIT 1")[0];
+const lastEntry = JSON.parse(realEntry.entries).at(-1);
+check("a comment note whose receipt doesn't check is refused", (await asBob({ v: 2, kind: "comment", item: JSON.parse(Buffer.from(lastEntry.sent.record, "base64url")).item,
+  entry: { n: lastEntry.n, fp: lastEntry.fp, taken: lastEntry.taken, prev: "", sent: lastEntry.sent },
+  receipt: { bytes: Buffer.from(JSON.stringify({ v: 2, kind: "head", n: lastEntry.n })).toString("base64url"), sig: "x" } })) === 400);
+check("…and nothing's kept", notices(stateA, "mention") === mentionsBefore);
+check("an unsigned note is refused", (await fetch(`${A}/_p/notes`, { method: "POST", headers: { "Afterwrd-From": B }, body: "{}" })).status === 401);
 
 // --- in a group ---------------------------------------------------------------------------------------------------------
 

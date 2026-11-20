@@ -18,6 +18,8 @@
   const remote = () => unique([.../** @type {NodeListOf<HTMLFormElement>} */ (document.querySelectorAll('form[action="/_feed/comments"]'))]
     .map((f) => `${field(f, "connection")}:${field(f, "target")}`));
   // …and in groups.
+  // Signed posts and photos whose comments are open (afterwrd 2): their comment boxes say which item each is.
+  const items = () => unique([.../** @type {NodeListOf<HTMLFormElement>} */ (document.querySelectorAll('form[data-sign="comment"]'))].map((f) => f.dataset.signItem ?? ""));
   const groups = () => unique([.../** @type {NodeListOf<HTMLFormElement>} */ (document.querySelectorAll("form[data-group][data-post]"))].map((f) => `${f.dataset.group}:${f.dataset.post}`));
 
   function setCount(link, n) {
@@ -72,7 +74,7 @@
   async function check() {
     if (stopped || document.hidden) return;
     last = Date.now();
-    const query = new URLSearchParams({ since, targets: targets(), remote: remote(), groups: groups() });
+    const query = new URLSearchParams({ since, targets: targets(), remote: remote(), groups: groups(), items: items() });
     let news;
     try {
       const res = await fetch(`/_live?${query}`, { cache: "no-store" });

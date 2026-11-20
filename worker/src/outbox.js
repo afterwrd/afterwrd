@@ -19,10 +19,15 @@ import { copyOnce } from "./sitecopy.js";
 import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
 import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
+import { callFriend } from "./calls.js";
+import { noteFor } from "./notes.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
 const RETRY_SECONDS = [60, 300, 1800, 7200, 21600];
+// Fat notes about signed posts (notes.js): a friend's site that can't be reached is tried again for about two days.
+const NOTE_RETRY_SECONDS = [60, 300, 1800, 7200, 21600, 43200, 86400];
+const DONE = Number.MAX_SAFE_INTEGER; // a fat note's `due` once everyone's had it (only retries may be left)
 
 export const outbox = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
 
@@ -83,6 +88,17 @@ export class Outbox extends DurableObject {
     // in the order asked: one row, the list of them. A row for each friend was two rows written for every friend each
     // time Home opened (queued, then taken): with hundreds of friends, a good share of a day's writes.
     this.sql.exec("CREATE TABLE IF NOT EXISTS refresh_queue (id INTEGER PRIMARY KEY CHECK (id = 1), ids TEXT NOT NULL)");
+    // Fat notes about signed posts (notes.js, afterwrd 2): one row per note, not per recipient. `audience` "friends"
+    // goes to every friend in turn (`cursor`: the last connection id sent to); otherwise `recipients` lists them
+    // (`cursor`: how many have been sent). A recipient that couldn't be reached gets a row in note_retries.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS fat_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, kind TEXT NOT NULL, item TEXT NOT NULL, fp TEXT,
+      audience TEXT, recipients TEXT, cursor INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
+    )`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS note_retries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, note INTEGER NOT NULL, connection_id INTEGER NOT NULL,
+      tries INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
+    )`);
   }
 
   /**
@@ -193,6 +209,14 @@ export class Outbox extends DurableObject {
     return this.queue("notes", connectionIds, body);
   }
 
+  /** Queues a fat note about a signed post (notes.js): {origin, kind, item, fp?, audience? | recipients?}. */
+  async sendNote({ origin, kind, item, fp = null, audience = null, recipients = null }) {
+    const at = Date.now();
+    this.sql.exec("INSERT INTO fat_notes (origin, kind, item, fp, audience, recipients, due) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      origin, kind, item, fp, audience, recipients && JSON.stringify(recipients), at);
+    await this.wake(at);
+  }
+
   /** Queues an invitation to the event in post `postId` (events.js) for each connection id, noting what becomes of it. */
   async sendInvites(connectionIds, postId, body) {
     const text = JSON.stringify(body);
@@ -231,6 +255,7 @@ export class Outbox extends DurableObject {
       }
     }
     let room = BATCH;
+    room -= await this.sendNotes(room);
     for (const table of Object.keys(KINDS)) room -= await this.sendDue(table, room);
     // Then, with the calls left, friends' posts to fetch again (notes first: they're what tells friends' sites).
     // A refresh is due from when it was asked for (refresh()): the oldest first, as many as there's room for. The rest
@@ -245,8 +270,78 @@ export class Outbox extends DurableObject {
       }
     }
     if (this.queued().length) waiting = Date.now();
-    const next = Math.min(waiting, ...Object.keys(KINDS).map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t}`).one().due ?? Infinity));
+    const next = Math.min(waiting, ...[...Object.keys(KINDS), "fat_notes", "note_retries"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t} WHERE due < ?`, DONE).one().due ?? Infinity));
     if (next !== Infinity) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
+  }
+
+  /**
+   * Sends up to `limit` fat notes (notes.js): retries that are due first, then the next recipients of each note, oldest
+   * note first. Each is built for its recipient and sent in a signed call. Returns how many calls it made.
+   */
+  async sendNotes(limit) {
+    if (limit <= 0) return 0;
+    const at = Date.now();
+    /** @type {{ note: any, connection: number, retry: any }[]} */
+    const calls = [];
+    const notes = new Map();
+    const noteOf = (id) => {
+      if (!notes.has(id)) notes.set(id, this.sql.exec("SELECT * FROM fat_notes WHERE id = ?", id).toArray()[0] ?? null);
+      return notes.get(id);
+    };
+    for (const retry of this.sql.exec("SELECT * FROM note_retries WHERE due <= ? ORDER BY due LIMIT ?", at, limit).toArray()) {
+      const note = noteOf(retry.note);
+      if (note) calls.push({ note, connection: Number(retry.connection_id), retry });
+      else this.sql.exec("DELETE FROM note_retries WHERE id = ?", retry.id);
+    }
+    for (const note of this.sql.exec("SELECT * FROM fat_notes WHERE due <= ? ORDER BY id", at).toArray()) {
+      const room = limit - calls.length;
+      if (room <= 0) break;
+      notes.set(note.id, note);
+      let next = [];
+      if (note.audience === "friends") {
+        const { results } = await this.env.DB.prepare(`SELECT id FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
+          AND id > ? ORDER BY id LIMIT ?`).bind(Number(note.cursor), room).all();
+        next = results.map((r) => Number(r.id));
+        if (next.length) this.sql.exec("UPDATE fat_notes SET cursor = ? WHERE id = ?", next.at(-1), note.id);
+        if (next.length < room) this.sql.exec("UPDATE fat_notes SET due = ? WHERE id = ?", DONE, note.id);
+      } else {
+        const all = JSON.parse(String(note.recipients ?? "[]"));
+        next = all.slice(Number(note.cursor), Number(note.cursor) + room);
+        this.sql.exec("UPDATE fat_notes SET cursor = ? WHERE id = ?", Number(note.cursor) + next.length, note.id);
+        if (Number(note.cursor) + next.length >= all.length) this.sql.exec("UPDATE fat_notes SET due = ? WHERE id = ?", DONE, note.id);
+      }
+      for (const connection of next) calls.push({ note, connection, retry: null });
+    }
+    if (!calls.length) return 0;
+    const ids = [...new Set(calls.map((c) => c.connection))];
+    const { results } = await this.env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
+      AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
+    const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
+    await Promise.all(calls.map(async ({ note, connection, retry }) => {
+      const friend = friends.get(connection);
+      let again = false;
+      if (friend) {
+        try {
+          const body = await noteFor(this.env, note, friend);
+          if (body) await callFriend(this.env, String(note.origin), String(friend.origin), "/_p/notes", { body, timeout: TIMEOUT_MS });
+        } catch (error) {
+          // Not reached, or busy: tried again later. Anything else won't change by asking again.
+          const status = /** @type {any} */ (error).status;
+          again = status === 0 || status >= 500 || status === 429 || status === undefined;
+        }
+      }
+      const tries = retry ? Number(retry.tries) + 1 : 0;
+      if (!again || tries >= NOTE_RETRY_SECONDS.length) {
+        if (retry) this.sql.exec("DELETE FROM note_retries WHERE id = ?", retry.id);
+      } else if (retry) {
+        this.sql.exec("UPDATE note_retries SET tries = ?, due = ? WHERE id = ?", tries, at + NOTE_RETRY_SECONDS[tries] * 1000, retry.id);
+      } else {
+        this.sql.exec("INSERT INTO note_retries (note, connection_id, tries, due) VALUES (?, ?, 0, ?)", note.id, connection, at + NOTE_RETRY_SECONDS[0] * 1000);
+      }
+    }));
+    // A note sent to everyone, with nobody left to try again, is done with.
+    this.sql.exec(`DELETE FROM fat_notes WHERE due = ? AND NOT EXISTS (SELECT 1 FROM note_retries r WHERE r.note = fat_notes.id)`, DONE);
+    return calls.length;
   }
 
   /** Sends up to `limit` notes from `table` that are due; returns how many it tried. */

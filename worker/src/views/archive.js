@@ -386,7 +386,7 @@ export function activityPage(ctx, { items, paging }) {
 posts in groups that you wrote or commented on; when someone mentions you; friends' invitations; and changes to events
 you're invited or going to.</p>
 ${feed(items, (c) => (c.source === "friend" ? friendActivityItem(c) : c.source === "group" ? groupActivityItem(c)
-    : activityItem(ctx, c)), "Nothing yet. Comments on your posts and photos will show here.")}
+    : c.source === "signed" || c.source === "own" ? noticeItem(c) : activityItem(ctx, c)), "Nothing yet. Comments on your posts and photos will show here.")}
 ${(paging.page > 1 || paging.hasNext) && pager(ctx, paging)}`);
 }
 
@@ -406,6 +406,31 @@ function friendActivityItem(c) {
     <header>
       <span class="what"><strong>${c.name}</strong>
         ${c.name === c.friend ? html`replied on <a href="${href}">their ${thing}</a>` : html`also commented on <a href="${href}">${c.friend}'s ${thing}</a>`}</span>
+      ${c.isNew && raw('<span class="badge badge-new">New</span>')}
+      <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
+    </header>
+    ${c.text && html`<div class="text">${c.text}</div>`}
+  </div>
+</article>`;
+}
+
+/**
+ * A comment or mention on a signed post (afterwrd 2: notes.js notices): on a friend's post the owner's in, or on their
+ * own ("own"). `target` is the post, or <post>/photos/<n> for one of its photos.
+ */
+function noticeItem(c) {
+  const own = c.source === "own";
+  const isPhoto = c.target.includes("/photos/");
+  const href = own ? `/posts/${c.target.split("/")[0]}` : `/friend/${c.connection_id}/posts/${c.target}`;
+  const thing = isPhoto ? "photo" : "post";
+  const where = own ? html`your <a href="${href}">${thing}</a>` : c.name === c.friend ? html`their <a href="${href}">${thing}</a>`
+    : html`${c.friend}'s <a href="${href}">${thing}</a>`;
+  const what = c.kind === "mention" ? html`mentioned you on ${where}` : own ? html`commented on ${where}`
+    : c.name === c.friend ? html`replied on ${where}` : html`also commented on ${where}`;
+  return html`<article class="card activity${c.isNew ? " new" : ""}">
+  <div class="body">
+    <header>
+      <span class="what"><strong>${c.name}</strong> ${what}</span>
       ${c.isNew && raw('<span class="badge badge-new">New</span>')}
       <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
     </header>

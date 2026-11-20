@@ -15,6 +15,8 @@ import { MAX_COMMENT } from "./archive/comments.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { html, json, now, Refusal } from "./util.js";
+import { says } from "./mentions.js";
+import { queueCommentNote, queueItemNote } from "./notes.js";
 
 export const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 const EDIT_SECONDS = 15 * 60;
@@ -67,6 +69,8 @@ async function checkNewPost(env, host, post, photos) {
   const listed = Array.isArray(post.content.photos) ? post.content.photos : [];
   if (!text && !listed.length) return "Write something, or add photos.";
   if (listed.length !== photos.length) return "That post's photos aren't all here.";
+  const wrong = await wrongMentions(env, post, text, null);
+  if (wrong) return wrong;
   for (let i = 0; i < photos.length; i++) {
     const p = photos[i];
     if (!p?.record || p.record.kind !== "item" || p.record.author !== host.person || p.content?.type !== "photo") return "That isn't a photo of yours.";
@@ -81,7 +85,11 @@ export async function handleItems(request, env, url, owner) {
   if (url.pathname === "/_admin/items") {
     const body = await request.json().catch(() => ({}));
     if (!host) return json({ error: "Set up signing first, in Your devices." }, 409);
-    try { return json(await createItem(env, host, body.sent, Array.isArray(body.photos) ? body.photos : [])); } catch (error) {
+    try {
+      const made = await createItem(env, host, body.sent, Array.isArray(body.photos) ? body.photos : []);
+      await queueItemNote(env, url.origin, made.id);
+      return json(made);
+    } catch (error) {
       if (error instanceof Refusal) return json({ error: error.message }, error.status);
       throw error;
     }
@@ -100,7 +108,7 @@ export async function handleItems(request, env, url, owner) {
       if (answer.refused) return refused(answer.refused);
       return Response.redirect(`${url.origin}/posts/${answer.post}`, 303);
     }
-    const answer = await recordOn(env, host, on[1], sent);
+    const answer = await recordOn(env, host, on[1], sent, url.origin);
     if (answer.refused) return refused(answer.refused);
     if (answer.deleted) return Response.redirect(`${url.origin}/`, 303);
     back.hash = `i-${on[1]}`;
@@ -169,8 +177,45 @@ async function itemGone(env, id) {
   await removeUnusedFiles(env, files.flatMap((f) => [String(f.hash), String(f.thumb_hash)]));
 }
 
-/** A record on one of the owner's own items, taken, and the item worked out again. {refused} if not; {deleted} if it was its writer deleting it. */
-export async function recordOn(env, host, id, sent) {
+/**
+ * What's wrong with who a record mentions (`got`: {record, content}), or null. Its content's `mentions` ({name, person})
+ * must be in the record's and said in `text`. Who may be mentioned: on the owner's own new post (`item` null) or by
+ * the owner on one of their items, their friends and anyone already in its thread; by someone else, the item's owner
+ * and anyone already in its thread (as before: all the site tells).
+ */
+async function wrongMentions(env, got, text, item) {
+  const listed = got.record.mentions ?? [];
+  const shown = Array.isArray(got.content?.mentions) ? got.content.mentions : [];
+  if (!listed.length && !shown.length) return null;
+  if (shown.length > listed.length || shown.some((m) => !listed.includes(m?.person) || typeof m.name !== "string" || !says(text, m.name))) {
+    return "That mentions someone its words don't.";
+  }
+  const own = await env.DB.prepare("SELECT person FROM own_identity WHERE id = 1").first();
+  const allowed = new Set();
+  if (item) {
+    for (const e of await listEntries(env.DB, item)) {
+      const r = readEntry(e)?.record;
+      if (r) allowed.add(r.author);
+    }
+  }
+  if (got.record.author === own?.person) {
+    const { results } = await env.DB.prepare("SELECT identity FROM connections WHERE approved_at IS NOT NULL AND identity IS NOT NULL").all();
+    for (const r of results) allowed.add(String(r.identity));
+  }
+  allowed.delete(got.record.author);
+  return listed.every((p) => allowed.has(p)) ? null : "You can only mention people who can see this.";
+}
+
+/** Who a record mentions as pages show them: its content's {name, person}, for those its signed list names. */
+export const shownMentions = (record, content) => (Array.isArray(content?.mentions) ? content.mentions : [])
+  .filter((m) => typeof m?.name === "string" && (record?.mentions ?? []).includes(m.person)).slice(0, 10)
+  .map((m) => ({ name: m.name.slice(0, 100), person: m.person }));
+
+/**
+ * A record on one of the owner's own items, taken, and the item worked out again. {refused} if not; {deleted} if it
+ * was its writer deleting it. With `origin` (this site), a comment is noted to those who'll want to know (notes.js).
+ */
+export async function recordOn(env, host, id, sent, origin = null) {
   const item = await env.DB.prepare("SELECT id, type, content FROM items WHERE id = ?").bind(id).first();
   if (!item) return { refused: "That post isn't here any more." };
   const got = sentRecord(sent);
@@ -184,6 +229,8 @@ export async function recordOn(env, host, id, sent) {
     if (record.kind === "edit" && record.about === id && !text.trim() && !JSON.parse(String(item.content)).photos?.length) {
       return { refused: "A post with no photos needs words." };
     }
+    const wrong = await wrongMentions(env, got, text, id);
+    if (wrong) return { refused: wrong };
   }
   const answer = await takeRecord(env.DB, { sent, host, lookups: lookupsFor(env) });
   if (answer.refused) {
@@ -200,7 +247,8 @@ export async function recordOn(env, host, id, sent) {
     return { deleted: true };
   }
   await refreshItem(env.DB, id);
-  return { ok: true, receipt: answer.receipt, entry: answer.entry };
+  if (origin && record.kind === "comment") await queueCommentNote(env, origin, id, record, answer.entry.fp);
+  return { ok: true, receipt: answer.receipt, entry: answer.entry, record, content };
 }
 
 /**
@@ -279,7 +327,7 @@ export function thread(entries, { owner, item }) {
     }
     const { record, content } = r;
     if (record.kind === "comment") {
-      const c = { fp: e.fp, n: e.n, author: record.author, text: content?.text ?? "", taken: e.taken, state: "ok", earlier: [], edited_at: null, mentions: record.mentions ?? [] };
+      const c = { fp: e.fp, n: e.n, author: record.author, text: content?.text ?? "", taken: e.taken, state: "ok", earlier: [], edited_at: null, mentions: shownMentions(record, content) };
       byFp.set(e.fp, c);
       comments.push(c);
     } else if (record.kind === "edit" && record.about !== item) {
@@ -340,7 +388,7 @@ async function itemFromRow(db, r) {
     : { results: [] };
   return {
     id: String(r.id), author: String(r.author), type: String(r.type), text: content.text ?? "",
-    media, photos: content.photos ?? [],
+    media, photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [],
     created_at: Number(r.created_at), edited_at: r.edited_at ? Number(r.edited_at) : null,
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], comments: Number(r.comments), others: Number(r.others),
     editable: now() - Number(r.created_at) < EDIT_SECONDS && Number(r.others) === 0,

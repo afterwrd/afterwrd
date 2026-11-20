@@ -6,7 +6,7 @@
 // its post, listing the photos left (`change`, from the data-sign-post-* attributes).
 // Forms sent in place are signed by inplace.js; others here, as they're sent (after any "Are you sure?": confirm.js
 // sends the form again).
-import { makeRecord } from "../records.js";
+import { makeRecord, pickedMentions } from "../records.js";
 import { savedKey } from "../browserkey.js";
 
 export const CANT_SIGN = "This browser can't sign for you yet. Sign out and sign in again, or set up signing in Your devices.";
@@ -24,8 +24,11 @@ export async function signForm(form, body) {
   const d = form.dataset;
   const kind = d.sign === "photo-delete" ? "delete" : d.sign;
   const text = body.get("text");
-  const content = kind === "comment" || kind === "edit" ? { text: String(text ?? "").replace(/\r\n?/g, "\n").trim() } : undefined;
-  const fields = { sent: JSON.stringify((await makeRecord(fieldsOf(d, "sign", kind, key), content, key)).sent) };
+  const words = String(text ?? "").replace(/\r\n?/g, "\n").trim();
+  // A comment's mentions, as the @ list noted them (ui/mentions.js): in the record by identity, and named in its content.
+  const { mentions, shown } = kind === "comment" ? pickedMentions(words, body.get("mentions")) : { mentions: [], shown: [] };
+  const content = kind === "comment" || kind === "edit" ? { text: words, ...(shown.length && { mentions: shown }) } : undefined;
+  const fields = { sent: JSON.stringify((await makeRecord({ ...fieldsOf(d, "sign", kind, key), ...(mentions.length && { mentions }) }, content, key)).sent) };
   if (d.sign === "photo-delete") {
     const photos = JSON.parse(d.signPostPhotos ?? "[]");
     fields.change = JSON.stringify((await makeRecord(fieldsOf(d, "signPost", "change", key), { photos }, key)).sent);

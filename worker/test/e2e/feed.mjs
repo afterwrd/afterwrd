@@ -243,6 +243,11 @@ await bob.goto(`${B}/posts/${bobPostId}`);
 const onBob = await bob.$$eval("article.card .comment:not(.gone)", (l) => l.map((c) => ({ name: c.querySelector("strong").textContent, from: c.querySelector(".from")?.textContent })));
 check("Bob sees it under his post, as Ann (she's his friend)", onBob.length === 1 && onBob[0].name === "Ann Example" && onBob[0].from === undefined, JSON.stringify(onBob));
 check("Bob can't change a post Ann has commented on", !(await bob.$("article.card > div.edit")));
+check("Bob's site tells him: Ann commented on his post", sql(stateB, "SELECT kind, own, actor FROM notices WHERE kind = 'comment'")
+  .some((r) => r.own === 1 && r.actor === "Ann Example"));
+await bob.goto(`${B}/activity`);
+check("…on his Notifications, linking to the post", (await bob.$eval("main", (m) => m.innerText)).includes("Ann Example commented on your post")
+  && Boolean(await bob.$(`main a[href="/posts/${bobPostId}"]`)));
 // Ann changes her comment; Bob's site takes the signed edit, and both show what it said before.
 await ann.goto(bobsPostPage);
 const annComment = "article.from-friend .comment:not(.gone)";
@@ -256,14 +261,23 @@ check("…changed on Bob's site, keeping what it said before", (await threadOn(b
 check("…and in Ann's own copy", sql(stateA, "SELECT kind FROM sent").some((r) => r.kind === "edit"));
 check("Ann sees it Edited, with what it said before", (await threadOn(ann, bobsPostPage)).comments[0]?.text === "Looks great, Bob! Where was it?"
   && (await ann.$eval(`${annComment} details.edited`, (d) => d.textContent).catch(() => "")).includes("Looks great, Bob!"));
-// Bob replies on his own site; Ann sees it, and can't delete it, or change her own any more.
+// Bob replies on his own site, while Ann has his post open; she sees it, and can't delete it, or change her own any more.
+await ann.goto(bobsPostPage);
 await bob.goto(`${B}/posts/${bobPostId}`);
 await bob.type("article.card .say textarea", "Thanks Ann");
 await Promise.all([settled(bob), bob.click("article.card .say button")]);
+check("Bob's site sends Ann his reply, signed, with its receipt, and her site keeps it", await waitFor(() =>
+  sql(stateA, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'comment' AND own = 0 AND text = 'Thanks Ann'")[0].n === 1));
+await ann.evaluate(() => window.afterwrdLive.check());
+check("…and her open page quietly offers it", (await ann.$eval(".live-bar span", (s) => s.textContent).catch(() => "")) === "1 new comment");
 annFeed = [await threadOn(ann, bobsPostPage)];
 check("Ann sees Bob's reply, not deletable by her", annFeed[0].comments.map((c) => c.text).join("|") === "Looks great, Bob! Where was it?|Thanks Ann"
   && !annFeed[0].comments[1].canDelete, JSON.stringify(annFeed[0].comments));
 check("once Bob has replied, Ann can't change her comment", !(await ann.$(`${annComment} div.edit`)));
+await ann.goto(`${A}/activity`);
+check("…on her Notifications: Bob replied on his post", (await ann.$eval("main", (m) => m.innerText)).includes("Bob Example replied on their post")
+  && Boolean(await ann.$(`main a[href="/friend/${bobPostOnA().connection_id}/posts/${bobPostId}"]`)));
+await ann.goto(bobsPostPage);
 // What Ann's browser could still try to sign: a late edit, and changing Bob's words. Bob's site refuses both.
 const signAndSend = (page, url, fields, text) => page.evaluate(async (url, fields, text) => {
   const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
@@ -738,13 +752,15 @@ check("Cara's Home now has Ann's post", (await feedCards(cara)).some((c) => c.wh
 await ann.screenshot({ path: `${OUT}/friends-invited.png`, fullPage: true });
 
 // Notes (step 4c: docs/signed-conversations.md): a friend's new signed post reaching an open Home, and the Outbox
-// sending to many. Switched back on, and passing, as part of 4c; until then the notes these check aren't sent.
-const NOTES_4C = false;
-if (NOTES_4C) {
+// sending to many: one row per note, to every friend in turn (outbox.js sendNotes).
+{
 // Ann has Home open when Cara posts: Cara's site sends a note, and Ann's page offers it without moving anything.
 await ann.goto(`${A}/`);
+const postNotices = () => sql(stateA, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'post'")[0].n;
+const postNoticesBefore = postNotices();
 await compose(cara, C, "Cara's first post");
-check("Cara's site tells Ann about the post", await waitFor(() => sql(stateA, "SELECT COUNT(*) AS n FROM inbox WHERE kind = 'post'")[0].n === 1));
+check("Cara's site tells Ann about the post", await waitFor(() => postNotices() === postNoticesBefore + 1));
+check("…in a note carrying the post itself, kept at once", sql(stateA, "SELECT COUNT(*) AS n FROM copies WHERE json_extract(content, '$.text') = 'Cara''s first post'")[0].n === 1);
 check("…but nothing on Ann's page has moved yet", !(await ann.$(".live-bar")) && !(await feedCards(ann)).some((c) => c.text === "Cara's first post"));
 await ann.evaluate(() => window.afterwrdLive.check());
 check("Ann's open Home quietly offers it", (await ann.$eval(".live-bar span", (s) => s.textContent).catch(() => "")) === "1 new post from friends");
@@ -757,10 +773,10 @@ check("…and friends' new posts don't count as notifications", !(await ann.$('h
 sql(stateA, `INSERT INTO connections (id, origin, name, their_key, key_hash, created_at, connected_at, approved_at) VALUES
   ${Array.from({ length: 45 }, (_, i) => `(${-(i + 1)}, 'https://friend${i + 1}.invalid', 'Made-up friend ${i + 1}', '${"k".repeat(43)}',
   'hash-${i + 1}', strftime('%s','now'), strftime('%s','now'), strftime('%s','now'))`).join(",")}`);
-const caraPostsBefore = sql(stateC, "SELECT COUNT(*) AS n FROM inbox WHERE kind = 'post'")[0].n;
+const caraPostsBefore = sql(stateC, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'post'")[0].n;
 await compose(ann, A, "Ann to all 46 friends");
 check("a post reaches a friend 46th in line (the outbox sends in batches)",
-  await waitFor(() => sql(stateC, "SELECT COUNT(*) AS n FROM inbox WHERE kind = 'post'")[0].n === caraPostsBefore + 1, 20_000));
+  await waitFor(() => sql(stateC, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'post'")[0].n === caraPostsBefore + 1, 20_000));
 await ann.goto(`${A}/`);
 check("Home still shows Cara's posts, from the copy her note had fetched", (await feedCards(ann)).some((c) => c.who === "Cara Example"));
 const notices = await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent));

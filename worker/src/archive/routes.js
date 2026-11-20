@@ -685,7 +685,7 @@ async function activity(ctx, params) {
     ctx.activitySeen = true;
   }
   const items = rows.map((c) => ({ ...c, on: c.source === "here" ? targets.get(c.target) : null,
-    isNew: c.created_at > seen && (c.source === "friend" || c.author_id !== user.id) }));
+    isNew: c.created_at > seen && (c.source !== "here" || c.author_id !== user.id) }));
   return { items, paging };
 }
 
@@ -1139,7 +1139,9 @@ async function groupMembers(ctx, params, id) {
  */
 /** Friends as every page knows them: their pictures by site (faces), and who can be mentioned (people: mentions.js). */
 async function friendFaces(db) {
-  const rows = await all(db, `SELECT origin, name, CASE WHEN avatar_exp > ? THEN avatar_url END AS avatar_url FROM connections
+  const rows = await all(db, `SELECT origin, name, identity, CASE WHEN avatar_exp > ? THEN avatar_url END AS avatar_url FROM connections
     WHERE approved_at IS NOT NULL ORDER BY name COLLATE NOCASE`, [now()]);
-  return { faces: Object.fromEntries(rows.map((r) => [r.origin, r.avatar_url])), people: rows.map((r) => ({ name: r.name, origin: r.origin })) };
+  // Each with their identity (afterwrd 2), which signed posts mention them by.
+  return { faces: Object.fromEntries(rows.map((r) => [r.origin, r.avatar_url])),
+    people: rows.map((r) => ({ name: r.name, origin: r.origin, ...(r.identity && { person: r.identity }) })) };
 }

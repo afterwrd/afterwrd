@@ -87,3 +87,39 @@ export async function contentOf(record, contentText, saltText) {
   return value === null ? undefined : value;
 }
 
+
+/**
+ * Who a post or comment mentions, from what the @ list noted (ui/mentions.js: [{name, person}]): those with an
+ * identity whose @name is still in `text`, ten at most. Returns {mentions (person ids, for the record), shown
+ * ([{name, person}], for its content)}, both empty for none.
+ * @param {string} text @param {unknown} picked
+ */
+export function pickedMentions(text, picked) {
+  let list = picked;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { list = []; } }
+  /** @type {{ name: string, person: string }[]} */
+  const shown = [];
+  for (const m of Array.isArray(list) ? list : []) {
+    if (typeof m?.name !== "string" || !ID_RE.test(m?.person ?? "") || shown.some((s) => s.person === m.person)) continue;
+    if (!says(text, m.name)) continue;
+    shown.push({ name: m.name, person: m.person });
+    if (shown.length >= 10) break;
+  }
+  return { mentions: shown.map((m) => m.person), shown };
+}
+
+const WORD = /[A-Za-z0-9_]/;
+/**
+ * Whether `text` says @`name`, as a whole name (not the start of a longer one, nor part of an address like a@b). A plain
+ * search, not a pattern built per name: a friend's site could send many names and long words, and this runs on each.
+ * Shared by the browser and the site (src/mentions.js).
+ */
+export function says(text, name) {
+  const wanted = `@${name}`;
+  for (let i = text.indexOf(wanted); i !== -1; i = text.indexOf(wanted, i + 1)) {
+    const before = i > 0 ? text[i - 1] : "";
+    const after = text[i + wanted.length] ?? "";
+    if (!WORD.test(before) && before !== "@" && !WORD.test(after)) return true;
+  }
+  return false;
+}

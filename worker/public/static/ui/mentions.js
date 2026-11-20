@@ -4,13 +4,15 @@
 // who've already commented there (all its site will tell); on your own, your friends and anyone already on it. Whoever
 // holds the post decides who's actually told: only people who can see it. Without this script,
 // @ is just a character, and nobody is told.
+// Signed posts and comments (afterwrd 2: ui/sign.js, compose.js) mention people by identity, so each person offered
+// carries `person` where it's known (data-person, or the friends list), and a signed form offers only those.
 const BOXES = "form.say textarea[name=text], #composer textarea[name=text]";
 const SHOWN = 6;
 
 const read = (id) => {
   try { return JSON.parse(document.getElementById(id)?.textContent ?? "null"); } catch { return null; }
 };
-/** @type {{ name: string, origin: string }[]} */
+/** @type {{ name: string, origin: string, person?: string }[]} */
 const friends = read("mention-people") ?? [];
 /** @type {{ people: { name: string, origin: string }[], here: boolean } | null} */
 const group = read("mention-group");
@@ -18,22 +20,27 @@ const group = read("mention-group");
 /** Everyone who can be mentioned from `box`, the owner here left out. */
 function candidates(box) {
   const form = box.form;
-  const who = (el) => ({ name: el.dataset.name ?? "", origin: el.dataset.who ?? "", note: "" });
+  const signed = Boolean(form?.dataset.sign || form?.dataset.signs);
+  const who = (el) => ({ name: el.dataset.name ?? "", origin: el.dataset.who ?? "", person: el.dataset.person ?? "", note: "" });
+  // Each person once (by identity on a signed form, else by site), never the owner here, and on a signed form only
+  // those with an identity.
+  const seen = new Set([location.origin]);
+  const once = (p) => {
+    const key = signed ? p.person : p.origin;
+    return Boolean(p.name && key && !seen.has(key) && seen.add(key));
+  };
   // On a friend's post or photo: its writer, and those who've commented there already. Their site tells no one else.
-  if (form?.dataset.ownerWho) {
+  if (form?.dataset.ownerWho || form?.dataset.ownerPerson) {
     const thread = form.closest(".thread") ?? form;
-    const there = [.../** @type {NodeListOf<HTMLElement>} */ (thread.querySelectorAll(".comment[data-who]"))].map(who);
-    const seen = new Set([location.origin]);
-    return [{ name: form.dataset.ownerName ?? "", origin: form.dataset.ownerWho, note: "" }, ...there]
-      .filter((p) => p.name && p.origin && !seen.has(p.origin) && seen.add(p.origin));
+    const there = [.../** @type {NodeListOf<HTMLElement>} */ (thread.querySelectorAll(".comment[data-who], .comment[data-person]"))].map(who);
+    return [{ name: form.dataset.ownerName ?? "", origin: form.dataset.ownerWho ?? "", person: form.dataset.ownerPerson ?? "", note: "" }, ...there].filter(once);
   }
   const near = box.closest("[data-region], article, .info, main") ?? document.body;
-  const shown = [.../** @type {NodeListOf<HTMLElement>} */ (near.querySelectorAll("[data-who]"))].map(who);
+  const shown = [.../** @type {NodeListOf<HTMLElement>} */ (near.querySelectorAll("[data-who], [data-person]"))].map(who);
   const list = group
-    ? [...(group.here ? [{ name: "here", origin: "here", note: "everyone in the group" }] : []), ...group.people.map((p) => ({ ...p, note: "" })), ...shown]
-    : [...shown, ...friends.map((p) => ({ ...p, note: "" }))];
-  const seen = new Set([location.origin]);
-  return list.filter((p) => p.name && p.origin && !seen.has(p.origin) && seen.add(p.origin));
+    ? [...(group.here ? [{ name: "here", origin: "here", person: "", note: "everyone in the group" }] : []), ...group.people.map((p) => ({ person: "", ...p, note: "" })), ...shown]
+    : [...shown, ...friends.map((p) => ({ person: "", ...p, note: "" }))];
+  return list.filter(once);
 }
 
 /** The @words being typed just before the cursor, if any: where the @ is, and what follows it. */
@@ -110,7 +117,9 @@ function pick(box, person) {
   }
   let kept = [];
   try { kept = JSON.parse(field.value); } catch {}
-  if (!kept.some((m) => m.origin === person.origin)) kept.push({ name: person.name, origin: person.origin });
+  if (!kept.some((m) => (person.person ? m.person === person.person : m.origin === person.origin))) {
+    kept.push({ name: person.name, origin: person.origin, ...(person.person && { person: person.person }) });
+  }
   field.value = JSON.stringify(kept);
   hide();
   box.dispatchEvent(new Event("input", { bubbles: true })); // kept as a draft (drafts.js), like anything typed

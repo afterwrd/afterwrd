@@ -6,23 +6,27 @@
 //                              delegations behind its records; and the posts deleted since. "Nothing new" reads a row or two.
 //   GET  /_p/items/<id>        one post's whole list, with the signed head, and the delegations, identity chains and
 //                              signed profiles of everyone in it, so a reader can check comments from people it doesn't know.
-//   POST /_p/records           {sent, delegation}: the calling site's owner's own signed record (a comment, an edit, a
-//                              delete) on one of the owner's posts, with the delegation behind it. Answers with the receipt.
+//   POST /_p/records           {sent, delegation, profile?}: the calling site's owner's own signed record (a comment, an
+//                              edit, a delete) on one of the owner's posts, with the delegation behind it, and their signed
+//                              name (kept, to name them to others in the thread). Answers with the receipt.
+//                              A comment tells the owner here, and those it's news to (notes.js).
+// (And POST /_p/notes, a friend's site telling this one about something new: notes.js.)
 import { friendCalling } from "./calls.js";
 import { listEntries, readList } from "./hosted.js";
-import { identityState } from "./identities.js";
+import { checkProfile, identityState } from "./identities.js";
 import { checkDelegation } from "./identity.js";
 import { ownHost, recordOn } from "./items.js";
 import { signedFile } from "./share.js";
 import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
+import { noticeOwn } from "./notes.js";
 
 const PAGE = 50;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /** The delegations behind records signed with `keys` (browser keys): the owner's own, or ones friends' sites sent. */
-async function delegationsFor(db, keys) {
+export async function delegationsFor(db, keys) {
   const list = [...new Set(keys)];
   if (!list.length) return {};
   const json = JSON.stringify(list);
@@ -34,7 +38,7 @@ async function delegationsFor(db, keys) {
 }
 
 /** Identity chains and signed profiles of `people`: the owner's own, and those this site knows. */
-async function peopleFor(db, people) {
+export async function peopleFor(db, people) {
   const out = {};
   const own = await db.prepare("SELECT person, chain, profile FROM own_identity WHERE id = 1").first();
   const others = people.filter((p) => p !== own?.person);
@@ -46,9 +50,24 @@ async function peopleFor(db, people) {
   return out;
 }
 
-const keyOf = (sent) => parseRecord(fromB64url(sent.record))?.key;
+/**
+ * One of the owner's posts (an `items` row joined with its list's n and head, as list_n and list_head) as a friend's
+ * site is sent it: its first record as signed, its words now, its photos with links to their files for that friend
+ * (`connectionId`), and where its list is up to. Sent by `/_p/items?since` and in new-post notes (notes.js).
+ */
+export async function itemForFriend(env, origin, r, connectionId) {
+  const [first] = await listEntries(env.DB, String(r.id));
+  const content = JSON.parse(String(r.content));
+  const photos = await Promise.all((content.photos ?? []).map(async (p) => ({ ...p,
+    src: await signedFile(env, origin, p.hash, { friend: connectionId }), thumbSrc: await signedFile(env, origin, p.thumb_hash, { friend: connectionId }) })));
+  return { id: String(r.id), sent: first.sent, taken: first.taken, content: { ...content, photos },
+    earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], edited_at: r.edited_at, comments: Number(r.comments),
+    changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) } };
+}
 
-export async function handleFriendItems(request, env, url) {
+export const keyOf = (sent) => parseRecord(fromB64url(sent.record))?.key;
+
+export async function handleFriendItems(request, env, url, work) {
   const body = request.method === "POST" ? new Uint8Array(await request.arrayBuffer()) : null;
   const caller = await friendCalling(request, env, url, body);
   if (caller instanceof Response) return caller;
@@ -60,15 +79,7 @@ export async function handleFriendItems(request, env, url) {
     const more = results.length > PAGE;
     const rows = results.slice(0, PAGE);
     const { results: gone } = await db.prepare("SELECT id FROM lists WHERE deleted_at > ?").bind(since).all();
-    const items = await Promise.all(rows.map(async (r) => {
-      const [first] = await listEntries(db, String(r.id));
-      const content = JSON.parse(String(r.content));
-      const photos = await Promise.all((content.photos ?? []).map(async (p) => ({ ...p,
-        src: await signedFile(env, url.origin, p.hash, { friend: caller.connection.id }), thumbSrc: await signedFile(env, url.origin, p.thumb_hash, { friend: caller.connection.id }) })));
-      return { id: String(r.id), sent: first.sent, taken: first.taken, content: { ...content, photos },
-        earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], edited_at: r.edited_at, comments: Number(r.comments),
-        changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) } };
-    }));
+    const items = await Promise.all(rows.map((r) => itemForFriend(env, url.origin, r, caller.connection.id)));
     return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until: rows.at(-1)?.changed_at ?? since, more,
       delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))) });
   }
@@ -83,8 +94,8 @@ export async function handleFriendItems(request, env, url) {
       delegations: await delegationsFor(db, records.map((r) => r.key)), people: await peopleFor(db, [...new Set(records.map((r) => r.author))]) });
   }
   if (request.method === "POST" && url.pathname === "/_p/records") {
-    let sent = null, delegation = null;
-    try { ({ sent, delegation } = JSON.parse(new TextDecoder().decode(body))); } catch {}
+    let sent = null, delegation = null, profile = null;
+    try { ({ sent, delegation, profile = null } = JSON.parse(new TextDecoder().decode(body))); } catch {}
     const record = typeof sent?.record === "string" ? parseRecord(fromB64url(sent.record)) : null;
     if (!record || !ID_RE.test(record.item ?? "")) return json({ error: "That didn't work." }, 400);
     // A site passes on only its own owner's records, allowed by a delegation from their identity.
@@ -95,9 +106,13 @@ export async function handleFriendItems(request, env, url) {
     const { expires } = JSON.parse(new TextDecoder().decode(dBytes));
     await db.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at) VALUES (?, ?, ?, ?, ?)`)
       .bind(record.key, caller.person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
+    // Their signed name, kept to pass on with the thread (peopleFor), so others in it can name them.
+    const named = profile && (await checkProfile(profile, state));
+    if (named) await db.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(profile), caller.person).run();
     const host = await ownHost(env);
-    const answer = await recordOn(env, host, record.item, sent);
+    const answer = await recordOn(env, host, record.item, sent, url.origin);
     if (answer.refused) return json({ error: answer.refused }, 409);
+    if (answer.entry) await noticeOwn(env, url.origin, work, { item: record.item, record, content: answer.content, fp: answer.entry.fp, connection: caller.connection });
     return json({ ok: true, receipt: answer.receipt ?? null, n: answer.entry?.n ?? null });
   }
   return json({ error: "Not found." }, 404);
