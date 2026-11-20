@@ -10,7 +10,7 @@
 import { actorId, commentId, targetId } from "../public/static/activity.js";
 import { MAX_COMMENT } from "./archive/comments.js";
 import { safeNext } from "./auth.js";
-import { cleanFeed } from "./friends.js";
+import { cleanFeed, newestKeys } from "./friends.js";
 import { messagePage } from "./views/pages.js";
 import { callSite } from "./peers.js";
 import { html, now, Refusal, withoutKeys } from "./util.js";
@@ -19,6 +19,7 @@ import { EDIT_SECONDS, elsewhereVersions, elsewhereVersionsGone } from "./edits.
 import { answerFriendEvent, eventCopies } from "./events.js";
 import { outbox } from "./outbox.js";
 import { cleanMentions, mentionTags } from "./mentions.js";
+import { rateWindow } from "./limits.js";
 
 // Home asks friends' sites for their newest posts when it opens. Each is a request, and the free plan allows 50 per
 // page (calls out only: database queries have a cap of their own, near 1,000; tried on a free account, 14 Nov 2026),
@@ -137,6 +138,11 @@ async function sitesToAsk(db, all) {
 const FRESH_SECONDS = 5 * 60;
 const COPY_SECONDS = 86_400;
 const MARGIN_SECONDS = 5 * 60; // a copy whose links expire sooner than this isn't shown: its photos could break
+const RENEW_SECONDS = 12 * 3600; // a copy whose links expire sooner than this is fetched whole (not "anything new?")
+// SQL, with (connection id, when asked) bound: this answer's copy is the one kept, none asked for later having been kept
+// meanwhile (askSites sets copied_at to when it was asked for, only if it's newer, before keeping the posts).
+const KEPT = "EXISTS (SELECT 1 FROM connections WHERE id = ? AND copied_at = ?)";
+const SINCE_RE = /^[\w.+-]{1,80}$/; // what a friend's feed says it's as of (peers.js feed), kept to give back
 const HOME_POSTS = 100; // friends' posts on Home, newest first, from every friend together
 const KEEP_POSTS = 30; // of each friend's: as many as their feed sends (peers.js FEED_POSTS)
 const MAX_POST_CHARS = 200_000; // a post bigger than this, as kept, isn't kept (a D1 row holds 2 MB at most)
@@ -154,6 +160,10 @@ function copyUntil(posts, at) {
   return Math.min(at + COPY_SECONDS, ...expiries);
 }
 
+/** The posts of a friend's feed that Home's copy keeps, each with its JSON. */
+const keptPosts = (feed) => feed.posts.slice(0, KEEP_POSTS).map((p) => ({ p, data: JSON.stringify(p) }))
+  .filter(({ data }) => data.length <= MAX_POST_CHARS);
+
 /**
  * Statements keeping what friend `connection`'s site just sent (`feed`, cleaned): the copy of their posts Home shows,
  * their name and picture if they've changed, and copies of their events the owner's invited to (events.js). When the
@@ -164,18 +174,75 @@ function copyUntil(posts, at) {
  * @param {{ name?: string, avatar?: { thumbSrc?: string } | null, posts: any[] }} feed
  * @param {number} at
  */
-function keepFeed(db, connection, feed, at) {
-  const posts = feed.posts.slice(0, KEEP_POSTS).map((p) => ({ p, data: JSON.stringify(p) })).filter(({ data }) => data.length <= MAX_POST_CHARS);
+function keepFeed(db, connection, feed, at, asked) {
+  const posts = keptPosts(feed);
   const keys = posts.map(({ p }) => p.key);
-  connection.copied_at = at;
+  connection.copied_at = asked;
   connection.copy_until = copyUntil(posts.map(({ p }) => p), at);
+  connection.copy_keys = JSON.stringify(feed.posts.slice(0, KEEP_POSTS).map((p) => p.key));
+  return [
+    db.prepare(`DELETE FROM friend_posts WHERE connection_id = ? AND post_key NOT IN (SELECT value FROM json_each(?)) AND ${KEPT}`)
+      .bind(connection.id, JSON.stringify(keys), connection.id, asked),
+    ...keepPosts(db, connection, feed, posts, feed.posts, at, asked),
+  ];
+}
+
+/**
+ * The same for a refresh that brought only the posts that have changed (peers.js feed), with the keys of the friend's
+ * newest (`newest`): the copy here keeps those of them it has, with the changed ones brought up to date. One that's
+ * come into the newest without having changed (a newer one went), which the copy here hasn't got, can't be shown
+ * until the whole feed is asked for: this says so (`complete`), and the caller asks for it all next time.
+ * @param {D1Database} db
+ * @param {Row<"connections">} connection
+ * @param {{ name?: string, avatar?: { thumbSrc?: string } | null, posts: any[] }} feed
+ * @param {string[]} newest
+ * @param {number} at
+ * @param {number} asked when it was asked for (askSites)
+ */
+function keepChanges(db, connection, feed, newest, at, asked) {
+  const window = newest.slice(0, KEEP_POSTS);
+  const inWindow = new Set(window);
+  const changed = keptPosts({ posts: feed.posts.filter((p) => inWindow.has(p.key)) });
+  const had = new Set(readKeys(connection.copy_keys));
+  const sent = new Set(feed.posts.map((p) => p.key));
+  connection.copied_at = asked;
+  // The posts not sent keep their photos' links: the copy is good until the first of any of them expires.
+  connection.copy_until = Math.min(connection.copy_until ?? at + COPY_SECONDS, copyUntil(changed.map(({ p }) => p), at));
+  connection.copy_keys = JSON.stringify(window);
+  return {
+    complete: window.every((k) => had.has(k) || sent.has(k)),
+    statements: [
+      db.prepare(`DELETE FROM friend_posts WHERE connection_id = ? AND post_key NOT IN (SELECT value FROM json_each(?)) AND ${KEPT}`)
+        .bind(connection.id, JSON.stringify(window), connection.id, asked),
+      ...keepPosts(db, connection, feed, changed, feed.posts.filter((p) => inWindow.has(p.key)), at, asked),
+    ],
+  };
+}
+
+/** Post keys kept as JSON (connections.copy_keys); none if there aren't any, or it isn't that. */
+function readKeys(json) {
+  try {
+    const keys = JSON.parse(json ?? "[]");
+    return Array.isArray(keys) ? keys.filter((k) => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Statements keeping `posts` (keptPosts) of a friend's, copies of the events among `withEvents` (events.js), and their
+ * name and picture if they've changed.
+ */
+function keepPosts(db, connection, feed, posts, withEvents, at, asked) {
   const statements = [
-    db.prepare("DELETE FROM friend_posts WHERE connection_id = ? AND post_key NOT IN (SELECT value FROM json_each(?))")
-      .bind(connection.id, JSON.stringify(keys)),
-    ...posts.map(({ p, data }) => db.prepare(`INSERT INTO friend_posts (connection_id, post_key, created_at, data) VALUES (?, ?, ?, ?)
-      ON CONFLICT (connection_id, post_key) DO UPDATE SET created_at = excluded.created_at, data = excluded.data
-      WHERE friend_posts.data IS NOT excluded.data`).bind(connection.id, p.key, Math.min(Number(p.created_at) || 0, at + FUTURE_SECONDS), data)),
-    ...eventCopies(db, connection, feed.posts),
+    // A post already kept has only its words, photos and comments brought up to date: its date stays as first kept.
+    // Setting the date too (it's indexed, friend_posts_newest) made each changed post three rows written, not one,
+    // and a busy day changes many (every comment on a friend's post changes it).
+    ...posts.map(({ p, data }) => db.prepare(`INSERT INTO friend_posts (connection_id, post_key, created_at, data) SELECT ?, ?, ?, ? WHERE ${KEPT}
+      ON CONFLICT (connection_id, post_key) DO UPDATE SET data = excluded.data
+      WHERE friend_posts.data IS NOT excluded.data`)
+      .bind(connection.id, p.key, Math.min(Number(p.created_at) || 0, at + FUTURE_SECONDS), data, connection.id, asked)),
+    ...eventCopies(db, connection, withEvents),
   ];
   // Keep names up to date if a friend changes theirs.
   if (feed.name && feed.name !== connection.name) {
@@ -195,14 +262,34 @@ function keepFeed(db, connection, feed, at) {
  * @param {C[]} connections
  * @param {any} env
  * @param {number} [timeout]
+ * @param {number} [rationDay] in the background (refreshCopies): the day (days since 1970) whose ration each fetch counts
+ *   against, counted in the same update as the rest
  * @returns {Promise<{ connection: C, error?: any, slow?: boolean }[]>}
  */
-async function askSites(db, connections, env, timeout) {
+async function askSites(db, connections, env, timeout, rationDay) {
   const replies = await Promise.all(connections.map(async (connection) => {
     const started = Date.now();
     try {
-      const feed = await callSite(connection.origin, "/_peer/feed", { key: connection.their_key, ...(timeout && { timeout }) });
-      return { connection, feed: cleanFeed(feed, connection.origin, env) };
+      // What their feed was as of when the copy here was made (peers.js feed), so their site can say "nothing new",
+      // or send only what's changed since, rather than all of it again. Not once the copy's photo links have less than
+      // RENEW_SECONDS left: then it's fetched whole, which renews them.
+      const since = connection.feed_since && (connection.copy_until ?? 0) > now() + RENEW_SECONDS ? connection.feed_since : null;
+      const data = await callSite(connection.origin, since ? `/_peer/feed?since=${encodeURIComponent(since)}` : "/_peer/feed",
+        { key: connection.their_key, ...(timeout && { timeout }) });
+      if (data?.["afterwrd:unchanged"] === true) {
+        // Only an answer to what was asked: anything else would leave the copy here empty.
+        if (since && data["afterwrd:since"] === since) return { connection, unchanged: true, asked: started / 1000 };
+        throw Object.assign(new Error("Their site said nothing was new, but wasn't asked that."), { status: 502 });
+      }
+      const asOf = typeof data?.["afterwrd:since"] === "string" && SINCE_RE.test(data["afterwrd:since"]) ? data["afterwrd:since"] : null;
+      // Only what's changed, since what was asked, with which are their newest: anything else couldn't be put together
+      // with the copy here.
+      if (data?.["afterwrd:changedSince"] !== undefined) {
+        const newest = since && data["afterwrd:changedSince"] === since ? newestKeys(data, connection.origin) : null;
+        if (!newest) throw Object.assign(new Error("Their site sent some of its posts, but not what was asked for."), { status: 502 });
+        return { connection, feed: cleanFeed(data, connection.origin, env, connection.name), asOf, newest, asked: started / 1000 };
+      }
+      return { connection, feed: cleanFeed(data, connection.origin, env), asOf, asked: started / 1000 };
     } catch (error) {
       // Out of Home's short time (not a site that said no, or isn't there): it's asked again in the background with
       // longer, which decides whether it's reachable, so nothing about it is noted here but that it was asked.
@@ -211,6 +298,9 @@ async function askSites(db, connections, env, timeout) {
     }
   }));
   const at = now();
+  // In the background, each fetch counts against the friend's day's ration (refreshCopies), in the same update.
+  const ration = rationDay === undefined ? "" : ", refreshes = CASE WHEN refresh_day = ? THEN refreshes + 1 ELSE 1 END, refresh_day = ?";
+  const rationValues = rationDay === undefined ? [] : [rationDay, rationDay];
   // A batch for each friend: small transactions, however many friends there are, and one friend's failing (something
   // too big to keep, say) doesn't stop the rest, or Home. A site that says this one isn't connected (401: they removed
   // the owner) has its copy forgotten at once. All of them are sent at once (db.batches): from the Outbox, where the
@@ -218,17 +308,37 @@ async function askSites(db, connections, env, timeout) {
   // The friend's row changes in one statement (when they were asked, whether they answered, when their copy was made),
   // so a refresh writes one row for it rather than three: with 500 friends refreshed several times a day, that's most
   // of a day's writes when nothing's changed (docs/speed-and-scale-plan.md, "Scale test").
-  const batches = replies.map(({ connection, feed, error, slow }) => {
+  // Two fetches of the same friend's posts can overlap (Home asking while the Outbox does, after the owner's changed
+  // something there): an answer is kept only if none asked for later has been already (copied_at: when the copy kept
+  // was asked for, to the millisecond), or an older answer saved last would put back what the newer one replaced.
+  const batches = replies.map(({ connection, feed, asOf, newest, unchanged, asked = 0, error, slow }) => {
     if (slow) return [db.prepare("UPDATE connections SET feed_checked_at = ? WHERE id = ?").bind(at, connection.id)];
     answered(connection, error, at);
-    const kept = feed ? keepFeed(db, connection, feed, at) : [];
-    const copy = feed ? ", copied_at = ?, copy_until = ?" : "";
+    // Nothing new on their site: the copy here is as current as theirs, and stays usable as long as its links.
+    if (unchanged) {
+      connection.copied_at = Math.max(connection.copied_at ?? 0, asked);
+      return [db.prepare(`UPDATE connections SET feed_checked_at = ?, reached_at = ?, missing_since = ?, said_no = ?,
+        copied_at = MAX(COALESCE(copied_at, 0), ?)${ration} WHERE id = ?`)
+        .bind(at, connection.reached_at ?? null, connection.missing_since, connection.said_no, asked, ...rationValues, connection.id)];
+    }
+    // Only what's changed: kept with the rest of the copy here; if that's missing one of their newest, all of it next
+    // time (nothing to give back as of).
+    const changes = feed && newest ? keepChanges(db, connection, feed, newest, at, asked) : null;
+    const kept = changes ? changes.statements : feed ? keepFeed(db, connection, feed, at, asked) : [];
+    const since = changes && !changes.complete ? null : asOf ?? null;
+    const forgotten = error?.status === 401;
+    // The copy's own columns change only if this answer is kept (SET sees the row as it was, so each asks the same).
+    const newer = "COALESCE(copied_at, 0) < ?";
+    const copy = feed ? `, copy_until = CASE WHEN ${newer} THEN ? ELSE copy_until END, copy_keys = CASE WHEN ${newer} THEN ? ELSE copy_keys END,
+      feed_since = CASE WHEN ${newer} THEN ? ELSE feed_since END, copied_at = MAX(COALESCE(copied_at, 0), ?)`
+      : forgotten ? ", copy_keys = NULL, feed_since = NULL" : "";
     return [
-      db.prepare(`UPDATE connections SET feed_checked_at = ?, reached_at = ?, missing_since = ?, said_no = ?${copy} WHERE id = ?`)
+      // First, so the statements keeping the posts can tell whether this answer is the one kept (KEPT).
+      db.prepare(`UPDATE connections SET feed_checked_at = ?, reached_at = ?, missing_since = ?, said_no = ?${copy}${ration} WHERE id = ?`)
         .bind(at, connection.reached_at ?? null, connection.missing_since, connection.said_no,
-          ...(feed ? [connection.copied_at, connection.copy_until] : []), connection.id),
+          ...(feed ? [asked, connection.copy_until, asked, connection.copy_keys, asked, since, asked] : []), ...rationValues, connection.id),
       ...kept,
-      ...(error?.status === 401 ? [db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connection.id)] : []),
+      ...(forgotten ? [db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connection.id)] : []),
     ];
   });
   // If the call itself fails (too big all together, say, or the site busy moving), each friend's batch is sent on its
@@ -244,17 +354,15 @@ async function askSites(db, connections, env, timeout) {
 export async function refreshCopies(env, ids) {
   if (!ids.length) return;
   const db = env.DB;
-  const at = now();
-  const day = Math.floor(at / 86400);
-  // Each friend's fetch claimed from their day's ration first (BACKGROUND_DAILY), in one statement each: those over it wait.
-  const claimed = await db.batch(ids.map((id) => db.prepare(`UPDATE connections
-    SET refreshes = CASE WHEN refresh_day = ?2 THEN refreshes + 1 ELSE 1 END, refresh_day = ?2
-    WHERE id = ?1 AND connected_at IS NOT NULL AND approved_at IS NOT NULL
-      AND (refresh_day IS NOT ?2 OR refreshes < ?3)
-    RETURNING *`).bind(Number(id), day, BACKGROUND_DAILY)));
+  const day = Math.floor(now() / 86400);
+  // Only friends still within their day's ration (BACKGROUND_DAILY); those over it wait. Read here, and counted in the
+  // one update askSites writes for each friend: only the Outbox's alarm refreshes, one run at a time, so nothing can
+  // slip past between the two, and a separate write to claim it was a second row written for every friend refreshed.
   /** @type {Row<"connections">[]} */
-  const results = claimed.flatMap((r) => /** @type {any[]} */ (r.results));
-  await askSites(db, results, env);
+  const results = /** @type {any[]} */ ((await db.prepare(`SELECT * FROM connections
+    WHERE id IN (SELECT value FROM json_each(?1)) AND connected_at IS NOT NULL AND approved_at IS NOT NULL
+      AND (refresh_day IS NOT ?2 OR refreshes < ?3)`).bind(JSON.stringify(ids.map(Number)), day, BACKGROUND_DAILY).all()).results);
+  await askSites(db, results, env, undefined, day);
 }
 
 /** Home's friends' posts: from the copies kept here, asking only the friends with none that can be shown (see above). */
@@ -278,7 +386,8 @@ export async function loadFeed(db, ownOrigin, env = null) {
   // than SITES of them), and those that didn't answer in time (the Outbox waits longer). Quiet sites no more than
   // hourly, as above.
   const asked = new Set(replies.filter((r) => r.error?.status !== 0).map((r) => r.connection));
-  const old = connections.filter((c) => !asked.has(c) && (!usable(c) || c.copied_at < at - FRESH_SECONDS)
+  // (In a scale test that squeezes a day, as much shorter: limits.js rateWindow.)
+  const old = connections.filter((c) => !asked.has(c) && (!usable(c) || c.copied_at < at - rateWindow(FRESH_SECONDS))
     && (!gone(c, at) || (c.feed_checked_at ?? 0) <= at - QUIET_ASK_SECONDS));
   // Handed over while the rest is read, and waited for at the end.
   const refreshing = old.length && env?.OUTBOX ? outbox(env).refresh(old.map((c) => c.id)).catch((error) => console.error("Refreshing copies:", error.message)) : null;

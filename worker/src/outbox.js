@@ -35,9 +35,10 @@ const KINDS = {
   notes: { column: "connection_id", path: "/_peer/notify", sql: FRIENDS },
   member_notes: { column: "member_id", path: "/_member/notify", sql: MEMBERS },
 };
-// Queues there once were, for messages between friends and in groups' chats (gone in 0.47.0): anything still
-// waiting in them goes, unsent.
-const GONE = ["messages", "group_messages", "member_messages"];
+// Queues there once were, for messages between friends and in groups' chats (gone in 0.47.0), and friends to fetch
+// again a row each (refreshes, until 0.59: now refresh_queue): anything still waiting in them goes, unsent (a refresh
+// is asked for again the next time Home opens).
+const GONE = ["messages", "group_messages", "member_messages", "refreshes"];
 
 /** While the site's database is being moved into its object (sitecopy.js): a page or a JSON error, and nothing done. */
 function moving(request) {
@@ -78,8 +79,10 @@ export class Outbox extends DurableObject {
     // a new version), and the key its own update steps carry. Here rather than in D1, so they're never in an export, a
     // restored database or anything a page reads.
     this.sql.exec("CREATE TABLE IF NOT EXISTS vault (name TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    // Friends whose newest posts are to be fetched again for Home (feed.js refreshCopies), each once however often asked.
-    this.sql.exec("CREATE TABLE IF NOT EXISTS refreshes (connection_id INTEGER PRIMARY KEY, due INTEGER NOT NULL)");
+    // Friends whose newest posts are to be fetched again for Home (feed.js refreshCopies), each once however often asked,
+    // in the order asked: one row, the list of them. A row for each friend was two rows written for every friend each
+    // time Home opened (queued, then taken): with hundreds of friends, a good share of a day's writes.
+    this.sql.exec("CREATE TABLE IF NOT EXISTS refresh_queue (id INTEGER PRIMARY KEY CHECK (id = 1), ids TEXT NOT NULL)");
   }
 
   /**
@@ -144,11 +147,25 @@ export class Outbox extends DurableObject {
     return done;
   }
 
+  /** The friends waiting to have their posts fetched again (refresh_queue), oldest first. */
+  queued() {
+    const row = this.sql.exec("SELECT ids FROM refresh_queue WHERE id = 1").toArray()[0];
+    return row ? /** @type {number[]} */ (JSON.parse(String(row.ids))) : [];
+  }
+
+  /** Sets the friends waiting to have their posts fetched again: one row written. */
+  setQueued(ids) {
+    if (ids.length) this.sql.exec("INSERT INTO refresh_queue (id, ids) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ids = excluded.ids", JSON.stringify(ids));
+    else this.sql.exec("DELETE FROM refresh_queue WHERE id = 1");
+  }
+
   /** Has these friends' newest posts fetched again soon, in the background, for Home (feed.js). */
   async refresh(connectionIds) {
-    const at = Date.now();
-    for (const id of connectionIds) this.sql.exec("INSERT INTO refreshes (connection_id, due) VALUES (?, ?) ON CONFLICT DO NOTHING", id, at);
-    await this.wake(at);
+    const waiting = this.queued();
+    const have = new Set(waiting);
+    const more = [...new Set(connectionIds.map(Number))].filter((id) => Number.isSafeInteger(id) && !have.has(id));
+    if (more.length) this.setQueued([...waiting, ...more]);
+    await this.wake(Date.now());
   }
 
   /** A secret kept here (auto.js), or null. */
@@ -216,12 +233,19 @@ export class Outbox extends DurableObject {
     let room = BATCH;
     for (const table of Object.keys(KINDS)) room -= await this.sendDue(table, room);
     // Then, with the calls left, friends' posts to fetch again (notes first: they're what tells friends' sites).
+    // A refresh is due from when it was asked for (refresh()): the oldest first, as many as there's room for. The rest
+    // stay waiting, written back before fetching, so anything asked for meanwhile joins them.
+    let waiting = Infinity;
     if (room > 0) {
-      const ids = this.sql.exec("SELECT connection_id FROM refreshes WHERE due <= ? ORDER BY due LIMIT ?", Date.now(), room).toArray().map((r) => r.connection_id);
-      for (const id of ids) this.sql.exec("DELETE FROM refreshes WHERE connection_id = ?", id);
-      await refreshCopies(this.env, ids).catch((error) => console.error("Refreshing friends' posts:", error.message));
+      const all = this.queued();
+      const ids = all.slice(0, room);
+      if (ids.length) {
+        this.setQueued(all.slice(room));
+        await refreshCopies(this.env, ids).catch((error) => console.error("Refreshing friends' posts:", error.message));
+      }
     }
-    const next = Math.min(...[...Object.keys(KINDS), "refreshes"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t}`).one().due ?? Infinity));
+    if (this.queued().length) waiting = Date.now();
+    const next = Math.min(waiting, ...Object.keys(KINDS).map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t}`).one().due ?? Infinity));
     if (next !== Infinity) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
   }
 

@@ -50,7 +50,7 @@ import { actorId, CONTEXT, editedFields, fileUrl, groupId, groupPostId, iso, tid
 import pkg from "../package.json";
 import { MAX_COMMENT } from "./archive/comments.js";
 import { ANSWERS, eventChanged, eventObject, finishedAt, GROUP_FINISHED_SQL, occurrenceOn, parseEvent, ruleDates } from "./calendar.js";
-import { ALLOWED_SQL, answerAllowance, TOO_MANY_ANSWERS, wasAllowed } from "./limits.js";
+import { ALLOWED_SQL, answerAllowance, rateWindow, TOO_MANY_ANSWERS, wasAllowed } from "./limits.js";
 import { choicesMask, isOpen, OPEN_SQL, pollFromQuestion, pollObject, readPoll, tally } from "./polls.js";
 import { signedLink } from "./friends.js";
 import { mediaStore } from "./media.js";
@@ -101,19 +101,29 @@ const ownerOf = (db) => db.prepare("SELECT origin, name FROM group_members WHERE
 
 // --- what members' sites read ---------------------------------------------------------------------------------------
 
+/** Names in the order SQLite's COLLATE NOCASE gives: ASCII letters without case, everything else as it is. */
+const foldAscii = (name) => String(name).replace(/[A-Z]/g, (c) => c.toLowerCase());
+const byName = (a, b) => {
+  const [x, y] = [foldAscii(a), foldAscii(b)];
+  return x < y ? -1 : x > y ? 1 : 0;
+};
+
 /** The group as a Group: its owner, how many members it has, and (for the member asking) their role. */
 async function groupObject(db, site, group, member) {
+  // Every member's every page reads this, so what grows with the group is read once: the members in any order (sorted
+  // here, not by SQLite), and those waiting counted only for an admin, who's the only one told.
   const [owner, members, waiting] = await db.batch([
     db.prepare("SELECT origin, name FROM group_members WHERE role = 'owner' LIMIT 1"),
-    db.prepare("SELECT origin, name FROM group_members WHERE approved_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
-    db.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL"),
+    db.prepare("SELECT origin, name FROM group_members WHERE approved_at IS NOT NULL"),
+    ...(isAdmin(member) ? [db.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL")] : []),
   ]);
+  members.results.sort((a, b) => byName(a.name, b.name));
   const o = owner.results[0];
   return {
     type: "Group", id: groupId(site, group.id), name: group.name, summary: group.about || undefined, published: iso(group.created_at),
     attributedTo: o ? { type: "Person", id: actorId(o.origin), name: o.name } : undefined,
     "afterwrd:members": members.results.length, "afterwrd:role": member.role,
-    "afterwrd:waiting": isAdmin(member) ? waiting.results[0].n : undefined,
+    "afterwrd:waiting": waiting ? waiting.results[0].n : undefined,
     // Mentions (mentions.js): who's in it, to mention (as GET /_group/members says), and who may use @here.
     "afterwrd:people": members.results.map((m) => ({ type: "Person", id: actorId(m.origin), name: m.name })),
     "afterwrd:hereAnyone": Boolean(group.here_anyone), "afterwrd:mayHere": isAdmin(member) || Boolean(group.here_anyone),
@@ -164,19 +174,23 @@ async function groupNotes(env, site, group, posts, member, comments = PAGE_COMME
   if (!posts.length) return [];
   const marks = posts.map(() => "?").join(",");
   const ids = posts.map((p) => p.id);
-  const [photos, newest, counts, events, answers, polls, votes] = await db.batch([
+  const [photos, newest, events, answers, polls, votes] = await db.batch([
     db.prepare(`SELECT * FROM group_photos WHERE post_id IN (${marks}) ORDER BY id`).bind(...ids),
-    db.prepare(`SELECT * FROM (SELECT c.*, ROW_NUMBER() OVER (PARTITION BY post_id ORDER BY created_at DESC, id DESC) AS n
-      FROM group_comments c WHERE post_id IN (${marks})) WHERE n <= ? ORDER BY created_at, id`).bind(...ids, comments),
-    db.prepare(`SELECT post_id, COUNT(*) AS n FROM group_comments WHERE post_id IN (${marks}) GROUP BY post_id`).bind(...ids),
+    // Each post's newest comments, walking group_comments_post from the newest down and stopping there: picking them
+    // from all of them read every comment on the page's posts. (How many there are is kept on the post: comment_count.)
+    db.prepare(`SELECT c.* FROM json_each(?) p CROSS JOIN group_comments c ON c.id IN
+      (SELECT id FROM group_comments WHERE post_id = p.value ORDER BY created_at DESC, id DESC LIMIT ?)
+      ORDER BY c.created_at, c.id`).bind(JSON.stringify(ids), comments),
     db.prepare(`SELECT * FROM group_events WHERE post_id IN (${marks})`).bind(...ids),
+    // The answers and votes first, each member looked up by (group_id, origin), the members' only index: matched by
+    // origin alone, SQLite read every member for each page (CROSS JOIN keeps that order).
     db.prepare(`SELECT a.post_id, a.origin, a.date, a.answer, m.name FROM group_answers a
-      JOIN group_members m ON m.origin = a.origin AND m.approved_at IS NOT NULL
-      WHERE a.post_id IN (${marks}) ORDER BY a.answered_at, m.name`).bind(...ids),
+      CROSS JOIN group_members m ON m.group_id = ? AND m.origin = a.origin AND m.approved_at IS NOT NULL
+      WHERE a.post_id IN (${marks}) ORDER BY a.answered_at, m.name`).bind(group.id, ...ids),
     db.prepare(`SELECT * FROM group_polls WHERE post_id IN (${marks})`).bind(...ids),
     db.prepare(`SELECT v.post_id, v.origin AS voter, v.choices, m.name FROM group_poll_votes v
-      JOIN group_members m ON m.origin = v.origin AND m.approved_at IS NOT NULL
-      WHERE v.post_id IN (${marks}) ORDER BY v.voted_at, m.name`).bind(...ids),
+      CROSS JOIN group_members m ON m.group_id = ? AND m.origin = v.origin AND m.approved_at IS NOT NULL
+      WHERE v.post_id IN (${marks}) ORDER BY v.voted_at, m.name`).bind(group.id, ...ids),
   ]);
   const author = (row) => ({ type: "Person", id: actorId(row.origin), name: row.author_name });
   const kept = await withSkips(db, events.results);
@@ -197,7 +211,7 @@ async function groupNotes(env, site, group, posts, member, comments = PAGE_COMME
         { viewer: member.origin, names: names && p.origin === member.origin })) : undefined,
       attachment: await Promise.all(photos.results.filter((f) => f.post_id === p.id).map((f) => photoObject(env, site, f))),
       replies: {
-        type: "Collection", totalItems: counts.results.find((c) => c.post_id === p.id)?.n ?? 0,
+        type: "Collection", totalItems: p.comment_count ?? 0,
         items: thread.map((c) => ({ type: "Note", id: `${address}#c${c.id}`, attributedTo: author(c), inReplyTo: address,
           published: iso(c.created_at), mediaType: "text/plain", content: c.text, ...mentionFields(c),
           ...editedFields({ ...c, earlier: commentsEarlier.get(c.id) }) })),
@@ -215,12 +229,10 @@ function mentionFields(row) {
 
 async function groupPage(env, site, group, member, page) {
   const db = env.DB;
-  const [count, rows] = await db.batch([
-    db.prepare("SELECT COUNT(*) AS n FROM group_posts WHERE group_id = ?").bind(group.id),
-    db.prepare("SELECT * FROM group_posts WHERE group_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-      .bind(group.id, POSTS_PAGE, (page - 1) * POSTS_PAGE),
-  ]);
-  const total = count.results[0].n;
+  const rows = await db.prepare("SELECT * FROM group_posts WHERE group_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
+    .bind(group.id, POSTS_PAGE, (page - 1) * POSTS_PAGE).all();
+  // Kept by the database as posts come and go (migrations/0024_group_counts.js): counting read every post.
+  const total = group.post_count;
   return tidy({
     "@context": CONTEXT, type: "OrderedCollectionPage", context: await groupObject(db, site, group, member), totalItems: total,
     "afterwrd:page": page, "afterwrd:hasNext": page * POSTS_PAGE < total,
@@ -381,7 +393,7 @@ async function createPost(env, group, member, { text, photos, event = null, poll
         AND (SELECT COUNT(*) FROM group_photos f JOIN group_posts p ON p.id = f.post_id
           WHERE p.origin = ?2 AND p.created_at > ?5 - 86400) + ?9 <= ?10
         AND (SELECT COALESCE(SUM(size), 0) FROM group_photos) + ?11 <= ?12
-      RETURNING id`).bind(group.id, member.origin, member.name, text || null, at, POST_RATE.seconds, POST_RATE.count,
+      RETURNING id`).bind(group.id, member.origin, member.name, text || null, at, rateWindow(POST_RATE.seconds), POST_RATE.count,
       POST_RATE.daily, photos.length, POST_RATE.photos, bytes, GROUP_BYTES, keptMentions(mentions)).first();
   const id = saved?.id;
   if (!id) return { error: "That's a lot of posts or photos for now, or the group is full of photos. Try again later.", status: 429 };
@@ -454,7 +466,7 @@ async function addComment(env, site, group, member, postId, text, mentions = [])
     SELECT ?1, ?2, ?3, ?4, ?5, ?9
     WHERE (SELECT COUNT(*) FROM group_comments WHERE origin = ?2 AND created_at > ?5 - ?6) < ?7
       AND (SELECT COUNT(*) FROM group_comments WHERE origin = ?2 AND created_at > ?5 - 86400) < ?8
-    RETURNING id`).bind(post.id, member.origin, member.name, text, at, COMMENT_RATE.seconds, COMMENT_RATE.count, COMMENT_RATE.daily,
+    RETURNING id`).bind(post.id, member.origin, member.name, text, at, rateWindow(COMMENT_RATE.seconds), COMMENT_RATE.count, COMMENT_RATE.daily,
     keptMentions(mentions)).first();
   if (!row) return tooMany("comments");
   await notifyGroupComment(env, site, group, post, { id: row.id, name: member.name, text, from: member.origin, mentions });

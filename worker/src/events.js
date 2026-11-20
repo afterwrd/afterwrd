@@ -23,7 +23,7 @@ import { callSite, siteOrigin } from "./peers.js";
 import { parseNote } from "./friends.js";
 import { safeNext } from "./auth.js";
 import { outbox } from "./outbox.js";
-import { ALLOWED_SQL, answerAllowance, TOO_MANY_ANSWERS } from "./limits.js";
+import { ALLOWED_SQL, answerAllowance, rateWindow, TOO_MANY_ANSWERS } from "./limits.js";
 import { html, now, Refusal } from "./util.js";
 import { MAX_POST_TEXT } from "./edits.js";
 import { messagePage } from "./views/pages.js";
@@ -34,6 +34,7 @@ const MAX_ELSEWHERE = 200; // a friend's events kept here, as for a group's (mem
 const NOTE_RATE = { count: 10, seconds: 600, daily: 30 };
 const KEEP_SECONDS = 30 * 86400; // copies of events from elsewhere stay this long after they're over
 const MAX_HOSTING = 100; // events the owner has coming up
+const MAX_PEOPLE = 5000; // in each of an event's lists from elsewhere (going, maybe, can't): well above a big group
 const CHANGE_SECONDS = 300; // one change a guest is told about, per event, this often
 const SNIPPET = 200;
 const FIELDS = ["title", "starts_at", "ends_at", "all_day", "time_zone", "place"];
@@ -42,11 +43,12 @@ const snippet = (text, size = SNIPPET) => (typeof text === "string" ? text.repla
 const APPROVED = (c = "") => `${c}connected_at IS NOT NULL AND ${c}approved_at IS NOT NULL`;
 
 /**
- * Statements forgetting what a removed friend (`connectionId`) was invited to here, their answers, their events, and
- * the copy of their posts Home shows (feed.js).
+ * Statements forgetting what a removed friend (`connectionId`) was invited to here, their answers, their events, the
+ * copy of their posts Home shows (feed.js), and their notes (notify.js).
  */
 export const friendGone = (db, connectionId) => [
   db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connectionId),
+  db.prepare("DELETE FROM inbox WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM post_audience WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM event_answers WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM events_elsewhere WHERE connection_id = ?").bind(connectionId),
@@ -351,7 +353,7 @@ function person(p, env) {
 export function parseSharedEvent(o, env) {
   const event = parseEvent(o);
   if (!event) return null;
-  const people = (list) => (Array.isArray(list) ? list.slice(0, 200) : []).map((p) => person(p, env)).filter((p) => p.name);
+  const people = (list) => (Array.isArray(list) ? list.slice(0, MAX_PEOPLE) : []).map((p) => person(p, env)).filter((p) => p.name);
   const lists = (x) => ({ going: people(x["afterwrd:going"]), maybe: people(x["afterwrd:maybe"]), cantGo: people(x["afterwrd:cantGo"]),
     answer: ANSWERS.includes(x["afterwrd:answer"]) ? x["afterwrd:answer"] : null });
   const invited = o["afterwrd:invited"];
@@ -368,8 +370,8 @@ const COPY = ["title", "starts_at", "ends_at", "all_day", "time_zone", "place", 
 
 // SQL, inside keepCopy (?1 the friend's connection, ?12 now): the friend's site is still within its allowance of event
 // notes. Checked in the very statement that writes the copy, so a note over the allowance writes nothing at all.
-const NOTE_ALLOWANCE = `(SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('invite', 'changed', 'cancelled')
-    AND created_at > ?12 - ${NOTE_RATE.seconds}) < ${NOTE_RATE.count}
+const NOTE_ALLOWANCE = () => `(SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('invite', 'changed', 'cancelled')
+    AND created_at > ?12 - ${rateWindow(NOTE_RATE.seconds)}) < ${NOTE_RATE.count}
   AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('invite', 'changed', 'cancelled')
     AND created_at > ?12 - 86400) < ${NOTE_RATE.daily}`;
 
@@ -463,14 +465,14 @@ export async function receiveFriendEventNote(db, peer, note, tell = () => {}) {
   const [, kept, row] = await db.batch([
     // Their copies long over make room first (they count towards MAX_ELSEWHERE).
     db.prepare(`DELETE FROM events_elsewhere AS e WHERE e.connection_id = ? AND ${FINISHED_SQL} < ?`).bind(peer.id, at - KEEP_SECONDS),
-    keepCopy(db, peer.id, key, event, { invited: kind === "invite", guard: NOTE_ALLOWANCE }),
+    keepCopy(db, peer.id, key, event, { invited: kind === "invite", guard: NOTE_ALLOWANCE() }),
     db.prepare(`INSERT INTO inbox (connection_id, kind, target, actor, text, created_at)
       SELECT ?1, ?2, ?3, ?4, ?5, ?6
       WHERE EXISTS (SELECT 1 FROM events_elsewhere WHERE connection_id = ?1 AND post_key = ?3)
         AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('invite', 'changed', 'cancelled') AND created_at > ?6 - ?7) < ?8
         AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('invite', 'changed', 'cancelled') AND created_at > ?6 - 86400) < ?9
         AND NOT (?2 = 'invite' AND EXISTS (SELECT 1 FROM inbox WHERE connection_id = ?1 AND kind = 'invite' AND target = ?3))
-      RETURNING id`).bind(peer.id, kind, key, peer.name, eventWords(event), at, NOTE_RATE.seconds, NOTE_RATE.count, NOTE_RATE.daily),
+      RETURNING id`).bind(peer.id, kind, key, peer.name, eventWords(event), at, rateWindow(NOTE_RATE.seconds), NOTE_RATE.count, NOTE_RATE.daily),
   ]);
   if (kind === "invite" && !kept.meta.changes) return [{ error: "That's a lot of events for now." }, 429];
   if (!row.results.length) return [{ error: "That's a lot of notes for now." }, 429];

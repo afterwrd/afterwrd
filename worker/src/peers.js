@@ -1,6 +1,9 @@
 // What a connected friend's site may ask of this one, using the key this site gave it (see connect.js):
 //   GET  /_peer/hello?from=<origin>     who's here; only mid-connect, to prove to <origin> the key is ours for it
-//   GET  /_peer/feed                    the owner's newest posts written on afterwrd, with all their comments
+//   GET  /_peer/feed[?since=<s>]        the owner's newest posts written on afterwrd, with all their comments, and
+//                                       afterwrd:since, what they're as of. Given that back (since): only
+//                                       {afterwrd:unchanged: true} if nothing's changed, or only the posts that have,
+//                                       with the newest's addresses (afterwrd:newest) (feed)
 //   GET  /_peer/posts?page=n            the owner's posts and photos, for their friend pages, through share.js:
 //   GET  /_peer/posts/<key>               posts, one post, albums, an album's photos, one photo; files come as signed
 //   GET  /_peer/albums                    links. Only what's shared with the asking friend: a post can be for only
@@ -33,6 +36,7 @@ import { onCloudflare } from "./hosting.js";
 import { commentId, CONTEXT, POST_KEY_RE, postId, tidy } from "../public/static/activity.js";
 import { commentable, findTarget, MAX_COMMENT } from "./archive/comments.js";
 import { editComment, versionsGone } from "./edits.js";
+import pkg from "../package.json";
 import { notes, ownerActor, photoShared, postShared, SHARED_SQL, shareAlbum, shareAlbums, sharePhoto, sharePost, sharePosts } from "./share.js";
 import { json, now, Refusal, sha256 } from "./util.js";
 import { notifyComment, notifyMentions, pushAllowed, receiveNote } from "./notify.js";
@@ -43,7 +47,7 @@ import { giveCheckToken, receiveCheckFailed, receiveCheckSoon } from "./friendch
 import { notifyLater } from "./push.js";
 import { answerHere, pollObject, sitePolls } from "./polls.js";
 import { answerFromFriend, friendGone } from "./events.js";
-import { TOO_MANY_ANSWERS } from "./limits.js";
+import { rateWindow, TOO_MANY_ANSWERS } from "./limits.js";
 import { outbox } from "./outbox.js";
 
 const FEED_POSTS = 30;
@@ -159,7 +163,7 @@ export async function handlePeer(request, env, url, work) {
     return json({ error: `Waiting for ${await ownerName(db)} to approve the connection.` }, 403);
   }
 
-  if (route === "GET /_peer/feed") return json(await feed(env, url.origin, peer));
+  if (route === "GET /_peer/feed") return json(await feed(env, url.origin, peer, url.searchParams.get("since")));
   const page = Math.min(10_000, Math.max(1, Number.parseInt(url.searchParams.get("page"), 10) || 1));
   if (route === "GET /_peer/posts") return json(await sharePosts(env, url.origin, page, await ownerName(db), peer));
   if (route === "GET /_peer/albums") return json(await shareAlbums(env, url.origin, peer));
@@ -233,7 +237,7 @@ export async function handlePeer(request, env, url, work) {
       SELECT ?1, NULL, ?2, ?3, ?4, ?5, ?9
       WHERE (SELECT COUNT(*) FROM comments WHERE origin = ?5 AND created_at > ?4 - ?6) < ?7
         AND (SELECT COUNT(*) FROM comments WHERE origin = ?5 AND created_at > ?4 - 86400) < ?8
-      RETURNING id`).bind(target, peer.name, text, now(), peer.origin, RATE.seconds, RATE.count, DAILY, keptMentions(mentions)).first();
+      RETURNING id`).bind(target, peer.name, text, now(), peer.origin, rateWindow(RATE.seconds), RATE.count, DAILY, keptMentions(mentions)).first();
     if (!row) return json({ error: "That's a lot of comments for now. Try again later." }, 429);
     await notifyComment(env, url.origin, target, { name: peer.name, text, from: peer.origin, mentions });
     await notifyMentions(env, url.origin, target, { name: peer.name, text, mentions, comment: true, from: peer.origin });
@@ -318,18 +322,56 @@ async function visibleTarget(db, target, peer) {
   return (found.post ? await postShared(db, found.post, peer.id) : await photoShared(db, found.photo, peer.id)) ? found : null;
 }
 
+/** The second a token this code gave out (feed's afterwrd:since) says, or null: any other version's is no use here. */
+function sinceSecond(since) {
+  const prefix = `${pkg.version}.`;
+  return typeof since === "string" && since.startsWith(prefix) && /^\d{1,12}$/.test(since.slice(prefix.length))
+    ? Number(since.slice(prefix.length)) : null;
+}
+
 /**
  * The owner's newest afterwrd posts that `peer` may see, as an OrderedCollection of Notes, each with its photos,
- * comments and any poll (with the friend's own answer).
+ * comments and any poll and event (with the friend's own answers), and what it's as of (afterwrd:since: this code's
+ * version, and the second it was read). Given that back (`since`), most refreshes need far less than all 30 posts
+ * with every comment again (about 440 rows read on a popular site, for every friend, every time anything changed:
+ * docs/speed-and-scale-plan.md, "3,000 people on eight servers"). The database keeps what changed when
+ * (migrations/0025_feed_changed.js), so:
+ * - nothing since: only {afterwrd:unchanged: true} (a row or two read);
+ * - some posts since: only those (afterwrd:changedSince: what was asked), with the addresses of the newest 30
+ *   (afterwrd:newest), for the friend's site to drop any that have gone from them;
+ * - something every post shows (the owner's name, say), or a token from another version, or none: everything.
+ * Changes at or after the second asked about are sent, and the second is the database's own clock, read before
+ * anything else, as the triggers stamp changes with it: a change while this is read is sent again next time, never
+ * missed. There's no waiting for edits to settle: whether a comment can still be changed is worked out by the site
+ * showing it (feed.js markAllMine), from when it was written.
  */
-async function feed(env, site, peer) {
-  const { results: posts } = await env.DB.prepare(`SELECT p.* FROM posts p WHERE p.source = 'afterwrd' AND ${SHARED_SQL("?1")}
+async function feed(env, site, peer, since = null) {
+  const db = env.DB;
+  const changed = await db.prepare(`SELECT at, whole_at, CAST(strftime('%s', 'now') AS INTEGER) AS now
+    FROM feed_changed WHERE id = 1`).first();
+  const asOf = changed ? `${pkg.version}.${changed.now}` : undefined;
+  const from = changed ? sinceSecond(since) : null;
+  if (from !== null && changed.at < from) return { "@context": CONTEXT, type: "OrderedCollection", "afterwrd:unchanged": true, "afterwrd:since": since };
+  const { results: posts } = await db.prepare(`SELECT p.* FROM posts p WHERE p.source = 'afterwrd' AND ${SHARED_SQL("?1")}
     ORDER BY p.created_at DESC, p.id DESC LIMIT ?2`).bind(peer.id, FEED_POSTS).all();
+  if (from !== null && changed.whole_at < from) {
+    const fresh = posts.filter((p) => (p.changed_at ?? 0) >= from);
+    return tidy({
+      "@context": CONTEXT,
+      type: "OrderedCollection",
+      totalItems: fresh.length,
+      orderedItems: await notes(env, site, fresh, { peer }),
+      "afterwrd:changedSince": since,
+      "afterwrd:newest": posts.map((p) => postId(site, p.key)),
+      "afterwrd:since": asOf,
+    });
+  }
   return tidy({
     "@context": CONTEXT,
     type: "OrderedCollection",
-    attributedTo: await ownerActor(env, site, await ownerName(env.DB)),
+    attributedTo: await ownerActor(env, site, await ownerName(db)),
     totalItems: posts.length,
     orderedItems: await notes(env, site, posts, { peer }),
+    "afterwrd:since": asOf,
   });
 }

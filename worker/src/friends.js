@@ -107,11 +107,25 @@ function parseActor(actor, site) {
   };
 }
 
-/** A connected site's newest posts, for Home. */
-export function cleanFeed(data, site, env = null) {
+/**
+ * A connected site's newest posts, for Home. Its owner's own comments are named as it says (attributedTo), or, when it
+ * sends only what's changed, which doesn't say again, as `name` (what the site here calls them).
+ */
+export function cleanFeed(data, site, env = null, name = null) {
   const actor = parseActor(data?.attributedTo, site);
   const items = Array.isArray(data?.orderedItems) ? data.orderedItems.slice(0, 50) : [];
-  return { ...actor, posts: items.map((n) => parseNote(n, site, actor.name, env)).filter(Boolean) };
+  return { ...actor, posts: items.map((n) => parseNote(n, site, actor.name ?? name, env)).filter(Boolean) };
+}
+
+/**
+ * The keys of a connected site's newest posts, from the addresses it gave with only its changed ones (peers.js feed,
+ * afterwrd:newest), newest first; null if that isn't a list of up to 50 different addresses of its own posts.
+ */
+export function newestKeys(data, site) {
+  const list = data?.["afterwrd:newest"];
+  if (!Array.isArray(list) || list.length > 50) return null;
+  const keys = list.map((id) => own(site, id, "/posts/"));
+  return keys.every((k) => POST_KEY_RE.test(k ?? "")) && new Set(keys).size === keys.length ? keys : null;
 }
 
 const call = (connection, path) => callSite(connection.origin, path, { key: connection.their_key });

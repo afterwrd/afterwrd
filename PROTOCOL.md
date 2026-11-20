@@ -300,7 +300,7 @@ Source: `src/peers.js:1-17`, `src/peers.js:100-175`, `src/checks.js` (`tellCheck
 
 Used only during pairing (step 4 in 4.2). Answers `200 {"name": string, "protocol": 1}` or `401`.
 
-### 5.2 `GET /_peer/feed`
+### 5.2 `GET /_peer/feed[?since=<token>]`
 
 Returns the owner's newest posts **written on afterwrd** (never imported ones). There are at most 30, newest first, each with its photos and **all** its comments. A friend's site uses this for its Home page.
 
@@ -317,6 +317,44 @@ Returns the owner's newest posts **written on afterwrd** (never imported ones). 
 
 - `totalItems` is the number of items in this answer, not the owner's total.
 - Fields whose value would be undefined are left out.
+- `afterwrd:since` (a string) says what the answer is as of. It is opaque to the receiver: the sender's version and a time, `0.59.0.1795107491`. Sites before 0.59 don't send it.
+
+**Asking for less.** A receiver that kept the last answer's `afterwrd:since` may send it back as `since`. The sender then answers in one of three ways:
+
+1. **Nothing has changed since:** only that, with the same token.
+
+   ```json
+   {"@context": [ … ], "type": "OrderedCollection", "afterwrd:unchanged": true, "afterwrd:since": "<the token sent>"}
+   ```
+
+2. **Some posts have changed since:** only those, with the addresses of the newest 30 (the ones the full answer would have), newest first, and no `attributedTo`.
+
+   ```json
+   {
+     "@context": [ … ],
+     "type": "OrderedCollection",
+     "totalItems": 1,
+     "orderedItems": [ { …Note… } ],
+     "afterwrd:changedSince": "<the token sent>",
+     "afterwrd:newest": ["https://ann.example/posts/post-…", "https://ann.example/posts/post-…"],
+     "afterwrd:since": "<a new token>"
+   }
+   ```
+
+   A post counts as changed when anything it's sent with changes: its words, who it's shared with, its photos, comments (and their edits), poll and answers, event and answers. A post changed in the same second as the token is sent again, so nothing is missed.
+
+3. **Anything else:** the full answer above. This happens when the token is from another version or isn't one, when something every post shows has changed (the owner's name or pictures, or a name in an event's guest list), or when no `since` was sent.
+
+A sender that doesn't know `since` ignores it and sends the full answer, which the receiver must always accept.
+
+What the receiver does with a partial answer (`askSites`, `keepChanges`):
+
+- It accepts `afterwrd:unchanged` or `afterwrd:changedSince` only if they repeat the token it sent. Otherwise the answer is treated as a failure.
+- `afterwrd:newest` must be at most 50 different addresses of the sender's own posts.
+- It updates the posts sent, drops any it holds that aren't in `afterwrd:newest`, and keeps the rest as they were.
+- If one of `afterwrd:newest` is a post it holds no copy of and wasn't sent, it asks without `since` next time.
+- The sender's own comments carry no name in a partial answer (there's no `attributedTo`), so the receiver names them as it calls the sender.
+- It stops sending `since` when the photo links in its copy have less than 12 hours left, so a full answer renews them.
 
 What the receiver accepts (`cleanFeed`):
 

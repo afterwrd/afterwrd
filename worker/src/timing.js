@@ -19,6 +19,7 @@
 // A Worker's clock only moves while it waits on something (Cloudflare's guard against timing attacks), so these
 // are waiting times. CPU time can't be measured from inside: Cloudflare's dashboard shows it.
 import { AsyncLocalStorage } from "node:async_hooks";
+import { squeezeFrom } from "./limits.js";
 
 /**
  * @typedef {{ n: number, ms: number, active: number, since: number, rounds: number }} Clock
@@ -113,6 +114,7 @@ export function scaleTest(object, env, name) {
   // Two settings, as cloudflare.js testingHere asks for ALLOW_LOCAL_SITES: the scale test runs self-hosted only, so a
   // single variable added to a site on Cloudflare can't switch this on.
   if (!env.TEST_SCALE || env.HOSTING !== "self") return;
+  squeezeFrom(env);
   const ctx = /** @type {any} */ (object.ctx);
   object.scaleName = name;
   // Whatever a run hands to waitUntil counts towards that run (as on Cloudflare): noted against the run in progress.
@@ -165,8 +167,11 @@ function counted(object, method, path, work) {
   const timing = { ...fresh(), scale: { object, refused: 0, cursors: [], texts: [], writes: 0, pending: [] } };
   return current.run(timing, async () => {
     let failed = false;
+    let status;
     try {
-      return await work();
+      const result = await work();
+      if (result instanceof Response) status = result.status;
+      return result;
     } catch (error) {
       failed = true;
       throw error;
@@ -178,13 +183,13 @@ function counted(object, method, path, work) {
           seen = pending.length;
           await Promise.allSettled(pending);
         }
-        logRun(object, method, path, timing, pending.length ? Date.now() : replied, failed);
+        logRun(object, method, path, timing, pending.length ? Date.now() : replied, failed, status);
       })());
     }
   });
 }
 
-function logRun(object, method, path, timing, end, failed) {
+function logRun(object, method, path, timing, end, failed, status) {
   const { scale } = timing;
   let read = 0;
   let written = scale.writes;
@@ -196,11 +201,24 @@ function logRun(object, method, path, timing, end, failed) {
   // (sqlite.js inlineIntegers), never the text bound to them.
   const heavy = read > 200 ? scale.cursors.map((c, i) => [c.rowsRead, scale.texts[i].replace(/\s+/g, " ").slice(0, 160)])
     .filter(([rows]) => rows >= 20).sort((a, b) => b[0] - a[0]).slice(0, 6) : undefined;
+  // And a run that wrote a lot, which statements wrote it: added up by statement (numbers taken out), as a batch
+  // repeats the same few for each friend.
+  let heavyWrites;
+  if (written > 50) {
+    const by = new Map();
+    scale.cursors.forEach((c, i) => {
+      if (!c.rowsWritten) return;
+      const shape = scale.texts[i].replace(/\s+/g, " ").replace(/\b\d+\b/g, "N").slice(0, 120);
+      const [rows, runs] = by.get(shape) ?? [0, 0];
+      by.set(shape, [rows + c.rowsWritten, runs + 1]);
+    });
+    heavyWrites = [...by].map(([shape, [rows, runs]]) => [rows, runs, shape]).sort((a, b) => b[0] - a[0]).slice(0, 6);
+  }
   // Paths with anything long in them (friend and invite links' tokens, files' hashes) are logged without it.
   const shown = path.replace(/\/[\w-]{20,}/g, "/:token").slice(0, 80);
   console.log(`AFTERWRD_STATS ${JSON.stringify({ site: object.env.TEST_SCALE, obj: object.scaleName, m: method, path: shown,
     t0: timing.start, ms: end - timing.start, calls: timing.sites.n, objects: timing.objects, refused: scale.refused, rr: read, rw: written,
-    failed, heavy })}`);
+    q: scale.cursors.length, st: status, failed, heavy, hw: heavyWrites })}`);
 }
 
 /**

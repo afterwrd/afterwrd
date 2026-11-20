@@ -48,6 +48,9 @@ import { cleanMentions, HERE, mentionTags, noteMentions } from "./mentions.js";
 
 const PENDING_SECONDS = 600; // a join half made is given up after this
 const MAX_PLANS = 200; // events in one group the owner's said they're going to and that aren't long over
+// People kept from a group's list of them (its members, or those to mention): what it sends is only trusted so far.
+// Well above any group's cap (groups.js maxMembers): cut short, admins couldn't see or let in anyone past the end.
+const MAX_LISTED = 5000;
 const LINK_RE = /^\/_join\/([\w-]{40,100})$/;
 const ROLES = ["owner", "admin", "member"];
 const unexpected = () => new Error("Their site sent something unexpected.");
@@ -110,7 +113,7 @@ function parseGroup(g, site, n, env) {
     role: ROLES.includes(g["afterwrd:role"]) ? g["afterwrd:role"] : "member",
     waiting: Number.isSafeInteger(waiting) && waiting >= 0 ? waiting : 0,
     // Mentions (mentions.js): its members, to pick from, and whether the owner here may use @here, and anyone may.
-    people: (Array.isArray(g["afterwrd:people"]) ? g["afterwrd:people"].slice(0, 200) : [])
+    people: (Array.isArray(g["afterwrd:people"]) ? g["afterwrd:people"].slice(0, MAX_LISTED) : [])
       .map((p) => person(p, env)).filter((p) => p.name && p.from).map((p) => ({ name: p.name, origin: p.from })),
     mayHere: g["afterwrd:mayHere"] === true,
     hereAnyone: g["afterwrd:hereAnyone"] === true,
@@ -129,7 +132,7 @@ export function parseGroupPage(data, site, n, env) {
 
 /** Who's in a group; for an admin, with requests to join and the numbers to act on everyone by. */
 export function parseGroupMembers(data, site, n, env) {
-  const items = Array.isArray(data?.items) ? data.items.slice(0, 200) : [];
+  const items = Array.isArray(data?.items) ? data.items.slice(0, MAX_LISTED) : [];
   return {
     group: parseGroup(data?.context, site, n, env),
     members: items.map((m) => ({

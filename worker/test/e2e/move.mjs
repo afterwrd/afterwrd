@@ -201,7 +201,9 @@ await ann2.screenshot({ path: `${OUT}/move-done.png` });
 const same = (table, columns = "*") => JSON.stringify(sql(stateA, `SELECT ${columns} FROM ${table} ORDER BY 1, 2`))
   === JSON.stringify(sql(stateC, `SELECT ${columns} FROM ${table} ORDER BY 1, 2`));
 for (const table of ["posts", "media", "albums", "polls", "poll_votes", "events", "post_versions", "facebook_people"]) {
-  check(`${table} came over as they were`, count(stateA, table) > 0 && same(table), `${count(stateA, table)} on A, ${count(stateC, table)} here`);
+  // A post's changed_at is when friends' sites were last told about a change: each site's own (migrations/0025).
+  const columns = table === "posts" ? sql(stateA, "SELECT name FROM pragma_table_info('posts') WHERE name != 'changed_at'").map((c) => c.name).join(", ") : "*";
+  check(`${table} came over as they were`, count(stateA, table) > 0 && same(table, columns), `${count(stateA, table)} on A, ${count(stateC, table)} here`);
 }
 check("comments came over, Ann's as hers here", same("comments", "id, target, author_name, text, created_at, origin")
   && sql(stateC, "SELECT author_id FROM comments WHERE origin = 'site'")[0]?.author_id === sql(stateC, "SELECT id FROM users")[0].id);

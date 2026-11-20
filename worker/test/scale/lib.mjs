@@ -4,6 +4,13 @@ import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto"
 import { Agent, request } from "node:http";
 
 const agent = new Agent({ keepAlive: true, maxSockets: 256 });
+
+/** A process's machine (net.mjs --machines): its address on the private network, or this computer's. */
+export const machineOf = (proc) => proc.machine ?? "127.0.0.1";
+/** Where process `i`'s tools (selfhost/tools.js) listen: on its machine, so drive.mjs can reach them from the first. */
+export const toolsAddress = (proc, i) => `${machineOf(proc)}:${9400 + i}`;
+/** Where the first machine takes the others' measuring lines (start.mjs). */
+export const STATS_PORT = 9300;
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 
 /** A minimal CBOR encoder: whole numbers, byte strings, text and maps, which is all a passkey's answer needs. */
@@ -68,12 +75,13 @@ export function makePasskey(rpId) {
 }
 
 /**
- * One site as its owner (or a stranger) sees it: requests through its workerd's router at `port`, with cookies kept.
- * Answers {status, headers, text, json(), ms}.
+ * One site as its owner (or a stranger) sees it: requests through its workerd's router at `machine`:`port`, with
+ * cookies kept. Answers {status, headers, text, json(), ms}.
  */
 export class Site {
-  constructor(host, port) {
+  constructor(host, machine, port) {
     this.host = host;
+    this.machine = machine;
     this.port = port;
     this.origin = `https://${host}`;
     this.cookies = new Map();
@@ -95,7 +103,7 @@ export class Site {
     if (this.cookies.size) sent.Cookie = [...this.cookies].map(([k, v]) => `${k}=${v}`).join("; ");
     const started = performance.now();
     return new Promise((resolve, reject) => {
-      const req = request({ agent, host: "127.0.0.1", port: this.port, path, method, headers: sent, timeout }, (res) => {
+      const req = request({ agent, host: this.machine, port: this.port, path, method, headers: sent, timeout }, (res) => {
         for (const cookie of res.headers["set-cookie"] ?? []) {
           const [pair] = cookie.split(";");
           const at = pair.indexOf("=");
@@ -105,6 +113,10 @@ export class Site {
           else this.cookies.set(name, value);
         }
         const chunks = [];
+        // A connection reset while the answer's coming in fails this request, not the whole run (a full run's setup
+        // stopped at 290,000 friendships on one).
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error(`${method} ${this.host}${path}: the answer was cut off`)));
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
@@ -130,13 +142,15 @@ export class Site {
   }
 }
 
-/** Calls the server's tools (selfhost/tools.js) for the workerd process `i`. */
-export function tools(i, path, body) {
+/** Calls the server's tools (selfhost/tools.js) at `address` (toolsAddress). */
+export function tools(address, path, body) {
+  const at = address.lastIndexOf(":");
   return new Promise((resolve, reject) => {
-    const req = request({ socketPath: `/tmp/afterwrd/tools-${i}.sock`, path, method: body ? "POST" : "GET",
+    const req = request({ host: address.slice(0, at), port: Number(address.slice(at + 1)), path, method: body ? "POST" : "GET",
       headers: { Host: "tools", "Content-Type": "application/json" }, timeout: 60_000 }, (res) => {
       let text = "";
       res.setEncoding("utf8");
+      res.on("error", reject);
       res.on("data", (c) => { text += c; });
       res.on("end", () => {
         try {

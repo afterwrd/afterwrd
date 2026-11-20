@@ -28,6 +28,7 @@ import { SHARED_SQL } from "./share.js";
 import { receiveFriendEventNote } from "./events.js";
 import { now } from "./util.js";
 import { HERE, mentionTags } from "./mentions.js";
+import { rateWindow } from "./limits.js";
 
 const SNIPPET = 200;
 const KEEP_SECONDS = 60 * 86400;
@@ -134,9 +135,10 @@ export async function receiveNote(db, peer, note, tell = () => {}) {
       AND NOT (?2 = 'post' AND EXISTS (SELECT 1 FROM inbox WHERE connection_id = ?1 AND kind = 'post' AND target = ?3))
     RETURNING id`).bind(peer.id, isComment ? "comment" : "post", target,
     isComment ? snippet(object.attributedTo?.name, 100) || "Someone" : null, snippet(object.content) || null,
-    at, RATE.seconds, RATE.count, DAILY).first();
-  await db.prepare("DELETE FROM inbox WHERE created_at < ? OR connection_id NOT IN (SELECT id FROM connections)")
-    .bind(at - KEEP_SECONDS).run();
+    at, rateWindow(RATE.seconds), RATE.count, DAILY).first();
+  // Only what's past keeping: it uses inbox_by_time, so it reads just those. A removed friend's notes go when they're
+  // removed (events.js friendGone); until then nothing shows them anyway (INBOX_JOIN), and ids aren't used again.
+  await db.prepare("DELETE FROM inbox WHERE created_at < ?").bind(at - KEEP_SECONDS).run();
   if (!row && isComment) return [{ error: "That's a lot of notes for now." }, 429];
   // And whether it was kept (within the limits above): what has Home's copy of their posts fetched again (peers.js).
   return [{ ok: true }, 202, Boolean(row)];
@@ -158,7 +160,7 @@ async function receiveMention(db, peer, object, tell) {
     SELECT ?1, 'mention', ?2, ?3, ?4, ?5
     WHERE (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?5 - ?6) < ?7
       AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?5 - 86400) < ?8
-    RETURNING id`).bind(peer.id, target, actor, text || null, at, RATE.seconds, RATE.count, DAILY).first();
+    RETURNING id`).bind(peer.id, target, actor, text || null, at, rateWindow(RATE.seconds), RATE.count, DAILY).first();
   if (!row) return [{ error: "That's a lot of notes for now." }, 429];
   // On the owner's phones within an allowance of its own (fewer than are kept): one at a time per post, the newest in
   // place of the last. Named as the friend's site is known here, with nothing else they chose unless previews are on.
@@ -178,9 +180,10 @@ async function receiveMention(db, peer, object, tell) {
 export async function notifyGroupComment(env, site, group, post, { id, name, text, from, mentions = [] }) {
   // Not to those it mentions (or anyone, with @here): notifyGroupMentions tells them instead, once.
   if (mentions.some((m) => m.origin === HERE)) return;
-  const { results } = await env.DB.prepare(`SELECT id FROM group_members WHERE group_id = ?1 AND approved_at IS NOT NULL AND origin != ?2
-    AND (origin = ?3 OR origin IN (SELECT origin FROM group_comments WHERE post_id = ?4 AND origin IS NOT NULL))
-    AND origin NOT IN (SELECT value FROM json_each(?5)) ORDER BY id`)
+  // Looked up from the few who'd be told (by group_id and origin, the members' index), not by reading every member.
+  const { results } = await env.DB.prepare(`SELECT id FROM group_members WHERE group_id = ?1
+    AND origin IN (SELECT ?3 UNION SELECT origin FROM group_comments WHERE post_id = ?4 AND origin IS NOT NULL)
+    AND approved_at IS NOT NULL AND origin != ?2 AND origin NOT IN (SELECT value FROM json_each(?5)) ORDER BY id`)
     .bind(group.id, from, post.origin, post.id, JSON.stringify(mentions.map((m) => m.origin))).all();
   if (!results.length) return;
   const address = groupPostId(site, group.id, post.id);
@@ -209,8 +212,11 @@ export async function notifyGroupMentions(env, site, group, post, { comment = nu
     FROM json_each(?3) j`).bind(from, now() - 86400, JSON.stringify(named)).all() : { results: [] };
   const people = counted.filter((r) => r.n <= MENTION_PAIR_DAILY).map((r) => r.origin);
   if (!here && !people.length) return;
-  const { results } = await db.prepare(`SELECT id FROM group_members WHERE group_id = ?1 AND approved_at IS NOT NULL AND origin != ?2
-    AND (?3 OR origin IN (SELECT value FROM json_each(?4))) ORDER BY id`).bind(group.id, from, here ? 1 : 0, JSON.stringify(people)).all();
+  // Everyone for @here; otherwise only those named, looked up by the members' index rather than reading every member.
+  const { results } = await (here
+    ? db.prepare("SELECT id FROM group_members WHERE group_id = ?1 AND approved_at IS NOT NULL AND origin != ?2 ORDER BY id").bind(group.id, from)
+    : db.prepare(`SELECT id FROM group_members WHERE group_id = ?1 AND origin IN (SELECT value FROM json_each(?3))
+      AND approved_at IS NOT NULL AND origin != ?2 ORDER BY id`).bind(group.id, from, JSON.stringify(people))).all();
   if (!results.length) return;
   const address = groupPostId(site, group.id, post.id);
   await outbox(env).sendToMembers(results.map((r) => r.id), { "@context": CONTEXT, type: "Create", object: { type: "Note",
@@ -280,7 +286,7 @@ async function receiveEventNote(db, group, note, tell) {
     WHERE (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IS NOT NULL AND created_at > ?5 - ?6) < ?7
       AND (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IS NOT NULL AND created_at > ?5 - 86400) < ?8
     RETURNING id`).bind(group.id, Number(id), snippet(note.actor?.name, 100) || "Someone", snippet(words, 400), at,
-    EVENT_RATE.seconds, EVENT_RATE.count, EVENT_RATE.daily, kind, date).first();
+    rateWindow(EVENT_RATE.seconds), EVENT_RATE.count, EVENT_RATE.daily, kind, date).first();
   if (!row) return [{ error: "That's a lot of notes for now." }, 429];
   tell({
     title: group.name,
@@ -330,7 +336,7 @@ export async function receiveGroupNote(db, group, note, tell = () => {}) {
     WHERE (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IS NULL AND created_at > ?5 - ?6) < ?7
       AND (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IS NULL AND created_at > ?5 - 86400) < ?8
     RETURNING id`).bind(group.id, Number(post), snippet(object.attributedTo?.name, 100) || "Someone", snippet(object.content) || null,
-    at, RATE.seconds, RATE.count, DAILY).first();
+    at, rateWindow(RATE.seconds), RATE.count, DAILY).first();
   await db.prepare("DELETE FROM group_inbox WHERE created_at < ? OR group_id NOT IN (SELECT id FROM groups)").bind(at - KEEP_SECONDS).run();
   return row ? [{ ok: true }, 202] : [{ error: "That's a lot of notes for now." }, 429];
 }
@@ -345,7 +351,7 @@ const MENTION_RATE = { count: 20, seconds: 600, daily: 60 };
 export const MENTION_PUSH = { count: 5, seconds: 600, daily: 20 };
 export async function pushAllowed(db, sql, from, at, more = null) {
   const [recent, today] = await db.batch([
-    db.prepare(sql).bind(from, at - MENTION_PUSH.seconds, ...(more === null ? [] : [more])),
+    db.prepare(sql).bind(from, at - rateWindow(MENTION_PUSH.seconds), ...(more === null ? [] : [more])),
     db.prepare(sql).bind(from, at - 86400, ...(more === null ? [] : [more])),
   ]);
   return recent.results[0].n <= MENTION_PUSH.count && today.results[0].n <= MENTION_PUSH.daily;
@@ -366,7 +372,7 @@ async function receiveGroupMention(db, group, post, object, tell) {
     WHERE (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?5 - ?7) < ?8
       AND (SELECT COUNT(*) FROM group_inbox WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?5 - 86400) < ?9
     RETURNING id`).bind(group.id, post, actor, text || null, at, here ? "here" : "mention",
-    MENTION_RATE.seconds, MENTION_RATE.count, MENTION_RATE.daily).first();
+    rateWindow(MENTION_RATE.seconds), MENTION_RATE.count, MENTION_RATE.daily).first();
   if (!row) return [{ error: "That's a lot of mentions for now." }, 429];
   if (await pushAllowed(db, "SELECT COUNT(*) AS n FROM group_inbox WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?2", group.id, at)) {
     tell({ kind: "mention", title: group.name, text: `${actor} ${here ? "to everyone" : "mentioned you"}: ${text}`,

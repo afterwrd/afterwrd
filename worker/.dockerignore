@@ -6,3 +6,4 @@ test/e2e/out
 generated
 .dev.vars*
 .env*
+test/scale/out

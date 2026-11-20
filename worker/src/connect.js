@@ -28,6 +28,7 @@ import { callSite, host, KEY_RE, ownerName, siteOrigin } from "./peers.js";
 import { html, json, now, pageData, randomToken, Refusal, sha256, withoutKeys } from "./util.js";
 import { headerMe } from "./photos.js";
 import { confirmPage, connectionsMessage, connectionsPage, introducedPage, introducePage, togetherPage } from "./views/connections.js";
+import { rateWindow } from "./limits.js";
 
 // A friend link lasts 30 days, enough for someone new to set up their own site first (and wait for Facebook's
 // download, if they want it). It works once, and only asks: nothing is shared until its owner approves.
@@ -122,8 +123,8 @@ async function ask(request, env, url) {
   const at = now();
   const [, counted] = await db.batch([
     db.prepare("DELETE FROM ask_log WHERE at < ?").bind(at - 3600),
-    db.prepare(`INSERT INTO ask_log (at, origin) SELECT ?1, ?2 WHERE (SELECT COUNT(*) FROM ask_log WHERE at > ?1 - 3600) < ?3
-      AND (SELECT COUNT(*) FROM ask_log WHERE origin = ?2 AND at > ?1 - 3600) < ?4 RETURNING at`).bind(at, origin, ASKS.hour, ASKS.perSite),
+    db.prepare(`INSERT INTO ask_log (at, origin) SELECT ?1, ?2 WHERE (SELECT COUNT(*) FROM ask_log WHERE at > ?1 - ?5) < ?3
+      AND (SELECT COUNT(*) FROM ask_log WHERE origin = ?2 AND at > ?1 - ?5) < ?4 RETURNING at`).bind(at, origin, ASKS.hour, ASKS.perSite, rateWindow(3600)),
   ]);
   if (!counted.results.length) return json({ error: "Lots of people are asking to be friends just now. Try again later." }, 429);
   let them;

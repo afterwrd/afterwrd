@@ -1,0 +1,22 @@
+#cloud-config
+# The scale test's rented server (README.md, "On a rented server"), given as its cloud-init user data: Docker, no
+# automatic updates (they restart containerd mid-run), enough memory maps for hundreds of V8 isolates per process,
+# swap so a memory spike slows the run instead of killing it, and a power-off after 4 hours so a forgotten server
+# stops costing compute. Don't put ": " inside a command: YAML reads it as a map, and the whole runcmd is skipped.
+package_update: true
+packages:
+  - docker.io
+  - rsync
+write_files:
+  - path: /etc/sysctl.d/90-afterwrd-scale.conf
+    content: |
+      vm.max_map_count=1048576
+bootcmd:
+  # No automatic updates during the run: they restart containerd, which kills builds (and could kill the network).
+  - systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer || true
+runcmd:
+  - sysctl --system
+  - fallocate -l 16G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  - systemctl enable --now docker
+  - shutdown -h +240 "afterwrd scale test, 4-hour cap"
+  - touch /root/ready

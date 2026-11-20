@@ -5,18 +5,28 @@
 #   test/scale/scale.sh drive <args>  runs drive.mjs inside it
 #   test/scale/scale.sh down          stops it (the data volume stays; `reset` removes it)
 #   test/scale/scale.sh snapshot      saves the (stopped) network's data to out/snapshot.tar; `restore` puts it back
+# On several machines (net.mjs --machines), each runs `up` with SCALE_MACHINE set to its address, and `drive` runs on
+# the first. With SCALE_NETWORK too, the container joins that Docker network at that address (machines.sh, rehearsing
+# on one computer); without it, it uses the server's own network (one container per server).
 set -eu
 cd "$(dirname "$0")/../.."
-NAME=afterwrd-scale-net
-IMAGE=afterwrd-scale
-VOLUME=afterwrd-scale-data
-OUT="$PWD/test/scale/out"
+# Other names can be given, to try things without touching a network that's kept (vm.sh's rehearsal does).
+NAME="${SCALE_NAME:-afterwrd-scale-net}"
+IMAGE="${SCALE_IMAGE:-afterwrd-scale}"
+VOLUME="${SCALE_VOLUME:-afterwrd-scale-data}"
+OUT="${SCALE_OUT:-$PWD/test/scale/out}"
 mkdir -p "$OUT"
+NETWORK=""
+if [ -n "${SCALE_MACHINE:-}" ]; then
+  if [ -n "${SCALE_NETWORK:-}" ]; then NETWORK="--network $SCALE_NETWORK --ip $SCALE_MACHINE"; else NETWORK="--network host"; fi
+  NETWORK="$NETWORK -e SCALE_MACHINE=$SCALE_MACHINE"
+fi
 case "${1:-}" in
   build)
     node selfhost/build.mjs "$OUT/build" ;;
   up)
-    docker run -d --name "$NAME" --init -v "$VOLUME:/data" -v "$OUT/build:/build" -v "$PWD/selfhost:/selfhost:ro" \
+    # shellcheck disable=SC2086
+    docker run -d --name "$NAME" --init $NETWORK -v "$VOLUME:/data" -v "$OUT/build:/build" -v "$PWD/selfhost:/selfhost:ro" \
       -v "$PWD/test/scale:/scale:ro" -v "$OUT:/out" --entrypoint node "$IMAGE" /scale/start.mjs ;;
   drive)
     shift

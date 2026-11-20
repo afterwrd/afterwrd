@@ -118,6 +118,7 @@ run_notifications() { # notifications on the owner's devices (src/push.js), thei
   echo "== sqlite" # the database layer's whole numbers (src/sqlite.js), and the one-off move into the site's object
   (cd "$WORKER" && node test/sqlite.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$WORKER" && node --no-warnings test/sitecopy.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  (cd "$WORKER" && node --no-warnings test/triggers.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   three_sites notifications.mjs
 }
 run_groups() { three_sites groups.mjs group; }

@@ -13,12 +13,17 @@ import { headerMe } from "./photos.js";
 import { exportPage } from "./views/export.js";
 
 const PAGE = 1000;
+/** A post's own columns, as Download everything gives them and a move takes them in. */
+export const POST_COLUMNS = "id, key, source, created_at, kind, title, text, target_id, group_name, link_url, place_name, "
+  + "place_address, latitude, longitude, fbid, edited_at, audience, mentions";
+
 export const TABLES = {
   // The rest of settings are the site's own keys.
   settings: { columns: "key, value", where: "key IN ('sections', 'profile_hash', 'cover_hash')" },
   // Posts, photos and albums, made on afterwrd and from the Facebook download (`source` says which).
   albums: { columns: "*" },
-  posts: { columns: "*" },
+  // Not changed_at: when friends' sites were last told about a change (migrations/0025), which means nothing elsewhere.
+  posts: { columns: POST_COLUMNS },
   media: { columns: "*" },
   // Facebook's record of the owner's life there.
   facebook_people: { columns: "*" },

@@ -34,6 +34,9 @@ import m0019 from "../migrations/0019_no_messages.sql";
 import m0020 from "../migrations/0020_friend_copies.sql";
 import m0021 from "../migrations/0021_mentions.sql";
 import m0022 from "../migrations/0022_day_index.sql";
+import m0023 from "../migrations/0023_feed_copies.sql";
+import m0024 from "../migrations/0024_group_counts.js";
+import m0025 from "../migrations/0025_feed_changed.js";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -60,6 +63,9 @@ const MIGRATIONS = [
   ["0020_friend_copies.sql", m0020],
   ["0021_mentions.sql", m0021],
   ["0022_day_index.sql", m0022],
+  ["0023_feed_copies.sql", m0023],
+  ["0024_group_counts", m0024],
+  ["0025_feed_changed", m0025],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

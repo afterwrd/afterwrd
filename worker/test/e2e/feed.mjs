@@ -559,6 +559,77 @@ const edited = await ann.$$eval("article.from-friend", (l) => l.map((a) => ({ te
   was: a.querySelector(":scope > details.edited")?.textContent ?? "" })).find((p) => p.text === "Off to the coast tomorrow"));
 check("Ann sees Bob's changed post, Edited, with what it said before", Boolean(edited) && edited.was.includes("Off to the coast"), JSON.stringify(edited));
 
+// Refreshing for less (peers.js feed): Bob's site says what his posts are as of; Ann's site gives that back next time,
+// and is told only that nothing's new, or sent only the posts that have changed, with the addresses of his newest. A
+// copy made old (as it would be within minutes), so Home asks Bob's site again in the background.
+const bobAsOf = () => sql(stateA, "SELECT feed_since, copy_keys, feed_checked_at FROM connections")[0];
+const ageCopy = () => sql(stateA, "UPDATE connections SET copied_at = copied_at - 3600, feed_checked_at = 0");
+const refreshed = async () => { ageCopy(); await ann.goto(`${A}/`); return waitFor(() => bobAsOf().feed_checked_at > 0); };
+// What's changed is told to the second, and a change in the same second as a copy is sent again rather than risk
+// missing it: so each step here starts in a new second, or these few quick steps would all share one.
+const tick = () => new Promise((r) => setTimeout(r, 1100));
+const ask = async (since) => (await fetch(`${B}/_peer/feed${since ? `?since=${encodeURIComponent(since)}` : ""}`,
+  { headers: { Authorization: `Bearer ${sql(stateA, "SELECT their_key FROM connections")[0].their_key}` } })).json();
+await tick();
+check("Ann's site keeps what Bob's posts are as of, and which are his newest", await refreshed() && await waitFor(() => /^[\w.+-]+\.\d+$/.test(bobAsOf().feed_since ?? "")
+  && JSON.parse(bobAsOf().copy_keys ?? "[]").length > 1), JSON.stringify(bobAsOf()));
+// A mark on Ann's copy of one of Bob's posts: it goes only if her site saves that post again.
+sql(stateA, "UPDATE friend_posts SET data = replace(data, 'Off to the coast tomorrow', 'Off to the coast tomorrow (as kept)')");
+const marked = () => sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%(as kept)%'")[0].n === 1;
+let since = bobAsOf().feed_since;
+check("…asked again, Bob's site says nothing's new, and nothing in her copy is saved again", await refreshed()
+  && bobAsOf().feed_since === since && marked(), JSON.stringify(bobAsOf()));
+const unchanged = await ask(since);
+check("…which is all it says", unchanged["afterwrd:unchanged"] === true && !unchanged.orderedItems, JSON.stringify(unchanged).slice(0, 120));
+await tick();
+await compose(bob, B, "Back from the coast");
+const after = await homeUntil(ann, A, (cards) => cards.some((c) => c.text === "Back from the coast"));
+check("once Bob posts, the refresh his note brings sends only that: the rest of her copy stays as it was",
+  after.some((c) => c.text === "Back from the coast") && marked() && bobAsOf().feed_since !== since);
+const changes = await ask(since);
+const bobsNewest = changes["afterwrd:newest"] ?? [];
+check("asked as of before it, Bob's site sends only the new post, with the addresses of his newest",
+  changes["afterwrd:changedSince"] === since && changes.orderedItems?.length === 1 && changes.orderedItems[0].content === "Back from the coast"
+  && bobsNewest[0] === changes.orderedItems[0].id && bobsNewest.length > 1 && !changes.attributedTo, JSON.stringify(changes).slice(0, 200));
+// Bob comments on his newest post, on his own site.
+const bobComments = async (text) => {
+  await bob.goto(`${B}/posts`);
+  await bob.type("main article.card:first-of-type .say textarea", text);
+  await Promise.all([settled(bob), bob.click("main article.card:first-of-type .say button")]);
+};
+await tick();
+since = bobAsOf().feed_since;
+await bobComments("Lovely day for it");
+const commented = await ask(since);
+check("a comment on one post sends only that post, with the comment", commented.orderedItems?.length === 1
+  && commented.orderedItems[0].replies?.items?.some((c) => c.content === "Lovely day for it"), JSON.stringify(commented).slice(0, 200));
+check("…and Ann's refresh keeps it, leaving the rest", await refreshed() && marked()
+  && sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%Lovely day for it%'")[0].n === 1);
+await tick();
+// A post gone: not among the newest any more, so it goes from her copy too, with nothing else saved.
+sql(stateB, "DELETE FROM posts WHERE text = 'Back from the coast'");
+check("a post Bob deletes goes from Ann's copy at her next refresh", await refreshed() && marked()
+  && sql(stateA, "SELECT COUNT(*) AS n FROM friend_posts WHERE data LIKE '%Back from the coast%'")[0].n === 0);
+// Something every post shows (Bob's name, which his comments carry): the whole feed again.
+await tick();
+since = bobAsOf().feed_since;
+sql(stateB, "UPDATE users SET name = name");
+const whole = await ask(since);
+check("a change to what every post shows (his name) sends everything again", !whole["afterwrd:changedSince"] && Boolean(whole.attributedTo)
+  && (whole.orderedItems?.length ?? 0) > 1, JSON.stringify(whole).slice(0, 120));
+check("…as does what another version gave out", Boolean((await ask("0.0.1.1700000000")).attributedTo));
+// One of Bob's newest that Ann's copy hasn't got (as when a newer one goes and an older one comes into his newest):
+// her site can't show it from only what's changed, so it asks for everything next time.
+await tick();
+await refreshed();
+await tick();
+sql(stateA, "UPDATE connections SET copy_keys = json_remove(copy_keys, '$[#-1]')"); // his oldest of them, not the one commented on
+await bobComments("Packed already"); // on "Off to the coast tomorrow", his newest now
+check("a post among Bob's newest that her copy hasn't got: nothing to give back next time", await refreshed() && bobAsOf().feed_since === null,
+  JSON.stringify(bobAsOf()));
+check("…so the next refresh brings all of it, and says what it's as of again", await refreshed() && Boolean(bobAsOf().feed_since)
+  && !marked() && JSON.parse(bobAsOf().copy_keys).length > 1);
+
 // Phone view of the Feed, then disconnect.
 await ann.setViewport({ width: 375, height: 800, isMobile: true });
 await ann.goto(`${A}/`);

@@ -5,6 +5,20 @@
 import { now, randomToken } from "./util.js";
 
 export const ANSWER_LIMIT = { count: 30, seconds: 600, daily: 200 };
+
+// A scale test (test/scale: self-hosted, with TEST_SCALE) squeezes a day into an hour or two, so its rate limits' short
+// windows (ten minutes, an hour) shrink by the same factor (TEST_SQUEEZE), or they'd bite that many times sooner than
+// for real; so does how long Home's copy of a friend's posts counts as fresh (feed.js). Daily limits stay as they are: the test's day is one real day. Set by timing.js scaleTest, the only place
+// that knows a site is a scale test's; each site runs in its own isolate there, so this is that site's. Always 1
+// anywhere else.
+let squeeze = 1;
+/** @param {Record<string, any>} env */
+export function squeezeFrom(env) {
+  const factor = env?.TEST_SCALE && env.HOSTING === "self" ? Number(env.TEST_SQUEEZE) : 1;
+  squeeze = factor > 1 ? factor : 1;
+}
+/** A rate limit's window (seconds), as long as it is, or shorter in a squeezed scale test (see above). */
+export const rateWindow = (seconds) => Math.max(1, Math.round(seconds / squeeze));
 export const TOO_MANY_ANSWERS = "That's a lot of answers for now. Try again later.";
 
 /**
@@ -19,7 +33,7 @@ export function answerAllowance(db, who, at = now()) {
     db.prepare(`INSERT INTO answer_log (who, token, at) SELECT ?1, ?2, ?3
       WHERE (SELECT COUNT(*) FROM answer_log WHERE who = ?1 AND at > ?3 - ?4) < ?5
         AND (SELECT COUNT(*) FROM answer_log WHERE who = ?1 AND at > ?3 - 86400) < ?6`)
-      .bind(who, token, at, ANSWER_LIMIT.seconds, ANSWER_LIMIT.count, ANSWER_LIMIT.daily),
+      .bind(who, token, at, rateWindow(ANSWER_LIMIT.seconds), ANSWER_LIMIT.count, ANSWER_LIMIT.daily),
   ] };
 }
 
