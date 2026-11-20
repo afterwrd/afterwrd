@@ -6,7 +6,7 @@
 import puppeteer from "puppeteer-core";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { settled } from "./helpers.mjs";
+import { settled, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -115,6 +115,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
   return page;
 }
 async function picture(page, site, role, file) {

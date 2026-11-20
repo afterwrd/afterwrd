@@ -7,6 +7,7 @@
 // Local sites aren't on workers.dev, so the actual update stops at "Updating works from the site's workers.dev address".
 // Connecting Cloudflare is run end to end with the relay page (afterwrd.app/connect/) stood in for: the test answers
 // for it, reads the state from the address the site sent the browser to, and comes back the way the real page would.
+import { setUpSigning } from "./helpers.mjs";
 import puppeteer from "puppeteer-core";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -49,6 +50,7 @@ await page.goto(`${BASE}/_auth/setup?code=local-test-setup-code`);
 await page.type("#name", "Owner");
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
+await setUpSigning(page);
 
 // The mark on the Update button (the first page load fetches the latest version in the background).
 await page.goto(`${BASE}/posts`);

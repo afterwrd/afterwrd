@@ -8,7 +8,7 @@
 import { createECDH, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { count as n, settled, siteSql as sql } from "./helpers.mjs";
+import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const [, , stateA, stateB, stateC, stateG] = process.argv.slice(2);
@@ -45,6 +45,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
   return page;
 }
 const text = (page, selector = "main") => page.$eval(selector, (m) => m.innerText).catch(() => "");

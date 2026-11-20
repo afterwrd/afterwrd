@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, siteSql as sql } from "./helpers.mjs";
+import { settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -41,6 +41,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
   return page;
 }
 async function importZip(page, site, zip = zipPath, sections = ["posts", "photos"]) {

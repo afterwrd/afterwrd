@@ -19,7 +19,7 @@ import { checkNewer, databaseIsNewer, ensureSchema } from "./migrate.js";
 import { handlePeer } from "./peers.js";
 import { messagePage } from "./views/pages.js";
 import { signedFor } from "./share.js";
-import { PUBLIC_APP, PUBLIC_FONT, serveStatic } from "./static.js";
+import { PUBLIC_APP, PUBLIC_FONT, PUBLIC_SIGNING, serveStatic } from "./static.js";
 import { handleCheck } from "./checks.js";
 import { html } from "./util.js";
 import { handleLive } from "./live.js";
@@ -128,6 +128,8 @@ async function route(request, env, work) {
   const reading = request.method === "GET" || request.method === "HEAD";
   // The fonts are public, so the sign-in pages can use them too; they're open-licensed and say nothing about the site.
   if (reading && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);
+  // So is the signing code the sign-in page makes this browser's key with (static.js PUBLIC_SIGNING).
+  if (reading && PUBLIC_SIGNING.test(url.pathname)) return serveStatic(request, env);
   // The home-screen app's manifest, icons and service worker are public too: phones fetch them without
   // the session, and they're the same for every site. The service worker may look after the whole site (scope "/").
   if (reading && PUBLIC_APP.test(url.pathname)) {

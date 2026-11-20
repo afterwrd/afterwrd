@@ -9,3 +9,6 @@ export { serveStatic } from "../../src/static.js";
 export { cleanMentions, noteMentions } from "../../src/mentions.js";
 export { linkify } from "../../src/views/format.js";
 export { CLIENT_ID, EARLIER_CLIENTS, grantClient } from "../../src/cloudflare.js";
+// What keys.mjs tests (afterwrd 2).
+export * as signed from "../../public/static/signed.js";
+export { checkDelegation, checkPasskeyProof, forked, readIdentity, SLOW_SECONDS } from "../../src/identity.js";

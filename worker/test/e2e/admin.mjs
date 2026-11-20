@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, sql } from "./helpers.mjs";
+import { settled, sql, browserKeyOf, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -45,6 +45,31 @@ const passkeys = (page) => page.$$eval(".devices li", (l) => l.map((li) => ({
 const ownerName = `Owner ${Date.now()}`;
 const phone = await device();
 await register(phone, newOwner(ownerName));
+check("a site's first passkey goes on to its recovery code", new URL(phone.url()).pathname === "/_admin/keys");
+const recoveryCode = await setUpSigning(phone);
+// afterwrd 2's keys (keys.js): the owner's identity, this browser's key, the site's hosting key; never the code.
+const identity = sql("SELECT person, chain FROM own_identity")[0];
+const firstDoc = identity && JSON.parse(Buffer.from(JSON.parse(identity.chain)[0].bytes, "base64url").toString());
+check("signing is set up: an identity listing the owner's passkey, this site and a recovery key",
+  firstDoc?.seq === 0 && firstDoc.passkeys.length === 1 && firstDoc.passkeys[0].id === sql("SELECT id FROM credentials")[0].id
+  && firstDoc.origin === BASE && /^[\w-]{43}$/.test(firstDoc.recovery), JSON.stringify(firstDoc));
+check("…and the site's hosting key, kept with its other keys", sql("SELECT COUNT(*) AS n FROM settings WHERE key = 'hosting_key'")[0].n === 1
+  && /^[\w-]{43}$/.test(firstDoc?.hosting ?? ""));
+const allowed = sql("SELECT key, session_hash, expires_at - strftime('%s','now') AS left FROM delegations");
+const phoneBrowserKey = await browserKeyOf(phone);
+check("this browser's key may sign for the owner for 30 days, with its session", allowed.length === 1 && allowed[0].key === phoneBrowserKey?.publicKey
+  && Boolean(allowed[0].session_hash) && Math.abs(allowed[0].left - 30 * 86400) < 300, JSON.stringify(allowed));
+check("…kept where not even the page can copy it out", phoneBrowserKey?.extractable === false && phoneBrowserKey.person === identity.person);
+const everything = JSON.stringify(["own_identity", "identity_seen", "delegations", "settings", "credentials", "sessions"].map((t) => sql(`SELECT * FROM ${t}`)));
+check("the recovery code is kept nowhere on the site", /^([0-9A-Z]{5}-){4}[0-9A-Z]{5}$/.test(recoveryCode)
+  && !everything.includes(recoveryCode) && !everything.includes(recoveryCode.replace(/-/g, "")));
+check("the signing code is public, so the sign-in page can use it", (await fetch(`${BASE}/static/signed.js`)).status === 200
+  && (await fetch(`${BASE}/static/browserkey.js`)).status === 200 && (await fetch(`${BASE}/static/ui/main.js`, { redirect: "manual" })).status === 302);
+await phone.goto(`${BASE}/_admin/keys`);
+check("setting up signing again just goes on", new URL(phone.url()).pathname === "/");
+const startAgain = await phone.evaluate(async () => (await fetch("/_admin/keys/start", { method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ recovery: "a".repeat(43), browserKey: "b".repeat(43) }) })).status);
+check("…and can't be started again", startAgain === 409);
 let second = "";
 try { cli(`Second ${Date.now()}`); } catch (e) { second = String(e.stderr); }
 check("the terminal won't make a second owner", second.includes("already has an owner"), second.trim());
@@ -93,6 +118,7 @@ await laptop.goto(link);
 check("the link says it's adding a device", (await laptop.title()).startsWith("Add this device") && (await laptop.$eval("main, body", (m) => m.textContent)).includes("Add this phone or computer"));
 await Promise.all([laptop.waitForNavigation(), laptop.click("#go")]);
 check("the laptop is signed in as the owner", (await navLabels(laptop)).includes("Your devices"), await navLabels(laptop));
+check("…but its browser can't sign for the owner yet (its passkey isn't in the identity)", sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 1);
 const reuse = await (await device()).goto(link);
 check("the link only works once", reuse.status() === 404);
 
@@ -187,6 +213,8 @@ await Promise.all([phone.waitForNavigation(), phone.click("button[data-action=si
 await tablet.goto(`${BASE}/posts`);
 check("sign out everywhere signs out every device", new URL(phone.url()).pathname === "/_auth/login"
   && new URL(tablet.url()).pathname === "/_auth/login");
+check("…and no browser may sign for the owner any more", sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 0);
+check("…and the sign-in page forgets this browser's key", await (async () => { await new Promise((r) => setTimeout(r, 500)); return (await browserKeyOf(phone)) === null; })());
 
 const signedOutAdmin = await fetch(`${BASE}/_admin`, { redirect: "manual" });
 check("signed-out /_admin redirects to sign-in", signedOutAdmin.status === 302);
@@ -194,6 +222,10 @@ check("signed-out /_admin redirects to sign-in", signedOutAdmin.status === 302);
 await phone.setViewport({ width: 375, height: 800, isMobile: true });
 await phone.goto(`${BASE}/_auth/login`);
 await Promise.all([phone.waitForNavigation(), phone.click("#go")]).catch(() => {});
+const again = sql("SELECT key, session_hash FROM delegations");
+const newKey = await browserKeyOf(phone);
+check("signing in again makes a new browser key, allowed in the same prompt", again.length === 1 && again[0].key === newKey?.publicKey
+  && newKey.publicKey !== phoneBrowserKey.publicKey && newKey.person === identity.person && newKey.expires > Date.now() / 1000 + 29 * 86400, JSON.stringify(again));
 await phone.goto(`${BASE}/_admin`);
 await phone.screenshot({ path: `${OUT}/devices-phone.png`, fullPage: true });
 

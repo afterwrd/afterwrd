@@ -2,7 +2,7 @@
 //   node albums.mjs <fixtures dir>
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, siteSql } from "./helpers.mjs";
+import { settled, siteSql, setUpSigning } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -32,6 +32,7 @@ const owner = await person(async (page) => {
   await page.type("#name", "Alex Owner");
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
 });
 const cookie = async () => (await owner.cookies()).find((c) => c.name === "__Host-session").value;
 const fileStatus = async (hash) => (await fetch(`${BASE}/files/${hash}`, { headers: { Cookie: `__Host-session=${await cookie()}` } })).status;

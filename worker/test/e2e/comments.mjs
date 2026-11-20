@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, sql } from "./helpers.mjs";
+import { settled, sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -58,6 +58,7 @@ const badge = (page) => page.$eval('header.site a[href="/activity"]', (a) => a.q
 
 const ownerName = `Owner <b>${Date.now()}</b>`;
 const owner = await person(newOwner(ownerName));
+await setUpSigning(owner);
 check("tiny export imports", !(await importZip(owner)));
 
 // Facebook's posts and photos take no comments, for now: their addresses may not survive a new download.

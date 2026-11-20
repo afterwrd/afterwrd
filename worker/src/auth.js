@@ -9,9 +9,11 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import { createDeviceLink, DEVICE_LINK_SECONDS } from "./admin.js";
+import { hasIdentity, keepDelegation, loginDelegation, sentDelegation } from "./keys.js";
 import { handleRecover, recovering, recoveryDone } from "./recover.js";
 import { deviceLinkPage, loginPage, messagePage, setupPage, signOutPage } from "./views/pages.js";
 import { fromBase64Url, html, json, now, randomToken, sha256, toBase64Url } from "./util.js";
+import { b64url, fingerprintOf, statementsChallenge } from "../public/static/signed.js";
 
 // __Host- cookies can only be set by this exact site, over HTTPS, for the whole site.
 const SESSION_COOKIE = "__Host-session";
@@ -61,7 +63,7 @@ export async function handleAuth(request, env, url) {
     // `return await` so a rejected verification lands in the catch below.
     if (route === "POST /_auth/register/options") return await registerOptions(env, url, body);
     if (route === "POST /_auth/register/verify") return await registerVerify(request, env, url, body);
-    if (route === "POST /_auth/login/options") return await loginOptions(env, url);
+    if (route === "POST /_auth/login/options") return await loginOptions(env, url, body);
     if (route === "POST /_auth/login/verify") return await loginVerify(request, env, url, body);
   } catch (error) {
     // The browser gets a plain message; the details stay in the log, as some come from the database or the passkey
@@ -163,14 +165,28 @@ async function registerVerify(request, env, url, { token, response }) {
 
 // --- sign-in ---------------------------------------------------------------
 
-async function loginOptions(env, url) {
+// Signing in also lets this browser's key sign for the owner for 30 days (afterwrd 2, keys.js), in the same prompt:
+// the passkey signs a challenge made from the server's random nonce and the delegation's fingerprint, so a sign-in is
+// still single-use, and the delegation can be checked by anyone later. A site whose owner hasn't set up signing yet
+// (or a browser that didn't send a key) signs in as before, on the nonce alone.
+/** @param {any} env @param {URL} url @param {{ browserKey?: string }} [body] */
+async function loginOptions(env, url, body = {}) {
+  const { browserKey } = body;
   const options = await generateAuthenticationOptions({ rpID: url.hostname, userVerification: "required" });
-  return withChallenge(env, "login", options.challenge, json(options));
+  const nonce = options.challenge;
+  const delegation = await loginDelegation(env, url, browserKey);
+  if (!delegation) return withChallenge(env, "login", nonce, json(options));
+  const challenge = await statementsChallenge(nonce, [await fingerprintOf("delegation", delegation)]);
+  return withChallenge(env, "login", nonce, json({ ...options, challenge, afterwrd: { delegation: b64url(delegation) } }));
 }
 
-async function loginVerify(request, env, url, { response }) {
+async function loginVerify(request, env, url, { response, delegation: sent }) {
   const challenge = await readChallenge(request, env, "login");
   if (!challenge) return json({ error: "The request timed out. Try again." }, 400);
+  // The delegation the options gave, if any: the passkey signed the nonce and its fingerprint together.
+  const delegation = sent === undefined ? null : await sentDelegation(env, url, sent);
+  if (sent !== undefined && !delegation) return json({ error: "That didn't work. Try again." }, 400);
+  const statements = delegation ? [await fingerprintOf("delegation", delegation)] : null;
   const stored = await env.DB.prepare(
     "SELECT * FROM credentials WHERE id = ?",
   ).bind(String(response?.id)).first();
@@ -184,7 +200,7 @@ async function loginVerify(request, env, url, { response }) {
 
   const { verified, authenticationInfo } = await verifyAuthenticationResponse({
     response,
-    expectedChallenge: challenge,
+    expectedChallenge: statements ? await statementsChallenge(challenge, statements) : challenge,
     expectedOrigin: url.origin,
     expectedRPID: url.hostname,
     requireUserVerification: true,
@@ -198,7 +214,18 @@ async function loginVerify(request, env, url, { response }) {
   if (!verified || !(await spendChallenge(env, challenge))) return json({ error: "The passkey couldn't be verified." }, 400);
   await env.DB.prepare("UPDATE credentials SET counter = ?, last_used_at = ? WHERE id = ?")
     .bind(authenticationInfo.newCounter, now(), stored.id).run();
-  return startSession(env, stored.user_id, json({ ok: true }), stored.id);
+  // signing: this browser's key may now sign for the owner (keys.js). keys: "setup" when the owner hasn't set up
+  // signing yet, so the page goes on to do it; "device" when this passkey isn't one of the identity's yet.
+  let answer = { ok: true, signing: false, keys: delegation || (await hasIdentity(env.DB)) ? null : "setup" };
+  return startSession(env, stored.user_id, json(answer), stored.id, async (sessionHash) => {
+    if (!delegation) return json(answer);
+    const r = response.response ?? {};
+    const proof = { credential: stored.id, nonce: challenge, statements, response: { authenticatorData: r.authenticatorData,
+      clientDataJSON: r.clientDataJSON, signature: r.signature, ...(r.userHandle ? { userHandle: r.userHandle } : {}) } };
+    const kept = await keepDelegation(env, { bytes: delegation, proof, credentialId: stored.id, sessionHash });
+    answer = kept ? { ok: true, signing: true, keys: null, person: kept.person, expires: kept.expires } : { ok: true, signing: false, keys: "device" };
+    return json(answer);
+  });
 }
 
 async function logout(request, env) {
@@ -209,6 +236,8 @@ async function logout(request, env) {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(hash),
       env.DB.prepare("DELETE FROM push_devices WHERE session_hash = ?").bind(hash),
+      // And this browser's key stops signing for the owner here (keys.js).
+      env.DB.prepare("DELETE FROM delegations WHERE session_hash = ?").bind(hash),
     ]);
   }
   const response = html(messagePage("You've signed out.", { href: "/_auth/login", label: "Sign in again" }));
@@ -226,7 +255,7 @@ async function logout(request, env) {
 // cost nothing but a request. It's recorded only once a passkey has verified against it, which makes each
 // challenge single-use without letting anonymous requests write to the database.
 
-async function withChallenge(env, purpose, challenge, response) {
+export async function withChallenge(env, purpose, challenge, response) {
   const expires = now() + CHALLENGE_SECONDS;
   const value = `${challenge}.${expires}.${await sign(env, `${purpose}.${challenge}.${expires}`)}`;
   response.headers.append("Set-Cookie",
@@ -234,14 +263,14 @@ async function withChallenge(env, purpose, challenge, response) {
   return response;
 }
 
-async function readChallenge(request, env, purpose) {
+export async function readChallenge(request, env, purpose) {
   const [challenge, expires, mac] = (readCookie(request, CHALLENGE_COOKIE) ?? "").split(".");
   if (!challenge || !mac || !(Number(expires) > now())) return null;
   return (await verify(env, `${purpose}.${challenge}.${expires}`, mac)) ? challenge : null;
 }
 
 /** Records a challenge as used; false if it already was (a replay). */
-async function spendChallenge(env, challenge) {
+export async function spendChallenge(env, challenge) {
   const [, recorded] = await env.DB.batch([
     env.DB.prepare("DELETE FROM used_challenges WHERE expires_at < ?").bind(now()),
     env.DB.prepare("INSERT OR IGNORE INTO used_challenges (challenge, expires_at) VALUES (?, ?)")
@@ -285,7 +314,12 @@ async function findDeviceLink(env, token) {
   ).bind(await sha256(String(token)), now()).first();
 }
 
-async function startSession(env, userId, response, credentialId) {
+/**
+ * Starts a session for `userId` and sets its cookie on `response`. `then`, if given, runs once the session exists,
+ * with its hash, and gives the response to send instead (its cookie is set on that).
+ * @param {(sessionHash: string) => Promise<Response>} [then]
+ */
+async function startSession(env, userId, response, credentialId, then) {
   const token = randomToken();
   // Not for a passkey from before a recovery through Cloudflare that's still waiting (recover.js), even if the sign-in
   // began before it did: loginVerify's own check could be a moment too early.
@@ -299,6 +333,7 @@ async function startSession(env, userId, response, credentialId) {
   if (!made.meta.changes) {
     return json({ error: "Someone is getting back into your site without a passkey, so the passkeys from before can't sign in for the next hour." }, 403);
   }
+  if (then) response = await then(await sha256(token));
   response.headers.append("Set-Cookie",
     `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${SESSION_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   return response;

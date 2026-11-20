@@ -2,6 +2,7 @@
 // another, signing out everywhere), and every other owner page is routed from here. Only the owner signs in, so
 // no one else needs a way in: friends see each other from their own sites (connect.js).
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
+import { handleKeys } from "./keys.js";
 import { forgetDeviceById, listDevices, pushDevicesSeen } from "./push.js";
 import { handleCheckAdmin } from "./checks.js";
 import { handleConnections } from "./connect.js";
@@ -20,6 +21,7 @@ import { setupDonePage } from "./views/pages.js";
 export const DEVICE_LINK_SECONDS = 3600;
 
 export async function handleAdmin(request, env, url, owner) {
+  if (url.pathname === "/_admin/keys" || url.pathname.startsWith("/_admin/keys/")) return handleKeys(request, env, url, owner);
   if (url.pathname === "/_admin/import" || url.pathname.startsWith("/_admin/import/")) {
     return handleImport(request, env, url, owner);
   }
@@ -114,6 +116,8 @@ export async function signOutEverywhere(env, owner) {
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(owner.id),
     env.DB.prepare("DELETE FROM push_devices"),
     env.DB.prepare("UPDATE settings SET value = json_remove(value, '$.early') WHERE key = 'auto_update'"),
+    // No browser may sign for the owner here any more (keys.js) until it signs in again.
+    env.DB.prepare("DELETE FROM delegations"),
   ]);
 }
 
@@ -128,6 +132,9 @@ export async function deletePasskey(env, owner, credential) {
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND (credential_id = ? OR credential_id IS NULL)").bind(owner.id, credential),
     // And notifications on any device that turned them on while signed in with it (push.js).
     env.DB.prepare("DELETE FROM push_devices WHERE credential_id = ? OR credential_id IS NULL").bind(credential),
+    // And browser keys it allowed stop signing for the owner here (keys.js). Taking it out of the owner's identity, so
+    // other sites stop believing it too, is a signed change that waits 7 days (docs/signed-conversations.md, 2d).
+    env.DB.prepare("DELETE FROM delegations WHERE credential_id = ?").bind(credential),
   ]);
 }
 

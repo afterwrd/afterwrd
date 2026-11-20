@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, sql } from "./helpers.mjs";
+import { settled, sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -53,6 +53,7 @@ const cards = (page) => page.$$eval("main article.card", (l) => l.map((a) => ({
 })));
 
 const owner = await person(newOwner(`Poster ${Date.now()}`));
+await setUpSigning(owner);
 check("tiny export imports", !(await importZip(owner)));
 
 await owner.goto(`${BASE}/posts`);

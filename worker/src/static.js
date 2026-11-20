@@ -12,7 +12,11 @@ import HASHES from "../generated/asset-hashes.json";
 // list: a file made public in a later release would be reported by friends' sites that haven't updated yet.)
 export const PUBLIC_FONT = /^\/static\/fonts\/[\w-]+\.woff2$/;
 export const PUBLIC_APP = /^\/static\/app\/(manifest\.webmanifest|icon-(180|192|512)\.png|push-sw\.js)$/;
-export const isPublicStatic = (/** @type {string} */ pathname) => PUBLIC_FONT.test(pathname) || PUBLIC_APP.test(pathname);
+// And afterwrd 2's signing code (docs/signed-conversations.md), which the sign-in page uses to make this browser's key:
+// code only, the same for every site. (Friends' sites from before afterwrd 2 will report these as unexpected: the
+// protocol changes then anyway.)
+export const PUBLIC_SIGNING = /^\/static\/(signed|browserkey)\.js$/;
+export const isPublicStatic = (/** @type {string} */ pathname) => PUBLIC_FONT.test(pathname) || PUBLIC_APP.test(pathname) || PUBLIC_SIGNING.test(pathname);
 
 const sha256 = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
   .map((b) => b.toString(16).padStart(2, "0")).join("");

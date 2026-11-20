@@ -4,7 +4,7 @@
 //   node fresh.mjs <zip> <fixtures dir>
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
-import { siteSql } from "./helpers.mjs";
+import { siteSql, setUpSigning } from "./helpers.mjs";
 import { fileURLToPath } from "node:url";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -40,7 +40,8 @@ const standIn = (req) => {
 };
 page.on("request", standIn);
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
-await Promise.all([page.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 }), page.click("#go")]);
+await Promise.all([page.waitForNavigation(), page.click("#go")]);
+await setUpSigning(page, () => page.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 }));
 check("straight after the passkey, a site from the installer asks for automatic updates and friends' checks together",
   relay?.searchParams.get("to") === `${BASE}/_cloudflare/auto-done` && relay.searchParams.get("both") === "1"
   && relay.searchParams.get("setup") === "1"

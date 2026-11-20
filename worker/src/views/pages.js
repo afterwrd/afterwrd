@@ -1,6 +1,6 @@
 // The only pages served to people who aren't signed in. Styles and script are inline because /static is
 // behind the login too (apart from the fonts, which are public: see index.js).
-import { FAVICON, LOGO } from "./nav.js";
+import { asset, FAVICON, LOGO } from "./nav.js";
 import { escape } from "../util.js";
 import { resultHtml } from "./checks.js";
 
@@ -99,6 +99,11 @@ const CLIENT = `
   }
 `;
 
+// afterwrd 2's signing code (public/static/signed.js, browserkey.js), loaded when needed: public, so sign-in can use it.
+const SIGNING = `
+  const signing = () => Promise.all([import(${JSON.stringify(asset("/static/signed.js"))}), import(${JSON.stringify(asset("/static/browserkey.js"))})]);
+`;
+
 function page(title, body, script = "") {
   return `<!doctype html>
 <html lang="en-GB">
@@ -115,7 +120,7 @@ ${FAVICON}
 <p class="brand" aria-label="afterwrd">${LOGO}</p>
 ${body}
 </main>
-${script && `<script>${CLIENT}\n${script}</script>`}
+${script && `<script>${CLIENT}\n${SIGNING}\n${script}</script>`}
 </body>
 </html>`;
 }
@@ -138,11 +143,20 @@ Every device is signed out, and you make a new passkey here.</p></details>`
   // Sign out here, from another device, or the session running out. This may be a shared phone or computer.
   try { Object.keys(localStorage).filter((k) => k.startsWith("afterwrd-draft:")).forEach((k) => localStorage.removeItem(k)); } catch {}
   const next = ${JSON.stringify(next).replace(/</g, "\\u003c")};
+  // Signed out: this browser's key goes too (a shared computer keeps nothing that signs). Signing in makes a new one,
+  // which the same passkey prompt lets sign for the owner for 30 days (keys.js). A browser that can't make one
+  // (no Ed25519) still signs in, just without it.
+  signing().then(([, keys]) => keys.forgetKey()).catch(() => {});
   run(document.getElementById("go"), async () => {
-    const options = await post("/_auth/login/options");
+    let made = null;
+    try { made = await (await signing())[1].newBrowserKey(); } catch {}
+    const { afterwrd, ...options } = await post("/_auth/login/options", made ? { browserKey: made.publicKey } : {});
     const credential = await navigator.credentials.get({ publicKey: {
       ...options, challenge: dec(options.challenge), allowCredentials: ids(options.allowCredentials) } });
-    await post("/_auth/login/verify", { response: credentialJSON(credential) });
+    const result = await post("/_auth/login/verify", { response: credentialJSON(credential), ...(afterwrd ? { delegation: afterwrd.delegation } : {}) });
+    if (result.signing && made) await (await signing())[1].keyAllowed(made, result.person, result.expires);
+    // Signing isn't set up yet: on to the recovery code (keysPage), then where they were going.
+    if (result.keys === "setup") return location.replace("/_admin/keys?next=" + encodeURIComponent(next));
     location.replace(next);
   });`);
 }
@@ -180,8 +194,65 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
       ...options, challenge: dec(options.challenge), user: { ...options.user, id: dec(options.user.id) },
       excludeCredentials: ids(options.excludeCredentials) } });
     const { first } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
-    afterPasskey(first && fromSetup);
+    // A site's first passkey: next, the recovery code and signing (keysPage), which then carries on as afterPasskey.
+    if (first) return location.replace("/_admin/keys" + (fromSetup ? "#setup" : ""));
+    afterPasskey(false);
   });`);
+}
+
+/**
+ * Setting up signing (afterwrd 2, keys.js): the recovery code, made here in the browser and shown once, then one passkey
+ * prompt that signs the owner's first identity document and this browser's key together. Straight after a new site's
+ * first passkey ("#setup": then on to its permissions, as afterPasskey), or at an older site's next sign-in.
+ */
+export function keysPage(next) {
+  return page("Your recovery code", `
+<style>.code { font: 600 1.35rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.04em; padding: 14px 18px;
+  background: var(--sunken); border: 1px solid var(--border); border-radius: 12px; word-break: break-all; }
+  .tick { display: flex; gap: 10px; align-items: flex-start; margin: 16px 0; } .tick input { width: auto; min-height: 0; margin-top: 4px; }
+  .quiet { background: transparent; color: var(--text); border: 1px solid var(--border); }</style>
+<h1>Your recovery code</h1>
+<p>What you post and comment is now signed on your own devices, so nobody can change your words or put new ones in your
+mouth: not other sites, and not whoever runs yours.</p>
+<p>If you ever lose every device you sign in with, this code is how you show it's still you.</p>
+<p class="code" id="code" aria-live="polite">…</p>
+<p><button type="button" id="copy" class="quiet">Copy</button></p>
+<p class="small">Write it down, or keep it in your password manager. Your site doesn't keep it, so nobody can tell you
+what it was later.</p>
+<label class="tick"><input type="checkbox" id="kept"> <span>I've kept my recovery code somewhere safe</span></label>
+<button id="go" disabled>Continue</button>
+<p id="error" role="alert"></p>
+<p class="small" id="later"><a href="${escape(next)}">Not now</a></p>`, `
+  const next = ${JSON.stringify(next).replace(/</g, "\\u003c")};
+  const fromSetup = location.hash === "#setup";
+  if (fromSetup) document.getElementById("later").hidden = true;
+  (async () => {
+    const [S, keys] = await signing();
+    const code = S.newRecoveryCode();
+    document.getElementById("code").textContent = code;
+    document.getElementById("copy").addEventListener("click", async (e) => {
+      try { await navigator.clipboard.writeText(code); e.target.textContent = "Copied"; } catch {}
+    });
+    const go = document.getElementById("go");
+    document.getElementById("kept").addEventListener("change", (e) => { go.disabled = !e.target.checked; });
+    run(go, async () => {
+      const recovery = await S.recoveryKey(code);
+      const key = await keys.newBrowserKey();
+      const start = await post("/_admin/keys/start", { recovery: recovery.publicKey, browserKey: key.publicKey });
+      const identity = S.fromB64url(start.identity), delegation = S.fromB64url(start.delegation);
+      // What the passkey is about to sign must be this code's key and this browser's key.
+      if (S.decode(identity)?.recovery !== recovery.publicKey || S.decode(delegation)?.key !== key.publicKey) {
+        throw new Error("Something didn't match. Try again.");
+      }
+      const challenge = await S.statementsChallenge(start.nonce,
+        [await S.fingerprintOf("identity", identity), await S.fingerprintOf("delegation", delegation)]);
+      const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
+        allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
+      const done = await post("/_admin/keys/finish", { identity: start.identity, delegation: start.delegation, response: credentialJSON(credential) });
+      await keys.keyAllowed(key, done.person, done.expires);
+      if (fromSetup) afterPasskey(true); else location.replace(next);
+    });
+  })().catch((e) => { document.getElementById("error").textContent = "This browser can't set up signing: " + e.message; });`);
 }
 
 /** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */

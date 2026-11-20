@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { sql } from "./helpers.mjs";
+import { sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BASE = "http://localhost:8787";
@@ -156,6 +156,7 @@ const owner = await person(true);
 const link = execFileSync("node", ["scripts/owner.mjs", "Ann Example", "--local"], { cwd: WORKER, encoding: "utf8" }).match(/http\S+\/_auth\/device\/\S+/)[0];
 await owner.goto(link);
 await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
+await setUpSigning(owner);
 const cookie = (await owner.cookies()).find((c) => c.name === "__Host-session").value;
 const asOwner = (path, body, origin = BASE) => fetch(BASE + path, { method: "POST", redirect: "manual",
   headers: { Cookie: `__Host-session=${cookie}`, Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) });

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { sql } from "./helpers.mjs";
+import { sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -51,6 +51,8 @@ sql(`INSERT INTO device_links (token_hash, user_id, expires_at) VALUES ('${"a".r
 const owner = await person();
 await owner.goto(spareSetup.link);
 await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
+check("a site's first passkey goes on to its recovery code (afterwrd 2)", new URL(owner.url()).pathname === "/_admin/keys");
+await setUpSigning(owner);
 check("owner registers from the resumed link", ["/", "/posts"].includes(new URL(owner.url()).pathname) || (await owner.content()).includes("Nothing has been published"));
 check("setup is closed once a passkey exists", (await fetch(`${BASE}/_auth/setup?code=${CODE}`)).status === 409);
 check("the first passkey cancels any other setup link", sql("SELECT COUNT(*) AS n FROM device_links WHERE used_at IS NULL")[0].n === 0);

@@ -5,7 +5,7 @@
 // have hers check his. Ann starts a group from an address and a setup code, as a command on her server gives them.
 //   node selfhosted.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
-import { count as n, siteSql as sql } from "./helpers.mjs";
+import { count as n, siteSql as sql, setUpSigning } from "./helpers.mjs";
 
 const [, , stateA, stateB, , stateG] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -38,6 +38,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
   return page;
 }
 const text = (page) => page.$eval("main", (m) => m.innerText).catch(() => "");

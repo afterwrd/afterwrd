@@ -134,3 +134,28 @@ export const sql = (query) => siteSql(null, query);
 
 /** How many rows `from` (a table, and perhaps WHERE …) has on the site at `state`. */
 export const count = (state, from) => siteSql(state, `SELECT COUNT(*) AS n FROM ${from}`)[0].n;
+
+/**
+ * afterwrd 2: after a site's first passkey comes the recovery code (src/keys.js, views/pages.js keysPage): ticked as
+ * kept, then one passkey prompt signs the owner's identity and this browser's key. `waitFor` is what that leads to.
+ */
+export async function setUpSigning(page, waitFor = () => page.waitForNavigation({ timeout: 30_000 })) {
+  await page.waitForFunction(() => /^([0-9A-Z]{5}-){4}[0-9A-Z]{5}$/.test(document.getElementById("code")?.textContent ?? ""), { timeout: 15_000 });
+  const code = await page.$eval("#code", (c) => c.textContent);
+  await page.click("#kept");
+  await Promise.all([waitFor(), page.click("#go")]);
+  return code;
+}
+
+/** What this browser keeps of its key (public/static/browserkey.js), as the page sees it; null if none. */
+export const browserKeyOf = (page) => page.evaluate(() => new Promise((resolve) => {
+  const open = indexedDB.open("afterwrd-keys", 1);
+  open.onupgradeneeded = () => open.result.createObjectStore("keys");
+  open.onerror = () => resolve(null);
+  open.onsuccess = () => {
+    const get = open.result.transaction("keys").objectStore("keys").get("browser");
+    get.onerror = () => resolve(null);
+    get.onsuccess = () => { const k = get.result; open.result.close();
+      resolve(k ? { extractable: k.privateKey.extractable, publicKey: k.publicKey, person: k.person, expires: k.expires } : null); };
+  };
+}));

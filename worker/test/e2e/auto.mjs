@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, sql } from "./helpers.mjs";
+import { settled, sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BASE = "http://localhost:8787";
@@ -181,6 +181,7 @@ await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2
 const link = execFileSync("node", ["scripts/owner.mjs", "Ann Example", "--local"], { cwd: WORKER, encoding: "utf8" }).match(/http\S+\/_auth\/device\/\S+/)[0];
 await owner.goto(link);
 await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
+await setUpSigning(owner);
 let relay = null;
 await owner.setRequestInterception(true);
 owner.on("request", (req) => {

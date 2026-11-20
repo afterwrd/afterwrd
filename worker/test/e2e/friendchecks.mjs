@@ -7,7 +7,7 @@
 import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { settled, siteSql as sql, steady } from "./helpers.mjs";
+import { settled, siteSql as sql, steady, setUpSigning } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const [stateA, stateB] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -122,6 +122,7 @@ async function owner(site, name) {
   await page.type("#name", name);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
+  await setUpSigning(page);
   return steady(page, prepare);
 }
 const text = async (page, sel = "main") => (await page.$eval(sel, (m) => m.textContent).catch(() => "")).replace(/\s+/g, " ");
