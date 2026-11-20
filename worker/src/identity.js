@@ -132,11 +132,15 @@ export async function readIdentity(chain, firstSeen, at) {
   const genesisFp = genesis && (await fingerprintOf("identity", chain[0].bytes));
   // The first document is signed by one of its own passkeys.
   if (!genesis || genesis.seq !== 0 || genesis.cancels || genesis.closed || !(await signedByPasskeyOf(genesis, chain[0].sig?.passkey, genesisFp))) return null;
-  const state = { id: genesisFp, current: genesis, currentFp: genesisFp, pending: null, pendingFp: null, pendingByRecovery: false, effectiveAt: null, problem: null };
+  // history: each document that came into effect, and from when (by this reader's clock), so something signed in the
+  // past is checked against the identity as it was then (documentAt), not as it is now.
+  const state = { id: genesisFp, current: genesis, currentFp: genesisFp, pending: null, pendingFp: null, pendingByRecovery: false, effectiveAt: null, problem: null,
+    history: [{ doc: genesis, from: 0 }] };
   // A change that has waited its 7 days takes effect: judged at `when`, which for the next document in the chain is
   // when this reader first saw that one (a cancel seen in time still cancels, however late the chain is read).
   const settle = (when) => {
     if (!state.pending || when < state.effectiveAt) return;
+    state.history.push({ doc: state.pending, from: state.effectiveAt });
     state.current = state.pending; state.currentFp = state.pendingFp;
     state.pending = state.pendingFp = state.effectiveAt = null; state.pendingByRecovery = false;
   };
@@ -157,13 +161,14 @@ export async function readIdentity(chain, firstSeen, at) {
       if (doc.cancels !== state.pendingFp || !sameKeys(content(doc), content(before)) || !allowed) { state.problem = "unexpected"; break; }
       state.pending = state.pendingFp = state.effectiveAt = null; state.pendingByRecovery = false;
       state.current = doc; state.currentFp = fp; prevFp = fp;
+      state.history.push({ doc, from: firstSeen(fp) });
       continue;
     }
     if (doc.cancels) { state.problem = "unexpected"; break; }
     const kind = classify(before, doc);
     const enrolled = !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, sig, fp));
     if (!(byRecovery || byPasskey || enrolled)) { state.problem = "unsigned"; break; }
-    if (kind === "fast" && !byRecovery) { state.current = doc; state.currentFp = fp; }
+    if (kind === "fast" && !byRecovery) { state.current = doc; state.currentFp = fp; state.history.push({ doc, from: firstSeen(fp) }); }
     else { state.pending = doc; state.pendingFp = fp; state.pendingByRecovery = byRecovery; state.effectiveAt = firstSeen(fp) + SLOW_SECONDS; }
     prevFp = fp;
   }
@@ -184,6 +189,13 @@ export async function forked(a, b) {
   return false;
 }
 
+/** The identity document that was in effect at `at` (seconds), by this reader's clock. */
+export function documentAt(state, at) {
+  let doc = state.history[0].doc;
+  for (const h of state.history) if (h.from <= at) doc = h.doc;
+  return doc;
+}
+
 /**
  * A browser key's delegation: {v: 2, kind: "delegation", person, key, origin, expires}, signed by one of the person's
  * current passkeys at sign-in. Returns the browser key (base64url) if it may sign for `state`'s person at time `at`;
@@ -196,5 +208,7 @@ export async function checkDelegation(bytes, proof, state, at) {
   if (!d || d.v !== 2 || d.kind !== "delegation" || d.person !== state.id || !KEY_RE.test(d.key ?? "") || !isOrigin(d.origin)
     || !Number.isSafeInteger(d.expires)) return null;
   if (at > d.expires) return null;
-  return (await signedByPasskeyOf(state.current, proof, await fingerprintOf("delegation", bytes))) ? d.key : null;
+  // Checked against the identity as it was at `at`: a passkey removed since still vouches for what it allowed before
+  // (a comment from an old laptop stays Bob's), and one removed already vouches for nothing after.
+  return (await signedByPasskeyOf(documentAt(state, at), proof, await fingerprintOf("delegation", bytes))) ? d.key : null;
 }

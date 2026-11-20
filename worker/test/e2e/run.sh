@@ -181,6 +181,7 @@ run_forged() {
     --loader:.sql=text --alias:cloudflare:workers="$HERE/workers-stub.js" --outfile="$OUT/bundle.mjs" --log-level=error
   (cd "$HERE" && node forged.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node keys.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  (cd "$HERE" && node lists.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
 }
 run_upgrade() { # $1: an older release tag
   local tag="$1"

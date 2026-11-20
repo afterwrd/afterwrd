@@ -1,0 +1,89 @@
+// Records for afterwrd 2 (docs/signed-conversations.md, section 2), shared by the browser, which makes and signs the
+// owner's records with its browser key, and the Worker, which checks every record that arrives (src/records.js).
+//
+// A record is the exact bytes its writer signed (UTF-8 JSON, never rebuilt), with these fields:
+//   v: 2, kind              what it is (KINDS below)
+//   author                  the writer's person id (their identity's first fingerprint)
+//   key                     the key that signed it: one of their browser keys (or, for a host's own actions, its
+//                           hosting key)
+//   host, item              where it lives: the host's person id, and the item (none for the record that makes one)
+//   seen {n, h}             the point in the item's list the writer last saw (number and running fingerprint)
+//   prev                    the fingerprint of the writer's own previous record on this item, or null
+//   about                   for edit, delete, remove: the record it acts on
+//   version                 for vote and answer: the fingerprint of the item's version they answer
+//   mentions                person ids it mentions
+//   body                    SHA-256 of a 16-byte salt then the content: the content itself travels beside the
+//                           record, so it can be thrown away for good while the signature still checks
+//   at                      when the writer says they wrote it (shown nowhere: hosts' "taken at" times are)
+// A record's fingerprint (fingerprintOf("record", bytes)) is its id: the same bytes sent twice are the same record.
+import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url, signAs } from "./signed.js";
+
+export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove"]);
+/** Kinds that carry content (and so a body). */
+export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote", "answer"]);
+/** Kinds that act on another record (about). */
+export const ABOUT = new Set(["edit", "delete", "remove"]);
+/** Kinds that answer a version of the item. */
+export const VERSIONED = new Set(["vote", "answer"]);
+export const SALT_BYTES = 16;
+export const MAX_RECORD = 4096;
+export const MAX_CONTENT = 16 * 1024;
+const ID_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/** The salted fingerprint of `content` (bytes) with `salt` (bytes). */
+export const bodyOf = async (salt, content) => fingerprint(concat(salt, content));
+
+/**
+ * A new record, made and signed in the browser. `fields` are the record's own (kind, author, host, item, seen, prev,
+ * about, version, mentions); `content` (any JSON value) goes beside it with a fresh salt. Returns what's sent:
+ * {record, sig, content, salt} (base64url), and the record's fingerprint.
+ * @param {Record<string, unknown>} fields @param {unknown} content @param {{ privateKey: CryptoKey, publicKey: string }} key
+ */
+export async function makeRecord(fields, content, key) {
+  let extra = {};
+  if (content !== undefined) {
+    const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+    const bytes = encode(content);
+    extra = { content: b64url(bytes), salt: b64url(salt), body: await bodyOf(salt, bytes) };
+  }
+  const bytes = encode({ v: 2, ...fields, key: key.publicKey, ...(extra.body ? { body: extra.body } : {}), at: Math.floor(Date.now() / 1000) });
+  return {
+    sent: { record: b64url(bytes), sig: await signAs("record", key.privateKey, bytes), ...(extra.content ? { content: extra.content, salt: extra.salt } : {}) },
+    fp: await fingerprintOf("record", bytes),
+  };
+}
+
+const point = (p) => p === null || (p && Number.isSafeInteger(p.n) && p.n >= 0 && ID_RE.test(p.h ?? ""));
+
+/**
+ * The record in `bytes`, if it's well-formed for its kind; null if not. (Its signature, writer and content are checked
+ * by src/records.js.)
+ * @param {Uint8Array} bytes
+ */
+export function parseRecord(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.length > MAX_RECORD) return null;
+  const r = decode(bytes);
+  if (!r || r.v !== 2 || !KINDS.includes(r.kind) || !ID_RE.test(r.author ?? "") || !ID_RE.test(r.key ?? "") || !ID_RE.test(r.host ?? "")) return null;
+  if (!Number.isSafeInteger(r.at)) return null;
+  if (r.kind === "item" ? r.item !== undefined : !ID_RE.test(r.item ?? "")) return null;
+  if (r.kind !== "item" && (!point(r.seen) || !(r.prev === null || ID_RE.test(r.prev ?? "")))) return null;
+  if (WITH_CONTENT.has(r.kind) !== ID_RE.test(r.body ?? "")) return null;
+  if (ABOUT.has(r.kind) !== ID_RE.test(r.about ?? "")) return null;
+  if (VERSIONED.has(r.kind) !== ID_RE.test(r.version ?? "")) return null;
+  if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
+  return r;
+}
+
+/**
+ * The content sent beside a record, if it's what the record's body says; its value, or undefined if not (or none).
+ * @param {{ body?: string }} record @param {string} contentText @param {string} saltText
+ */
+export async function contentOf(record, contentText, saltText) {
+  const content = typeof contentText === "string" ? fromB64url(contentText) : null;
+  const salt = typeof saltText === "string" ? fromB64url(saltText) : null;
+  if (!record.body || !content || !salt || salt.length !== SALT_BYTES || content.length > MAX_CONTENT) return undefined;
+  if ((await bodyOf(salt, content)) !== record.body) return undefined;
+  const value = decode(content);
+  return value === null ? undefined : value;
+}
+
