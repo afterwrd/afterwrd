@@ -175,15 +175,17 @@ export function keepItem(env, connection, person, item, delegations) {
 
 /**
  * A post as its host sent it, checked, for keeping as a copy here: a friend's (`connection`: on their own site, by them),
- * or a group's (`group`: on the group's site, `host`, by any of its members). A group isn't the writer, so a group's
- * post is worked out from what's signed (signedNow), not from what the group says it says; `rules` ({owner, admins})
- * say who may call off someone's event there. Returns {statement (keeping it), record, content} or null.
+ * or a group's (`group`: on the group's site, `host`, by any of its members). Neither site is the writer's browser, so
+ * a post is worked out from what's signed (signedNow), not from what its host says it says; `rules` ({owner, admins})
+ * say who may call off someone's event in a group. Returns {statement (keeping it), record, content} or null.
  */
 export async function keepCopy(env, { connection = null, group = null, host, author = null, rules = null }, item, delegations) {
   if (!ID_RE.test(item?.id ?? "")) return null;
   const got = await checkRecord(item.sent, { ...lookupsWith(env, delegations), at: Number(item.taken) });
   if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.host !== host || (author && got.record.author !== author)) return null;
-  if (group) item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules })) };
+  // Its words and details as its signed records make them, never as its host says: a friend's site isn't its writer's
+  // browser either, and could be taken over or run by a bad release (section 10).
+  item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules })) };
   // A poll is as its signed first record asked it; an event is as its site says it is now (its changes are signed
   // records too, checked when they're sent as notes or its thread is opened), and only if its first record said it's
   // one: for those invited, from a friend; for every member, in a group.
@@ -218,10 +220,10 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
 }
 
 /**
- * A group's post as its signed records say it is now (afterwrd 2, step 6c): its first record, then those the group sent
- * with it (`item.records`: its writer's edits and changes, and an admin calling it off), each checked, worked out as its
- * host works it out (items.js itemFromList). Returns what replaces the group's own word: {content (its words, photos
- * with the group's links to them, event), earlier, edited_at}.
+ * A post as its signed records say it is now (afterwrd 2, step 6c; friends' since step 9a): its first record, then those
+ * its host sent with it (`item.records`: its writer's edits and changes, and in a group an admin calling it off), each
+ * checked, worked out as its host works it out (items.js itemFromList). Returns what replaces the host's own word:
+ * {content (its words, photos with the host's links to them, event), earlier, edited_at}.
  */
 async function signedNow(env, got, item, delegations, { host, rules }) {
   const entries = [{ n: 1, fp: got.fp, taken: Number(item.taken), sent: item.sent }];
@@ -366,6 +368,7 @@ export async function friendThread(env, from, connection, id) {
   const person = await friendPerson(env, connection);
   if (!person) return { error: "Their site doesn't take signed comments yet." };
   let data;
+  const askedAt = now();
   try { data = await callFriend(env, from, String(connection.origin), `/_p/items/${id}`); } catch (error) {
     return { error: busyUntil(error) ? `${connection.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message };
   }
@@ -400,7 +403,7 @@ export async function friendThread(env, from, connection, id) {
     await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ?").bind(last.n, last.head, id).run();
   }
   // What the owner here sent to it, compared with what their site shows (sentchecks.js).
-  if (me && !result.problem) await compareThread(env, { where: { connection }, host: person, list: id, entries: result.entries, me: me.person, names }).catch(() => null);
+  if (me && !result.problem) await compareThread(env, { where: { connection }, host: person, list: id, entries: result.entries, me: me.person, names, askedAt }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
   // Each with its running fingerprint as checked (a mention receipt names one: receipts.js).
   const heads = new Map(entries.map((e) => [e.n, e.head]));

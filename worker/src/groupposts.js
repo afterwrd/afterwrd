@@ -102,7 +102,7 @@ export async function handleGroupItems(request, env, url) {
   if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body, { shut });
   // What became of the member's records here (sentchecks.js): while closing, too.
   if (request.method === "POST" && url.pathname === "/_p/records/check") {
-    const answer = await answerCheck(env, String(member.identity), body, { host: self.person });
+    const answer = await answerCheck(env, String(member.identity), body, { host: self.person, rolesOf: (people) => roleProofs(env, self, people) });
     return json(answer, answer.status ?? 200);
   }
   if (request.method === "GET" && url.pathname === "/_p/items") {
@@ -169,14 +169,14 @@ export async function handleGroupItems(request, env, url) {
  * words and details out from what's signed, not from this site's say-so (friendcopies.js keepCopy).
  */
 async function memberItem(env, origin, row, member) {
-  const item = await itemForFriend(env, origin, row, Number(member.id));
-  const records = [];
-  for (const e of (await listEntries(env.DB, String(row.id))).slice(1)) {
+  const entries = await listEntries(env.DB, String(row.id));
+  const item = await itemForFriend(env, origin, row, Number(member.id), entries);
+  const records = [...item.records];
+  for (const e of entries.slice(1)) {
     const r = e.sent && parseRecord(fromB64url(e.sent.record));
-    if (!r) continue;
-    const own = r.author === String(row.author) && ((r.kind === "edit" && r.about === String(row.id)) || r.kind === "change");
-    if (own || r.kind === "calloff") records.push({ n: e.n, fp: e.fp, taken: e.taken, sent: e.sent });
+    if (r?.kind === "calloff") records.push({ n: e.n, fp: e.fp, taken: e.taken, sent: e.sent });
   }
+  records.sort((a, b) => a.n - b.n);
   // A repeating event's dates called off, each from its own list (step 6d), so members see which are off by signature.
   const tally = row.tally ? JSON.parse(String(row.tally)) : null;
   for (const [date, d] of Object.entries(tally?.dates ?? {})) {

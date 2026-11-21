@@ -655,8 +655,9 @@ async function friendComments(ctx, connection, id, owner) {
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${connection.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${connection.name}'s site has changed this conversation since you last saw it.` : null;
-  // What was checked, for counting a poll again (only from the start: a thread read from a checkpoint can't be).
-  const counted = !t.problem && read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
+  // What was checked, for counting a poll again (only from the start: a thread read from a checkpoint can't be). In one
+  // that doesn't add up, only what's before the break: never the host's own totals, which may count what's after it.
+  const counted = read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
   return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted, admins: t.admins };
 }
 
@@ -1201,7 +1202,7 @@ async function groupComments(ctx, g, id, owner, people = []) {
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${g.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${g.name}'s site has changed this conversation since you last saw it.` : null;
-  const counted = !t.problem && read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
+  const counted = read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null; // as friendComments
   return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted, admins: t.admins };
 }
 

@@ -240,7 +240,7 @@ const memberNames = (people) => new Map((Array.isArray(people) ? people : []).fi
  * each as signed): the owner made their `join` an admin. Readers take the group's word that they still were when they
  * acted (the group checks that, by the members list's `role_at`).
  */
-async function checkRoles(env, group, owner, roles, delegations) {
+export async function checkRoles(env, group, owner, roles, delegations) {
   const admins = new Set();
   const lookups = { ...lookupsWith(env, delegations), at: now() };
   for (const [person, proof] of Object.entries(roles ?? {}).slice(0, 50)) {
@@ -267,6 +267,7 @@ async function copyRules(env, group, data) {
  */
 export async function groupThread(env, from, group, id, people = []) {
   let data;
+  const askedAt = now();
   try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
   const signed = await learnPeople(env, data.people);
   const state = await identityState(env, String(group.identity));
@@ -293,7 +294,7 @@ export async function groupThread(env, from, group, id, people = []) {
   const shown = await peopleShown(env.DB, result.entries.map((e) => e.by), { signed: new Map([...memberNames(people), ...signed]),
     group: { owner, names, admins }, me: me?.person ?? null });
   // What the owner here sent to it, compared with what the group shows (sentchecks.js).
-  if (me && !result.problem) await compareThread(env, { where: { group }, host, list: id, entries: result.entries, me: me.person, names }).catch(() => null);
+  if (me && !result.problem) await compareThread(env, { where: { group }, host, list: id, entries: result.entries, me: me.person, names, askedAt }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
   const heads = new Map(entries.map((e) => [e.n, e.head]));
   return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,

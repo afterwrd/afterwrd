@@ -117,7 +117,7 @@ export async function noteFor(env, note, connection) {
       WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
     if (!row) return null;
     const item = await itemForFriend(env, note.origin, row, connection.id);
-    return { v: 2, kind: "item", item, delegations: await delegationsFor(db, [keyOf(item.sent)]) };
+    return { v: 2, kind: "item", item, delegations: await delegationsFor(db, [item.sent, ...item.records.map((x) => x.sent)].map(keyOf)) };
   }
   const host = await ownHost(env);
   const entries = host ? await listEntries(db, note.item) : [];

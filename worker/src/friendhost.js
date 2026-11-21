@@ -57,10 +57,20 @@ export async function peopleFor(db, people) {
 /**
  * One of the owner's posts (an `items` row joined with its list's n and head, as list_n and list_head) as a friend's
  * site is sent it: its first record as signed, its words now, its photos with links to their files for that friend
- * (`connectionId`), and where its list is up to. Sent by `/_p/items?since` and in new-post notes (notes.js).
+ * (`connectionId`), and where its list is up to. Sent by `/_p/items?since` and in new-post notes (notes.js). With it,
+ * `records`: its writer's signed edits and changes, each with when it was taken, so the friend's site works out its
+ * words and details from what's signed, not from this site's say-so (friendcopies.js keepCopy). A group's site adds
+ * calling off (groupposts.js memberItem), and passes the list's `entries` when it has them already.
  */
-export async function itemForFriend(env, origin, r, connectionId) {
-  const [first] = await listEntries(env.DB, String(r.id));
+export async function itemForFriend(env, origin, r, connectionId, entries = null) {
+  const [first, ...rest] = entries ?? (await listEntries(env.DB, String(r.id)));
+  const records = [];
+  for (const e of rest) {
+    const x = e.sent && parseRecord(fromB64url(e.sent.record));
+    if (x && x.author === String(r.author) && ((x.kind === "edit" && x.about === String(r.id)) || x.kind === "change")) {
+      records.push({ n: e.n, fp: e.fp, taken: e.taken, sent: e.sent });
+    }
+  }
   const content = JSON.parse(String(r.content));
   const photos = await Promise.all((content.photos ?? []).map(async (p) => ({ ...p,
     src: await signedFile(env, origin, p.hash, { friend: connectionId }), thumbSrc: await signedFile(env, origin, p.thumb_hash, { friend: connectionId }) })));
@@ -72,7 +82,7 @@ export async function itemForFriend(env, origin, r, connectionId) {
   return { id: String(r.id), sent: first.sent, taken: first.taken, content: { ...content, photos },
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], edited_at: r.edited_at, comments: Number(r.comments),
     changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) },
-    ...(tally && { tally: { ...tally, ...(invited !== null && { invited }) } }), ...(r.version && { version: String(r.version) }) };
+    ...(tally && { tally: { ...tally, ...(invited !== null && { invited }) } }), ...(r.version && { version: String(r.version) }), records };
 }
 
 /** SQL: item `i` may be seen by friend ?1 (a connection id): everyone's, or an event they're invited to. */
@@ -110,7 +120,7 @@ export async function handleFriendItems(request, env, url, work) {
     const own = await db.prepare("SELECT json_array_length(chain) AS n, profile FROM own_identity WHERE id = 1").first();
     // mine: the caller's owner's records taken here since, for their site to compare with what it sent (sentchecks.js).
     return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until, more, identity: Number(own?.n ?? 0),
-      delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))), mine: await mineSince(db, caller.person, since),
+      delegations: await delegationsFor(db, items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]).map(keyOf)), mine: await mineSince(db, caller.person, since),
       // The owner's signed name now, so a friend's site can show a rename (names.js).
       ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) });
   }

@@ -7,10 +7,11 @@
 // key used elsewhere) is said on Home.
 //
 // A host answers (friendhost.js, groupposts.js):
-//   POST /_p/records/check   {points: [{fp, list}…]} -> {results: [{fp, state, marker?}…], delegations, people}: what
-//                            became of each of the caller's records here, from the host's index (authored) and one page
-//                            row of the list each. state: there, deleted, removed (each with the signed `marker` that
-//                            did it), gone (the post's been deleted, or the caller can't see it any more), or missing.
+//   POST /_p/records/check   {points: [{fp, list}…]} -> {results: [{fp, state, marker?}…], delegations, people, roles}:
+//                            what became of each of the caller's records here, from the host's index (authored) and one
+//                            page row of the list each. state: there, deleted, removed (each with the signed `marker` that
+//                            did it), gone (the post's been deleted, or the caller can't see it any more), or missing. A
+//                            group's `roles` prove its admins who removed something (their join and the owner's role).
 // and each `GET /_p/items?since` also gives `mine`: the caller's records taken there since (mineSince).
 // (`/_p/check-*` and `/_p/checked` are the checks of a site's code: checks.js, friendchecks.js.)
 import { callFriend } from "./calls.js";
@@ -19,8 +20,9 @@ import { checkProfile, identityState, learnIdentity, parseChain } from "./identi
 import { ID_RE, ownHost } from "./items.js";
 import { listOf, PAGE, parseListId } from "./lists.js";
 import { checkRecord } from "./records.js";
+import { checkRoles } from "./groupcopies.js";
 import { contentOf, parseRecord } from "../public/static/records.js";
-import { fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { now } from "./util.js";
 
 const MAX_POINTS = 200; // in one check (section 9)
@@ -75,10 +77,11 @@ export const willRetry = (record) => (record.kind === "delete" || record.kind ==
 
 /**
  * The answer to `POST /_p/records/check` from `person` (the caller's owner): what became of each of their records
- * here. `mayRead(item)`: whether they may still see that item (a friend uninvited from an event may not).
+ * here. `mayRead(item)`: whether they may still see that item (a friend uninvited from an event may not). `rolesOf(people)`:
+ * in a group, what shows those who removed something are admins (groupposts.js roleProofs).
  */
-/** @param {any} env @param {string} person @param {any} body @param {{ host: string, mayRead?: (item: string) => Promise<boolean> }} options */
-export async function answerCheck(env, person, body, { host, mayRead = async (_item) => true }) {
+/** @param {any} env @param {string} person @param {any} body @param {{ host: string, mayRead?: (item: string) => Promise<boolean>, rolesOf?: (people: string[]) => Promise<Record<string, any>> }} options */
+export async function answerCheck(env, person, body, { host, mayRead = async (_item) => true, rolesOf = async (_people) => ({}) }) {
   const db = env.DB;
   // More than a check may ask is refused, not cut short, so the asker never takes part of an answer for all of it (T31).
   if (Array.isArray(body?.points) && body.points.length > MAX_POINTS) return { error: `At most ${MAX_POINTS} at a time.`, status: 413 };
@@ -121,8 +124,11 @@ export async function answerCheck(env, person, body, { host, mayRead = async (_i
     results.push({ fp: p.fp, state: record.kind === "delete" ? "deleted" : "removed", marker: { sent: by.sent, taken: by.taken } });
     markers.push(record);
   }
-  return { results, delegations: await delegationsFor(db, markers.map((r) => r.key)),
-    people: await peopleFor(db, [...new Set(markers.map((r) => r.author).filter((a) => a !== host))]) };
+  const removers = [...new Set(markers.filter((r) => r.kind === "remove" && r.author !== host).map((r) => r.author))];
+  const roles = removers.length ? await rolesOf(removers) : {};
+  const roleKeys = Object.values(roles).flatMap((p) => [p.join, p.role]).map((x) => parseRecord(fromB64url(x.record))?.key);
+  return { results, delegations: await delegationsFor(db, [...markers.map((r) => r.key), ...roleKeys].filter(Boolean)),
+    people: await peopleFor(db, [...new Set(markers.map((r) => r.author).filter((a) => a !== host))]), roles };
 }
 
 /** The caller's records taken here since `since` (this site's clock), for a pull's `mine` (T6). */
@@ -225,13 +231,28 @@ export async function settle(env, row, where, found, learnt = new Map()) {
   }
 }
 
-/** A host's signed marker (a delete or removal) about `fp`, checked: who signed it, or null if it doesn't check. */
-async function checkMarker(env, marker, { fp, host, delegations, me }) {
+/**
+ * A host's signed marker (a delete or removal) about `fp`, checked: who signed it, or null if it doesn't check, or if
+ * they couldn't have removed it (`mayRemove`): a host can't pass off anyone's signed `remove` as a removal.
+ */
+async function checkMarker(env, marker, { fp, host, delegations, me, mayRemove }) {
   const got = marker?.sent && (await checkRecord(marker.sent, { identityOf: (p) => identityState(env, p), delegationOf: async (k) => delegations?.[k] ?? null,
     at: Number(marker.taken) || now() }));
   if (!got || got.record.host !== host || got.record.about !== fp) return null;
   if (got.record.kind === "delete") return got.record.author === me ? { state: "deleted" } : null;
-  return got.record.kind === "remove" ? { state: "removed", removedBy: got.record.author } : null;
+  return got.record.kind === "remove" && (await mayRemove(got.record.author)) ? { state: "removed", removedBy: got.record.author } : null;
+}
+
+/**
+ * Who may remove what the owner wrote at `host` (`where`: a friend's connection or a group): on a friend's post, that
+ * friend; in a group, its owner, and admins the owner's signed `role` names (`data.roles`, as the group sent them).
+ */
+async function removersAt(env, host, where, data) {
+  if (where.connection) return async (p) => p === host;
+  const state = await identityState(env, host);
+  const owner = state?.current.owner ? String(state.current.owner) : "";
+  let admins = null;
+  return async (p) => Boolean(owner) && (p === owner || (admins ??= await checkRoles(env, where.group, owner, data.roles, data.delegations)).has(p));
 }
 
 /** Sends a delete or leave the host hasn't taken again. Returns true once it's taken. */
@@ -311,6 +332,7 @@ async function checkHost(env, from, me, host, where, rows) {
     return;
   }
   const learnt = await learnPeople(env, data.people);
+  const mayRemove = await removersAt(env, host, where, data);
   const answers = new Map((Array.isArray(data.results) ? data.results : []).map((r) => [r?.fp, r]));
   for (const row of asking) {
     const a = answers.get(String(row.fp));
@@ -318,7 +340,7 @@ async function checkHost(env, from, me, host, where, rows) {
     let found = { state: a.state };
     if (a.state === "deleted" || a.state === "removed") {
       // Who did it, from what they signed: a host can't say an admin removed something they didn't.
-      found = (await checkMarker(env, a.marker, { fp: String(row.fp), host, delegations: data.delegations, me: me.person })) ?? { state: "missing" };
+      found = (await checkMarker(env, a.marker, { fp: String(row.fp), host, delegations: data.delegations, me: me.person, mayRemove })) ?? { state: "missing" };
     } else if (!["there", "gone", "missing"].includes(a.state)) continue;
     await settle(env, row, where, found, learnt);
   }
@@ -330,7 +352,7 @@ async function checkHost(env, from, me, host, where, rows) {
  * A thread just opened and checked (lists.js checkList entries), compared with what the owner sent to it: their records
  * removed or left out are told (as a check would), and anything signed as them that their site never sent.
  */
-export async function compareThread(env, { where, host, list, entries, me, names = new Map() }) {
+export async function compareThread(env, { where, host, list, entries, me, names = new Map(), askedAt = 0 }) {
   const db = env.DB;
   const { results } = await db.prepare("SELECT * FROM sent WHERE item = ?").bind(list).all();
   const mine = new Map(results.map((r) => [String(r.fp), r]));
@@ -344,6 +366,19 @@ export async function compareThread(env, { where, host, list, entries, me, names
     } else if (e.record?.author === me && e.state === "ok") {
       await forged(env, where, list, e.fp);
     }
+  }
+  // Taken here (its receipt says at which point) before the thread was asked for (`askedAt`), and not in what the host
+  // shows from that point on: the host has shown a version without it (T13). Only from the first point shown (a thread
+  // read from a checkpoint doesn't have the start). A host can only leave out the newest records this way: one that
+  // others had seen breaks the list.
+  const shownFps = new Set(entries.map((e) => e.fp));
+  const first = entries[0]?.n ?? Infinity;
+  for (const row of results) {
+    if (shownFps.has(String(row.fp)) || !row.receipt || !(row.state === null || row.state === "there" || row.state === "unsure")) continue;
+    if (!(Number(row.created_at) < askedAt)) continue;
+    let at = null;
+    try { at = decode(fromB64url(JSON.parse(String(row.receipt)).bytes))?.n; } catch {}
+    if (Number.isSafeInteger(at) && at >= first) await settle(env, row, where, { state: "missing" }, names);
   }
 }
 

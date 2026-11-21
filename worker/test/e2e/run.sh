@@ -140,6 +140,8 @@ run_limits() {
     EXTRA_G="--var TEST_LIMITS:records=3" three_sites limits.mjs group
 }
 run_events() { three_sites events.mjs group; }
+# Hosts that misbehave (docs/signed-conversations.md step 9a): Cat's site checks what she sent with a "day" of 8 seconds.
+run_hosts() { EXTRA_C="--var TEST_SENT_SECONDS:8" three_sites hosts.mjs group; }
 run_central() { # the installer at install.afterwrd.app, on 8791, with stand-ins on 8797 and 8799 (central.mjs runs them)
   stop
   (cd "$WORKER" && "$WRANGLER" dev -c central/wrangler.jsonc --port 8791 --ip 127.0.0.1 --infer-origin-from-routes=false --var ALLOW_LOCAL_SITES:1 \
@@ -212,10 +214,10 @@ run_upgrade() { # $1: an older release tag
   git -C "$WORKER" worktree remove --force "$OUT/old"
 }
 
-if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions limits events selfhosted checks recover central forged; fi
+if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions limits events hosts selfhosted checks recover central forged; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|limits|events|selfhosted) "run_$1" ;;
+    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|limits|events|hosts|selfhosted) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;
   esac
