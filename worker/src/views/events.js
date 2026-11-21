@@ -168,6 +168,64 @@ function repeatingBlock(ctx, g, p, { full = false }) {
 </div>`;
 }
 
+/**
+ * A repeating event in a signed group's post (step 6d), as repeatingBlock draws one: its next date (or the one asked
+ * for) on a card, every date still to come on its own page, each answered on its own. Each form is signed for that
+ * date's own list: `sign(kind, d)` gives a form's data-sign-* attributes ("answer"; "calloff", or "" if the owner here
+ * may not call that date off; "cancel-all" for calling off the whole of it, or ""). The page shows the dates' answers
+ * as the group sends them, apart from the one opened (?date=, or the next), read from the group and checked.
+ */
+export function repeatingSigned(ctx, e, { base, relay, full = false, sign, edit = null }) {
+  const back = ctx.url.pathname + ctx.url.search;
+  const at = Date.now() / 1000;
+  const asked = ctx.url.searchParams.get("date");
+  const dates = datesOf(e, full || asked ? {} : { from: at }).map((d) => ({ ...d, over: finishedAt(d) < at }));
+  if (!dates.length) dates.push(...datesOf(e).slice(-1).map((d) => ({ ...d, over: true })));
+  const next = dates.find((d) => d.date === asked) ?? dates.find((d) => !d.over && !d.cancelled_at) ?? dates.at(-1);
+  const over = dates.every((d) => d.over);
+  const names = (list) => list.map((x, i) => (x.me ? (i ? "you" : "You") : x.name) + (x.earlier ? " (said before it changed)" : "")).join(", ");
+  const counts = (d) => [d.going.length && `${d.going.length} going`, d.maybe.length && `${d.maybe.length} maybe`].filter(Boolean).join(" · ");
+  const answers = (d, label) => html`<form method="post" action="${relay}" class="answers" aria-label="${label}" data-inplace${raw(sign("answer", d))}>
+    <input type="hidden" name="back" value="${back}">
+    ${ANSWER_LABELS.map(([value, words]) => html`<button class="chip${d.answer === value ? " primary" : ""}" name="answer" value="${value}"
+      aria-pressed="${d.answer === value ? "true" : "false"}">${words}</button>`)}
+  </form>`;
+  const open = (d) => !e.cancelled_at && !d.cancelled_at && !d.over;
+  const all = sign("cancel-all", null);
+  return html`<div class="event repeating${e.cancelled_at ? " cancelled" : ""}">
+  <div class="event-head">
+    ${dateTile(next)}
+    <div class="event-what">
+      <a class="event-title" href="${base}">${e.title}</a>
+      ${e.cancelled_at ? html`<span class="badge as-written">Called off</span>` : over ? html`<span class="badge as-written">Over</span>` : ""}
+      <p class="meta">${repeatWords(e)}${e.place && html`<br>${e.place}`}</p>
+      ${!over && !e.cancelled_at && html`<p class="meta">${next.date === asked ? "" : "Next: "}<time>${eventWhen(next, ctx.zone)}</time>${next.cancelled_at ? " · called off" : ""}
+        ${counts(next) && ` · ${counts(next)}`}</p>`}
+      <p class="meta">Everyone in the group can see it.</p>
+    </div>
+  </div>
+  ${!full && open(next) && answers(next, `Are you going on ${dayName(eventDayParts(next))}?`)}
+  ${full && html`<ol class="event-dates">${dates.filter((d) => !d.over || d.date === asked).map((d) => html`<li id="d-${d.date}" class="${d.cancelled_at ? "off" : ""}">
+    <div class="date-line"><time>${eventWhen(d, ctx.zone)}</time>
+      ${d.cancelled_at ? html`<span class="badge as-written">Called off</span>` : counts(d) && html`<span class="meta">${counts(d)}</span>`}</div>
+    ${open(d) && answers(d, `Are you going on ${dayName(eventDayParts(d))}?`)}
+    ${(d.going.length > 0 || d.maybe.length > 0 || d.cantGo.length > 0) && html`<dl class="answered">
+      ${[["Going", d.going], ["Maybe", d.maybe], ["Can't go", d.cantGo]].filter(([, list]) => list.length)
+        .map(([label, list]) => html`<dt>${label}</dt><dd>${names(list)}</dd>`)}</dl>`}
+    ${open(d) && sign("calloff", d) && html`<form method="post" action="${relay}" data-inplace class="call-off-date"${raw(sign("calloff", d))}
+      data-confirm="Call off ${dayName(eventDayParts(d))}? Everyone going that day will be told. The other dates stay." data-confirm-ok="Call it off">
+      <input type="hidden" name="back" value="${back}"><button class="chip">Call off this date</button></form>`}
+  </li>`)}</ol>
+  <div class="actions-row">
+    ${!e.cancelled_at && html`<a class="chip" href="${base}/event.ics" download>${raw(icon("calendar"))}<span>Add to my calendar</span></a>`}
+    ${edit && !e.cancelled_at && !over && html`<a class="chip" href="${edit}">Change it</a>`}
+    ${all && !e.cancelled_at && !over && html`<form method="post" action="${relay}" data-inplace${raw(all)}
+      data-confirm="Call off every date of this event? Everyone going to any of them will be told." data-confirm-ok="Call it all off">
+      <input type="hidden" name="back" value="${back}"><button class="chip">Call it all off</button></form>`}
+  </div>`}
+</div>`;
+}
+
 /** The day one date of an event is on, where it's held: { year, month, day }. */
 const eventDayParts = (e) => { const [year, month, day] = eventDays(e)[0].split("-").map(Number); return { year, month, day }; };
 
@@ -179,7 +237,8 @@ export function ownEventBlock(ctx, p, { full = false } = {}) {
 
 /**
  * Adding or changing an event. Its times are in `values.zone`, or, for a new one, the browser's own time zone.
- * @param {{ action: string, back: string, values?: Record<string, string>, text?: string, submit: string, guests?: any, repeats?: boolean, sign?: string }} options
+ * `repeats`: whether it may repeat (in a group); "only" when changing a signed one that does, which can't stop.
+ * @param {{ action: string, back: string, values?: Record<string, string>, text?: string, submit: string, guests?: any, repeats?: boolean | "only", sign?: string }} options
  */
 export function eventForm({ action, back, values = {}, text = "", submit, guests = "", repeats = false, sign = "" }) {
   return html`<form class="stack event-form" method="post" action="${action}"${raw(sign)}>
@@ -197,7 +256,7 @@ export function eventForm({ action, back, values = {}, text = "", submit, guests
   <label><span class="field">Where <span class="meta">(optional)</span></span><input name="place" maxlength="300" value="${values.place ?? ""}"></label>
   ${repeats && html`<div class="when-row repeat-row">
     <label><span class="field">Repeats</span><select name="repeat">
-      <option value="">Doesn't repeat</option>
+      ${repeats !== "only" && html`<option value="">Doesn't repeat</option>`}
       ${repeatChoices(values.start_date ?? "").map(([value, words]) => html`<option value="${value}" ${values.repeat === value && raw("selected")}>${words}</option>`)}
     </select></label>
     <label><span class="field">Until <span class="meta">(a year if blank)</span></span><input type="date" name="repeat_until" value="${values.repeat_until ?? ""}"></label>
@@ -471,7 +530,7 @@ ${outdated ? html`<p class="notice">This group's site needs updating before it c
   <summary>Add an event</summary>
   <p class="meta">Everyone in the group will see it here. No one is sent anything about it; those who say they're
   going, or might, are told if it changes or is called off.</p>
-  ${signed ? eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event",
+  ${signed ? eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event", repeats: true,
     sign: ` data-sign="event-new" data-sign-host="${g.identity}" data-sign-group="${g.id}" data-sign-to="/_groups/${g.id}/items"` })
     : eventForm({ action: `/_groups/${g.id}/events`, back: base, submit: "Add the event", repeats: true })}
 </details>

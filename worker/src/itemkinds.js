@@ -10,8 +10,11 @@
 //     is: a change of anything but the words moves its version, which answers name; `event.cancelled` calls it off.
 //     An `answer` ({answer: going | maybe | no}) comes from a guest, while it's neither off nor over. In a group
 //     (step 6c), every member is a guest, and an admin may call it off (`calloff`).
+//   - in a group, an event may repeat (step 6d: its event's `rrule`). Each date has a list of its own (lists.js
+//     dateList) holding its answers and its calling off (a `calloff` with `date`): dateTally works one out. A date
+//     called off is in the event's `skipped` (worked out from those calloffs, wherever they're sent).
 import { readPoll, choicesMask } from "./polls.js";
-import { ANSWERS, cleanEvent, eventChanged, finishedAt } from "./calendar.js";
+import { ANSWERS, cleanEvent, eventChanged, finishedAt, hasDate } from "./calendar.js";
 
 export const CHANGE_SECONDS = 300; // an event moved at most this often (guests are told each time)
 
@@ -24,18 +27,25 @@ export function pollTrouble(poll, at) {
     ? null : "That poll isn't as written.";
 }
 
-/** What's wrong with a new event's details, or null. */
-export function eventTrouble(event, at) {
-  if (!cleanEvent(event) || event.cancelled) return "That event isn't as written.";
+/** What's wrong with a new event's details, or null. `repeats`: in a group, where events may repeat. */
+export function eventTrouble(event, at, { repeats = false } = {}) {
+  if (!cleanEvent(event, { repeats }) || event.cancelled) return "That event isn't as written.";
   if (finishedAt(event) <= at) return "That's already over: pick a time still to come.";
   return null;
 }
 
 /**
+ * Whether a change to an event moves what answers were given to (its version): anything but its words and, for one
+ * that repeats, its pattern alone (a date it still has is at the same time and place, so its answers stand).
+ */
+const movesAnswers = (a, b) => eventChanged({ ...a, rrule: null }, { ...b, rrule: null });
+
+/**
  * An item worked out from its list: `read` is its entries, each {e, r} (r: {record, content}, or null once gone), the
  * first its `item`. Returns what pages show beyond the words: {content (its event, as last changed), version, tally,
  * movedAt}. `guests`: an event's guests' person ids (the host's own list), whose answers alone count; readers pass
- * null, and count everyone's.
+ * null, and count everyone's. A group's event may repeat; the calloffs of its dates (from their own lists, sent with
+ * it to members' sites) mark those dates off (`skipped`).
  */
 export function workOut(read, { id, author, guests = null }) {
   const first = read[0]?.r;
@@ -49,15 +59,22 @@ export function workOut(read, { id, author, guests = null }) {
     if (!r) continue;
     const { record, content: c } = r;
     if (record.kind === "change" && record.author === author && c?.event && content.type === "event") {
-      const event = cleanEvent(c.event);
-      if (!event) continue;
-      if (eventChanged(content.event, event) || Boolean(event.cancelled) !== Boolean(content.event.cancelled)) {
+      // A repeating event stays one (only a group's repeat: their first record said so), and a one-off one.
+      const event = cleanEvent(c.event, { repeats: Boolean(content.event?.rrule) });
+      if (!event || Boolean(event.rrule) !== Boolean(content.event?.rrule)) continue;
+      if (eventChanged(content.event, event)) movedAt = e.taken;
+      if (movesAnswers(content.event, event) || Boolean(event.cancelled) !== Boolean(content.event.cancelled)) {
         version = e.fp;
         movedAt = e.taken;
       }
-      content = { ...content, event: { ...event, ...(event.cancelled ? { cancelled_at: content.event.cancelled_at ?? e.taken } : {}) },
+      content = { ...content, event: { ...event, ...(event.cancelled ? { cancelled_at: content.event.cancelled_at ?? e.taken } : {}),
+        ...(content.event.skipped?.length ? { skipped: content.event.skipped } : {}) },
         ...(typeof c.text === "string" ? { text: c.text } : {}) };
-    } else if (record.kind === "calloff" && record.about === id && content.type === "event" && !content.event?.cancelled) {
+    } else if (record.kind === "calloff" && record.date && record.about === id && content.event?.rrule) {
+      // One date of a repeating event called off (from that date's list): the rest of it carries on.
+      const skipped = content.event.skipped ?? [];
+      if (!skipped.includes(record.date)) content = { ...content, event: { ...content.event, skipped: [...skipped, record.date].sort() } };
+    } else if (record.kind === "calloff" && !record.date && record.about === id && content.type === "event" && !content.event?.cancelled) {
       // In a group (lists.js GroupRules): an admin calling off someone's event, as its writer's change would.
       version = e.fp;
       movedAt = e.taken;
@@ -70,13 +87,30 @@ export function workOut(read, { id, author, guests = null }) {
       if (mask === null) continue;
       if (mask) votes.set(record.author, mask);
       else votes.delete(record.author);
-    } else if (record.kind === "answer" && content.type === "event" && ANSWERS.includes(c?.answer) && (!guests || guests.includes(record.author))) {
+    } else if (record.kind === "answer" && !record.date && content.type === "event" && ANSWERS.includes(c?.answer) && (!guests || guests.includes(record.author))) {
       answers.set(record.author, { answer: c.answer, version: record.version, taken: e.taken });
     }
   }
   const tally = content.poll ? { votes: Object.fromEntries(votes), ended_at: endedAt }
     : content.type === "event" ? { answers: Object.fromEntries(answers) } : null;
   return { content, version, tally, movedAt };
+}
+
+/**
+ * One date of a repeating event worked out from its own list (lists.js dateList): `read` is its entries, each {e, r} as
+ * workOut has them. Returns {answers: {person: {answer, version, taken}}, off: {by, at} or null}: each person's newest
+ * answer, and whether (and by whom) the date was called off.
+ */
+export function dateTally(read) {
+  const answers = new Map();
+  let off = null;
+  for (const { e, r } of read) {
+    if (!r) continue;
+    if (r.record.kind === "answer" && ANSWERS.includes(r.content?.answer)) {
+      answers.set(r.record.author, { answer: r.content.answer, version: r.record.version, taken: e.taken });
+    } else if (r.record.kind === "calloff" && !off) off = { by: r.record.author, at: e.taken };
+  }
+  return { answers: Object.fromEntries(answers), off };
 }
 
 /**
@@ -105,13 +139,22 @@ export function pollShown(poll, tally, { viewer = null, names = new Map(), me = 
  */
 export function eventShown(content, tally, { viewer = null, names = new Map(), me = null, version = null, invited = null } = {}) {
   const e = content.event;
-  const answers = Object.entries(tally?.answers ?? {});
-  const who = (answer) => answers.filter(([, a]) => a.answer === answer)
-    .map(([p, a]) => ({ name: p === me ? "You" : names.get(p) ?? "Someone", me: p === me, earlier: Boolean(version && a.version !== version) }));
+  const lists = (answersOf) => {
+    const answers = Object.entries(answersOf ?? {});
+    const who = (answer) => answers.filter(([, a]) => a.answer === answer)
+      .map(([p, a]) => ({ name: p === me ? "You" : names.get(p) ?? "Someone", me: p === me, earlier: Boolean(version && a.version !== version) }));
+    return { going: who("going"), maybe: who("maybe"), cantGo: who("no"), answer: answers.find(([p]) => p === viewer)?.[1].answer ?? null };
+  };
+  // A repeating one (a group's, step 6d): each date's answers on their own (calendar.js datesOf), and where each
+  // date's list is up to, to sign an answer to it; its dates called off as signed (`skipped`).
+  const repeating = e.rrule ? {
+    rrule: e.rrule, skipped: Array.isArray(e.skipped) ? e.skipped.filter((d) => hasDate(e, d)) : [],
+    dates: Object.entries(tally?.dates ?? {}).filter(([d]) => hasDate(e, d))
+      .map(([date, t]) => ({ date, ...lists(t?.answers), list: t?.list ?? null })),
+  } : {};
   return {
     title: e.title, starts_at: e.starts_at, ends_at: e.ends_at ?? null, all_day: e.all_day, time_zone: e.time_zone, place: e.place ?? null,
     cancelled_at: e.cancelled ? e.cancelled_at ?? 1 : null,
-    going: who("going"), maybe: who("maybe"), cantGo: who("no"), invited,
-    answer: answers.find(([p]) => p === viewer)?.[1].answer ?? null,
+    ...(e.rrule ? { going: [], maybe: [], cantGo: [], answer: null } : lists(tally?.answers)), invited, ...repeating,
   };
 }

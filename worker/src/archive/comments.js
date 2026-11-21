@@ -43,6 +43,7 @@ const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
   WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled')`;
 // A signed group's (step 6c: groupcopies.js): comments, mentions, @here and changes to events, while the owner's in it.
+// One date of a repeating event called off (6d) has its target as "<post>?date=<date>".
 const GROUP_NOTICES = `FROM notices n JOIN groups g ON g.id = n.group_id AND g.joined_at IS NOT NULL
   WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled')`;
 const NOTIFICATIONS_SQL = `
@@ -59,7 +60,9 @@ const NOTIFICATIONS_SQL = `
     i.kind, i.date, NULL
   ${GROUP_THERE}
   UNION ALL
-  SELECT 'group', n.id, n.target, n.text, n.created_at, n.actor, NULL, g.id, g.name, n.own, n.kind, NULL, NULL
+  SELECT 'group', n.id, CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, 1, instr(n.target, '?date=') - 1) ELSE n.target END,
+    n.text, n.created_at, n.actor, NULL, g.id, g.name, n.own, n.kind,
+    CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, instr(n.target, '?date=') + 6) END, NULL
   ${GROUP_NOTICES}`;
 
 /** The newest notifications, for the Notifications page. */

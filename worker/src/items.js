@@ -17,8 +17,9 @@ import { messagePage } from "./views/pages.js";
 import { html, json, now, Refusal } from "./util.js";
 import { says } from "./mentions.js";
 import { queueChangeNotes, queueCommentNote, queueItemNote } from "./notes.js";
-import { CHANGE_SECONDS, eventShown, eventTrouble, pollShown, pollTrouble, workOut } from "./itemkinds.js";
-import { ANSWERS, cleanEvent, eventChanged, finishedAt } from "./calendar.js";
+import { CHANGE_SECONDS, dateTally, eventShown, eventTrouble, pollShown, pollTrouble, workOut } from "./itemkinds.js";
+import { dateList } from "./lists.js";
+import { ANSWERS, cleanEvent, eventChanged, finishedAt, hasDate, onDate, ruleDates } from "./calendar.js";
 import { choicesMask } from "./polls.js";
 import { audienceOf } from "../public/static/records.js";
 
@@ -274,6 +275,11 @@ export const shownMentions = (record, content) => (Array.isArray(content?.mentio
   .filter((m) => typeof m?.name === "string" && (record?.mentions ?? []).includes(m.person)).slice(0, 10)
   .map((m) => ({ name: m.name.slice(0, 100), person: m.person }));
 
+const MAX_DATES_OFF = 10; // dates of one repeating event called off a day, each telling those going that day
+
+/** When one date of a repeating event (YYYY-MM-DD) is over. */
+export const dateOver = (e, date) => finishedAt({ ...onDate(e, date), rrule: null });
+
 /**
  * What a vote, an answer, a poll's end, an event's change or (in a group) its calling off on `item` (its row, and
  * `content` as it is now) would do, checked before it's taken: {refused}, or what it means ({guests} for a change that
@@ -294,27 +300,49 @@ export async function kindPlan(env, item, content, { record, content: c }, { gue
   }
   if (content.type !== "event") return record.kind === "answer" ? { refused: "That isn't an event." } : {};
   const e = content.event;
+  // One date of a repeating event (a group's, step 6d): answers are always to one date, and a calloff may be.
+  const date = record.date ?? null;
+  if (record.kind === "answer" || (record.kind === "calloff" && date)) {
+    if (date && !e.rrule) return { refused: "That event doesn't repeat." };
+    if (!date && e.rrule) return { refused: "This event repeats: say which date. (Your site may need updating.)" };
+    if (date && !hasDate(e, date)) return { refused: "That isn't one of its dates." };
+  }
+  const day = date ? tally?.dates?.[date] ?? null : null;
   if (record.kind === "answer") {
     if (!ANSWERS.includes(c?.answer)) return { refused: "Answer going, maybe or no." };
     const guest = isGuest ? await isGuest(record.author)
       : await env.DB.prepare("SELECT 1 FROM item_guests WHERE item = ? AND person = ?").bind(item.id, record.author).first();
     if (!guest) return { refused: "That event isn't there any more." };
     if (e.cancelled) return { refused: "That event's been called off." };
-    if (finishedAt(e) <= at) return { refused: "That event is over." };
+    if (day?.off) return { refused: "That date's been called off." };
+    if ((date ? dateOver(e, date) : finishedAt(e)) <= at) return { refused: "That event is over." };
     if (record.version !== item.version) return { refused: "That event has just changed. Have a look, then answer again." };
     return {};
   }
   if (record.kind === "calloff") {
     if (e.cancelled) return { refused: "That event's been called off." };
+    if (date) {
+      if (day?.off) return { refused: "That date's already been called off." };
+      if (dateOver(e, date) <= at) return { refused: "That date is over." };
+      // Each tells everyone going that day: a few a day at most.
+      const today = Object.values(tally?.dates ?? {}).filter((d) => d?.off && d.off.at > at - 86400).length;
+      if (today >= MAX_DATES_OFF) return { refused: `You can call off up to ${MAX_DATES_OFF} dates of an event a day. Try again tomorrow.` };
+      return { date };
+    }
     if (finishedAt(e) <= at) return { refused: "That event is over." };
     return { cancelled: true };
   }
   if (record.kind !== "change") return {};
-  const event = cleanEvent(c?.event);
+  const event = cleanEvent(c?.event, { repeats: Boolean(e.rrule) });
   if (!event) return { refused: "That event isn't as written." };
+  if (Boolean(event.rrule) !== Boolean(e.rrule)) {
+    return { refused: e.rrule ? "An event can't stop repeating: call it off, and add it again if you like." : "An event can't start repeating: add one that repeats instead." };
+  }
   if (typeof c.text === "string" && c.text.length > MAX_POST_TEXT) return { refused: `The words about it can be up to ${MAX_POST_TEXT} characters.` };
   if (e.cancelled) return { refused: "That event's been called off." };
   if (finishedAt(e) <= at) return { refused: "That event is over." };
+  // A repeating one can't be moved to start on a day that's already over (its time of day can change, under way or not).
+  if (event.rrule && ruleDates(event)[0] !== ruleDates(e)[0] && dateOver(event, ruleDates(event)[0]) < at) return { refused: "Its first date would already be over." };
   const moved = eventChanged(e, event);
   const cancelled = Boolean(event.cancelled);
   if (moved && finishedAt(event) <= at) return { refused: "That would be over already: pick a time still to come." };
@@ -424,16 +452,35 @@ async function removePhoto(env, host, photo, sent, changeSent) {
 
 /** Works an item's row out again from its list: its words now, what they were, its comments, and who else has written. */
 export async function refreshItem(db, id) {
-  const row = await db.prepare("SELECT author, content, audience FROM items WHERE id = ?").bind(id).first();
+  const row = await db.prepare("SELECT author, content, audience, tally FROM items WHERE id = ?").bind(id).first();
   if (!row) return;
   const entries = await listEntries(db, id);
   // A poll's votes, an event's details as last changed and its guests' answers (itemkinds.js).
   const guests = row.audience === "invited"
     ? (await db.prepare("SELECT person FROM item_guests WHERE item = ?").bind(id).all()).results.map((r) => String(r.person)) : null;
   const w = itemFromList(id, row, entries, guests);
+  // A repeating event's dates are worked out from their own lists (refreshDate): kept as they are.
+  const dates = row.tally ? JSON.parse(String(row.tally)).dates : null;
+  const tally = dates && w.tally ? JSON.stringify({ ...JSON.parse(w.tally), dates }) : w.tally;
   await db.prepare(`UPDATE items SET content = ?, earlier = ?, edited_at = ?, comments = ?, others = ?, author_last = ?, changed_at = ?,
     version = ?, tally = ? WHERE id = ?`)
-    .bind(w.content, w.earlier, w.edited_at, w.comments, w.others, w.author_last, now(), w.version, w.tally, id).run();
+    .bind(w.content, w.earlier, w.edited_at, w.comments, w.others, w.author_last, now(), w.version, tally, id).run();
+}
+
+/**
+ * Works one date of a repeating event out again from its own list (lists.js dateList, step 6d), into the event's
+ * `tally.dates`: that date's answers, whether it's called off and by whom, and where its list is up to (for members to
+ * sign an answer to it). The event counts as changed, so members' sites ask for it again.
+ */
+export async function refreshDate(db, id, date) {
+  const list = dateList(id, date);
+  const [row, head] = await Promise.all([db.prepare("SELECT tally FROM items WHERE id = ?").bind(id).first(),
+    db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(list).first()]);
+  if (!row || !head) return;
+  const day = dateTally((await listEntries(db, list)).map((e) => ({ e, r: readEntry(e) })));
+  const tally = JSON.parse(String(row.tally ?? "null")) ?? { answers: {} };
+  tally.dates = { ...tally.dates, [date]: { ...day, list: { n: Number(head.n), head: String(head.head) } } };
+  await db.prepare("UPDATE items SET tally = ?, changed_at = ? WHERE id = ?").bind(JSON.stringify(tally), now(), id).run();
 }
 
 /**

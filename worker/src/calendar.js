@@ -174,12 +174,18 @@ export const EVENT_FIELDS = ["title", "starts_at", "ends_at", "all_day", "time_z
 
 /**
  * A signed event's details (its content's `event`) if they're exactly as this site would have made them from the form
- * (readEventForm): a one-off event, nothing extra. null if not.
+ * (readEventForm): nothing extra; a one-off event, or (`repeats`: in a group, step 6d) one with a rule as the form makes
+ * them, fitting the event (ruleFits). null if not.
  */
-export function cleanEvent(e) {
-  if (!e || typeof e !== "object" || Array.isArray(e) || Object.keys(e).some((k) => !EVENT_FIELDS.includes(k) && k !== "cancelled")) return null;
+export function cleanEvent(e, { repeats = false } = {}) {
+  if (!e || typeof e !== "object" || Array.isArray(e)
+    || Object.keys(e).some((k) => !EVENT_FIELDS.includes(k) && k !== "cancelled" && !(repeats && k === "rrule"))) return null;
   const parsed = parseEvent(eventObject({ ...e, all_day: e.all_day === 1, rrule: null, cancelled_at: null }));
   if (!parsed || e.all_day !== parsed.all_day || (e.cancelled !== undefined && e.cancelled !== true)) return null;
+  if (e.rrule !== undefined) {
+    const rule = typeof e.rrule === "string" ? parseRule(e.rrule) : null;
+    if (!rule || !ruleFits(rule, e)) return null;
+  }
   return EVENT_FIELDS.every((k) => (e[k] ?? null) === (parsed[k] ?? null)) ? e : null;
 }
 

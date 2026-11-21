@@ -11,16 +11,17 @@ import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { friendFace } from "./friends.js";
 import { collage, edited, moreMenu, menuEdit, ownerFace, pollBlock } from "./parts.js";
-import { eventBlock, eventForm, guestPicker } from "./events.js";
+import { eventBlock, eventForm, guestPicker, repeatingSigned } from "./events.js";
 import { eventFormValues, finishedAt } from "../calendar.js";
 
 /**
  * The data-sign-* attributes for a record of `kind` on item `item`, from where its list is up to (`list`: {host, seen,
  * mine}), as a string: for a poll's or an event's forms (pollBlock, eventBlock), and the event forms (ui/sign.js).
  */
-const signAttrs = (kind, list, item, { version = null, about = null, group = null } = {}) => ` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${list.host}"`
-  + ` data-sign-seen-n="${list.seen.n}" data-sign-seen-h="${list.seen.h}" data-sign-prev="${list.mine ?? ""}"${version ? ` data-sign-version="${version}"` : ""}`
-  + `${about ? ` data-sign-about="${about}"` : ""}${group ? ` data-sign-group="${group}"` : ""}`;
+// One date of a repeating event (`date`, step 6d) is signed on that date's own list, which may have nothing yet (no `seen`).
+const signAttrs = (kind, list, item, { version = null, about = null, group = null, date = null } = {}) => ` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${list.host}"`
+  + ` data-sign-seen-n="${list.seen?.n ?? ""}" data-sign-seen-h="${list.seen?.h ?? ""}" data-sign-prev="${list.mine ?? ""}"${version ? ` data-sign-version="${version}"` : ""}`
+  + `${about ? ` data-sign-about="${about}"` : ""}${group ? ` data-sign-group="${group}"` : ""}${date ? ` data-sign-date="${date}"` : ""}`;
 
 const PUBLIC_POLL = "Everyone who can see this poll can see who chose what.";
 
@@ -316,7 +317,17 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
   ${item.poll && pollBlock(ctx, item.poll, { id: `poll-${item.id}`, action: relay, whoNote: "Everyone in the group can see who chose what.",
     sign: signing_ ? signAttrs("vote", signing_, item.id, { version: item.version }) : "",
     closeAction: item.mine && signing_ ? relay : null, closeSign: item.mine && signing_ ? signAttrs("end", signing_, item.id) : "" })}
-  ${item.event && eventBlock(ctx, item.event, { href: base, full: open, ics: `${base}/event.ics`, edit: item.mine ? `${base}/edit` : null,
+  ${item.event?.rrule && repeatingSigned(ctx, item.event, { base, relay, full: open, edit: item.mine ? `${base}/edit` : null,
+    sign: (kind, d) => {
+      if (!signing_) return "";
+      // Each date's own list, as the group last sent where it's up to (none yet: nobody has answered).
+      const day = d?.list ?? { ...item.event.listBase, seen: null, mine: null };
+      if (kind === "answer") return signAttrs("answer", day, item.id, { version: item.version, date: d.date });
+      if (kind === "calloff") return item.mine || may(item.author) ? signAttrs("calloff", day, item.id, { about: item.id, group: item.mine ? null : g.id, date: d.date }) : "";
+      return item.mine ? signAttrs("event-cancel", signing_, item.id, { group: g.id })
+        : may(item.author) ? signAttrs("calloff", signing_, item.id, { about: item.id, group: g.id }) : "";
+    } })}
+  ${item.event && !item.event.rrule && eventBlock(ctx, item.event, { href: base, full: open, ics: `${base}/event.ics`, edit: item.mine ? `${base}/edit` : null,
     answer: signing_ ? { action: relay, sign: signAttrs("answer", signing_, item.id, { version: item.version }) } : null,
     cancel: signing_ && (item.mine || may(item.author)) ? relay : null,
     cancelSign: !signing_ ? "" : item.mine ? signAttrs("event-cancel", signing_, item.id, { group: g.id })
@@ -370,6 +381,7 @@ export function signedGroupPhoto(ctx, { membership: g, group: info, item, index,
 
 /** Changing an event the owner here added to a signed group: the form, signed as a change (ui/sign.js event-change). */
 export function groupItemEventForm(g, item, list) {
+  // One that repeats can change how (step 6d), but can't stop; one that doesn't can't start.
   return eventForm({ action: `/_groups/${g.id}/items/${item.id}/records`, back: `/groups/${g.id}/posts/${item.id}`, values: eventFormValues(item.event),
-    text: item.text ?? "", submit: "Save", sign: signAttrs("event-change", list, item.id, { group: g.id }) });
+    text: item.text ?? "", submit: "Save", sign: signAttrs("event-change", list, item.id, { group: g.id }), repeats: item.event.rrule ? "only" : false });
 }

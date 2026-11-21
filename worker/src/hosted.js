@@ -11,7 +11,7 @@ import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { MemberRules } from "./members.js";
 import { checkRecord } from "./records.js";
-import { CHECKPOINT, GroupRules, PAGE, Rules, signHead } from "./lists.js";
+import { CHECKPOINT, GroupRules, listOf, PAGE, Rules, signHead } from "./lists.js";
 
 const TRIES = 8;
 const turns = new Map(); // list -> the last take queued for it
@@ -56,22 +56,25 @@ export async function rulesFor(db, list, owner, host, group = null) {
 /**
  * Takes a record (`sent`: {record, sig, content?, salt?}) onto the list it belongs to, as host `host` ({person, privateKey}:
  * the site's identity and hosting key), at `taken` (now). `lookups` find writers' identities and browser keys
- * (records.js). Returns {entry, receipt} or {refused: why}.
+ * (records.js). A record for one date of a repeating event (lists.js dateList) starts that date's list if it's the first:
+ * `owner` is then the event's writer (the caller has checked the event is here, and has that date). Returns {entry,
+ * receipt} or {refused: why}.
  */
-export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000), group = null }) {
+export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000), group = null, owner = null }) {
   const got = await checkRecord(sent, { ...lookups, at: taken });
   if (!got) return { refused: "That didn't check." };
   if (got.record.host !== host.person) return { refused: "That belongs somewhere else." };
-  const list = got.record.kind === "item" ? got.fp : got.record.item;
-  return inTurn(list, () => take(db, got, { sent, host, taken, list, group }));
+  const list = listOf(got.record, got.fp);
+  return inTurn(list, () => take(db, got, { sent, host, taken, list, group, dateOwner: got.record.date ? owner : null }));
 }
 
-async function take(db, got, { sent, host, taken, list, group }) {
+async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
   for (let attempt = 0; attempt < TRIES; attempt++) {
     const row = await db.prepare("SELECT owner, n, head, deleted_at FROM lists WHERE id = ?").bind(list).first();
     if (row?.deleted_at) return { refused: "That's been deleted." };
-    if (got.record.kind === "item" ? row : !row) return { refused: got.record.kind === "item" ? "duplicate" : "That isn't here." };
-    const owner = row ? String(row.owner) : got.record.author;
+    const starts = got.record.kind === "item" || Boolean(dateOwner);
+    if (got.record.kind === "item" ? row : !row && !starts) return { refused: got.record.kind === "item" ? "duplicate" : "That isn't here." };
+    const owner = row ? String(row.owner) : dateOwner ?? got.record.author;
     const { rules, entries } = row ? await rulesFor(db, list, owner, host.person, group)
       : { rules: group ? new GroupRules({ host: host.person, list, owner, group }) : new Rules({ host: host.person, list, owner }), entries: [] };
     const why = rules.refuse(got, taken);
@@ -153,5 +156,19 @@ export async function tombstone(db, list, at = Math.floor(Date.now() / 1000)) {
     db.prepare("UPDATE lists SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(at, list),
     db.prepare("DELETE FROM list_pages WHERE list = ?").bind(list),
     db.prepare("DELETE FROM checkpoints WHERE list = ?").bind(list),
+  ]);
+}
+
+/**
+ * Deletes the lists of a repeating event's dates (lists.js dateList) along with the event: everything on them goes, and
+ * their rows stay as tombstones. By range ("<item>/" up to "<item>0": "/" comes just before "0"), not LIKE, whose "_"
+ * would match any character in an id.
+ */
+export async function tombstoneDates(db, item, at = Math.floor(Date.now() / 1000)) {
+  const [lo, hi] = [`${item}/`, `${item}0`];
+  await db.batch([
+    db.prepare("UPDATE lists SET deleted_at = ? WHERE id > ? AND id < ? AND deleted_at IS NULL").bind(at, lo, hi),
+    db.prepare("DELETE FROM list_pages WHERE list > ? AND list < ?").bind(lo, hi),
+    db.prepare("DELETE FROM checkpoints WHERE list > ? AND list < ?").bind(lo, hi),
   ]);
 }

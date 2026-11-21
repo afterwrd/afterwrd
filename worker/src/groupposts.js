@@ -13,8 +13,11 @@
 //   GET  /_p/items/<id>      one post's (or photo's) whole list, with the identities, delegations and signed names of
 //                            everyone in it, and, for an admin who removed something or called it off, the owner's signed
 //                            `role` making them admin (with their `join`), so readers needn't ask for the members list
+//   GET  /_p/items/<id>/dates/<date>   one date's list of a repeating event (step 6d: its answers and calling off),
+//                            with what /_p/items/<id> sends with it
 //   POST /_p/records         {sent, delegation, profile?}: the member's own comment, edit, delete, vote, answer, end or
-//                            change, or (an admin, or the group's owner) a remove or calloff
+//                            change, or (an admin, or the group's owner) a remove or calloff; an answer or calloff with
+//                            `date` goes on that date's list, which starts with it
 // A post's list follows lists.js GroupRules: what's removed is removed by the group's admins or owner. Notes go out
 // from here (fat notes, through the Outbox, groupNoteFor): a comment to the post's writer, those who've commented and
 // those it mentions; a new post that mentions people to them; @here to everyone; an event's change or calling off to
@@ -25,16 +28,16 @@ import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js
 import { signedLink } from "./friends.js";
 import { copyPhotos, GROUP_BYTES, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
 import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
-import { listEntries, readList, takeRecord, tombstone } from "./hosted.js";
+import { listEntries, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
 import { checkProfile, identityState } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
-import { ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshItem, sentRecord } from "./items.js";
+import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
 import { ownIdentity } from "./keys.js";
 import { rateWindow } from "./limits.js";
-import { signHead } from "./lists.js";
+import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
 import { outbox } from "./outbox.js";
-import { parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 
@@ -112,7 +115,7 @@ export async function handleGroupItems(request, env, url) {
     const acting = [...new Set(items.flatMap((i) => i.records.map((x) => parseRecord(fromB64url(x.sent.record))))
       .filter((r) => r?.kind === "calloff" && r.author !== self.owner).map((r) => r.author))];
     const roles = acting.length ? await roleProofs(env, self, acting) : {};
-    const gone = before || only ? [] : (await db.prepare("SELECT id FROM lists WHERE deleted_at > ?").bind(since).all()).results.map((g) => String(g.id));
+    const gone = before || only ? [] : (await db.prepare("SELECT id FROM lists WHERE deleted_at > ? AND instr(id, '/') = 0").bind(since).all()).results.map((g) => String(g.id));
     // As friendhost.js: never up to this very second, so a change later this second isn't missed.
     const until = before || only ? null : more ? Number(rows.at(-1).changed_at) : Math.min(Number(rows.at(-1)?.changed_at ?? since), Math.max(since, now() - 1));
     const keys = [...items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]), ...Object.values(roles).flatMap((p) => [p.join, p.role])].map(keyOf);
@@ -120,9 +123,15 @@ export async function handleGroupItems(request, env, url) {
     return json({ v: 2, items, gone, until, more, roles, context: await groupObject(db, url.origin, group, member),
       delegations: await delegationsFor(db, keys), people: await peopleFor(db, [...new Set([...authors, self.owner])]) });
   }
-  const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);
+  const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})(?:\/dates\/(\d{4}-\d{2}-\d{2}))?$/.exec(url.pathname);
   if (request.method === "GET" && one) {
-    const list = await readList(db, one[1], { host: self });
+    // One date of a repeating event (step 6d): its own list, there once someone's answered (or called it off).
+    if (one[2] && !DATE_RE.test(one[2])) return json({ error: "Not found." }, 404);
+    if (one[2] && !(await db.prepare("SELECT 1 FROM lists WHERE id = ?").bind(dateList(one[1], one[2])).first())) {
+      const event = await db.prepare("SELECT 1 FROM lists WHERE id = ? AND deleted_at IS NULL").bind(one[1]).first();
+      return event ? json({ v: 2, empty: true }) : json({ error: "Not found." }, 404);
+    }
+    const list = await readList(db, one[2] ? dateList(one[1], one[2]) : one[1], { host: self });
     if (!list || list.owner === self.person) return json({ error: "Not found." }, 404); // not the members list: that's /_group/members
     if (list.deleted) return json({ error: "Deleted.", deleted: true }, 410);
     const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
@@ -151,6 +160,13 @@ async function memberItem(env, origin, row, member) {
     if (!r) continue;
     const own = r.author === String(row.author) && ((r.kind === "edit" && r.about === String(row.id)) || r.kind === "change");
     if (own || r.kind === "calloff") records.push({ n: e.n, fp: e.fp, taken: e.taken, sent: e.sent });
+  }
+  // A repeating event's dates called off, each from its own list (step 6d), so members see which are off by signature.
+  const tally = row.tally ? JSON.parse(String(row.tally)) : null;
+  for (const [date, d] of Object.entries(tally?.dates ?? {})) {
+    if (!d?.off) continue;
+    const e = (await listEntries(env.DB, dateList(String(row.id), date))).find((x) => x.sent && parseRecord(fromB64url(x.sent.record))?.kind === "calloff");
+    if (e) records.push({ n: e.n, fp: e.fp, taken: e.taken, date, sent: e.sent });
   }
   return { ...item, records };
 }
@@ -224,7 +240,7 @@ function postTrouble(self, member, post, photos, files) {
   const listed = Array.isArray(post.content.photos) ? post.content.photos : [];
   if (type === "event") {
     if (listed.length || post.content.poll !== undefined) return "An event can't have photos or a poll.";
-    const wrong = eventTrouble(post.content.event, now());
+    const wrong = eventTrouble(post.content.event, now(), { repeats: true });
     if (wrong) return wrong;
   } else {
     const wrong = pollTrouble(post.content.poll, now());
@@ -364,11 +380,13 @@ async function memberRecord(env, url, self, member, body) {
   if ((record.kind === "delete" || record.kind === "remove") && record.about === id && item.type === "photo") {
     return json({ error: "A photo goes with its post: delete or remove the whole post instead." }, 400);
   }
+  if (record.date && item.type !== "post") return json({ error: "That isn't an event." }, 400);
   const plan = await kindPlan(env, item, now_, got, { guestIds: null, salt: null, isGuest: async () => true });
   if (plan.refused) return json({ error: plan.refused }, 409);
   await keepProfile(env, String(member.identity), body.profile);
   const rules = await groupRules(env, self, record.kind === "remove" || record.kind === "calloff");
-  const answer = await takeRecord(db, { sent: body.sent, host: self, lookups: lookupsFor(env), group: rules });
+  // One date of a repeating event (step 6d): its own list, started by the first answer to it, the event's writer's.
+  const answer = await takeRecord(db, { sent: body.sent, host: self, lookups: lookupsFor(env), group: rules, owner: String(item.author) });
   if (answer.refused) {
     const said = { "Someone has replied since.": "Someone has replied since, so it can't be changed now.", "That's out of order.": "Something changed meanwhile. Try again." };
     return json({ error: said[answer.refused] ?? answer.refused }, 409);
@@ -376,8 +394,10 @@ async function memberRecord(env, url, self, member, body) {
   if (answer.deleted) {
     // An event still to come: those going, or who might, are told it's off.
     if (now_.type === "event" && !now_.event?.cancelled && finishedAt(now_.event) > now()) {
-      await queueToPeople(env, url.origin, { kind: "gone-off", item: id, people: answering(item.tally), except: String(member.identity) });
+      await queueToPeople(env, url.origin, { kind: "gone-off", item: id, people: answering(item.tally, now_.event), except: String(member.identity) });
     }
+    // A repeating one's dates go with it.
+    if (now_.event?.rrule) await tombstoneDates(db, id);
     // A post's photos go with it.
     for (const photo of await photosOf(db, id)) {
       await tombstone(db, photo);
@@ -386,17 +406,35 @@ async function memberRecord(env, url, self, member, body) {
     await itemGone(env, id);
     return json({ ok: true, deleted: true, n: answer.entry?.n ?? null });
   }
+  if (record.date) {
+    await refreshDate(db, id, record.date);
+    // One date called off: those going that day, or who might, are told.
+    if (record.kind === "calloff") {
+      await queueToPeople(env, url.origin, { kind: "calloff", item: dateList(id, record.date), fp: answer.entry.fp,
+        people: answering(item.tally, now_.event, record.date), except: String(member.identity) });
+    }
+    return json({ ok: true, receipt: answer.receipt ?? null, n: answer.entry?.n ?? null });
+  }
   await refreshItem(db, id);
   if (record.kind === "comment") await queueComment(env, url.origin, id, item, record, answer.entry.fp);
   if ((record.kind === "change" && (plan.moved || plan.cancelled)) || record.kind === "calloff") {
-    await queueToPeople(env, url.origin, { kind: record.kind, item: id, fp: answer.entry.fp, people: answering(item.tally), except: String(member.identity) });
+    await queueToPeople(env, url.origin, { kind: record.kind, item: id, fp: answer.entry.fp, people: answering(item.tally, now_.event), except: String(member.identity) });
   }
   return json({ ok: true, receipt: answer.receipt ?? null, n: answer.entry?.n ?? null });
 }
 
-/** Those going to an event, or who might (from its tally as stored). */
-const answering = (tally) => Object.entries(JSON.parse(String(tally ?? "{}"))?.answers ?? {})
-  .filter(([, a]) => a?.answer === "going" || a?.answer === "maybe").map(([p]) => p);
+/**
+ * Those going to an event, or who might (from its tally as stored). For a repeating one (step 6d), to `date`, or (with
+ * none) to any of its dates still to come.
+ */
+function answering(tally, event = null, date = null) {
+  const t = JSON.parse(String(tally ?? "{}")) ?? {};
+  const coming = (answers) => Object.entries(answers ?? {}).filter(([, a]) => a?.answer === "going" || a?.answer === "maybe").map(([p]) => p);
+  if (!event?.rrule) return coming(t.answers);
+  const at = now();
+  const dates = Object.entries(t.dates ?? {}).filter(([d, x]) => (date ? d === date : !x?.off && dateOver(event, d) > at));
+  return [...new Set(dates.flatMap(([, x]) => coming(x?.answers)))];
+}
 
 /** Queues a note to members by who they are (`people`, person ids), apart from `except`. */
 async function queueToPeople(env, origin, { kind, item, fp = null, people, except }) {
@@ -453,15 +491,18 @@ export async function groupNoteFor(env, note, member) {
       people: await peopleFor(db, [String(row.author)]), names: await memberNames(env, [String(row.author)]) };
   }
   const self = await groupSelf(env);
-  const entries = self ? await listEntries(db, note.item) : [];
+  // The record's list: the post's (or photo's), or one date's of a repeating event (step 6d).
+  const where = parseListId(note.item);
+  if (!self || !where) return null;
+  const entries = await listEntries(db, note.item);
   const at = entries.findIndex((e) => e.fp === note.fp);
   const entry = entries[at];
   if (!entry?.sent) return null; // deleted since
   const record = parseRecord(fromB64url(entry.sent.record));
   const receipt = await signHead(self.privateKey, { host: self.person, list: note.item, n: entry.n, head: entry.head });
-  const photo = await db.prepare("SELECT post, position FROM item_photos WHERE photo = ?").bind(note.item).first();
+  const photo = where.date ? null : await db.prepare("SELECT post, position FROM item_photos WHERE photo = ?").bind(note.item).first();
   return {
-    v: 2, kind: note.kind, item: note.item,
+    v: 2, kind: note.kind, item: where.item, ...(where.date && { date: where.date }),
     ...(photo && { photo: { post: String(photo.post), index: Number(photo.position) + 1 } }),
     entry: { n: entry.n, fp: entry.fp, taken: entry.taken, prev: at > 0 ? entries[at - 1].head : "", sent: entry.sent },
     receipt, delegations: await delegationsFor(db, [record.key]), people: await peopleFor(db, [record.author]),

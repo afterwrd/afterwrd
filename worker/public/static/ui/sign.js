@@ -13,11 +13,14 @@ import { savedKey } from "../browserkey.js";
 
 export const CANT_SIGN = "This browser can't sign for you yet. Sign out and sign in again, or set up signing in Your devices.";
 
+// One date of a repeating event (data-sign-date, step 6d) has a list of its own: its first answer saw nothing there
+// (data-sign-seen-n empty).
 const fieldsOf = (d, prefix, kind, key) => ({
   kind, author: key.person, host: d[`${prefix}Host`], item: d[`${prefix}Item`],
-  seen: { n: Number(d[`${prefix}SeenN`]), h: d[`${prefix}SeenH`] }, prev: d[`${prefix}Prev`] || null,
+  seen: d[`${prefix}SeenN`] ? { n: Number(d[`${prefix}SeenN`]), h: d[`${prefix}SeenH`] } : null, prev: d[`${prefix}Prev`] || null,
   ...(d[`${prefix}About`] ? { about: d[`${prefix}About`] } : {}),
   ...(d[`${prefix}Version`] ? { version: d[`${prefix}Version`] } : {}),
+  ...(d[`${prefix}Date`] ? { date: d[`${prefix}Date`] } : {}),
 });
 
 /**

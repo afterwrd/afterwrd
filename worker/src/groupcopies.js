@@ -13,11 +13,12 @@
 //                                               change, or (an admin) remove or calloff
 // - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
 import { callFriend } from "./calls.js";
-import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt } from "./calendar.js";
+import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
+import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
 import { ID_RE, namesFor, ownHost } from "./items.js";
-import { checkHead, checkList, headOf } from "./lists.js";
+import { checkHead, checkList, dateList, headOf, listOf } from "./lists.js";
 import { MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
@@ -29,7 +30,7 @@ import { checkRecord } from "./records.js";
 import { signedFile } from "./share.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
-import { parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { html, json, now, Refusal } from "./util.js";
 
@@ -112,8 +113,9 @@ async function trim(env, group) {
   const { results } = await db.prepare(`SELECT id, content FROM copies WHERE group_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?`)
     .bind(group.id, KEEP).all();
   if (!results.length) return;
+  // (`sent.item` is the list: one date's of a repeating event is "<post>/<date>".)
   const acted = new Set((await db.prepare("SELECT DISTINCT item FROM sent WHERE host = ? AND created_at > ?").bind(group.identity, now() - 30 * 86400).all())
-    .results.map((r) => String(r.item)));
+    .results.map((r) => String(r.item).split("/")[0]));
   const old = results.filter((r) => {
     const content = JSON.parse(String(r.content));
     return !acted.has(String(r.id)) && !(content.event && !content.event.cancelled && finishedAt(content.event) > now());
@@ -138,16 +140,28 @@ export async function groupCopiesShown(env, group, rows, people = []) {
   const names = memberNames(people);
   people = rows.flatMap((r) => {
     const t = r.tally ? JSON.parse(String(r.tally)) : null;
-    return [String(r.author), ...Object.keys(t?.votes ?? t?.answers ?? {})];
+    return [String(r.author), ...Object.keys(t?.votes ?? t?.answers ?? {}), ...Object.values(t?.dates ?? {}).flatMap((d) => Object.keys(d?.answers ?? {}))];
   });
   const [known, mine] = await Promise.all([namesFor(db, people),
     rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) ORDER BY created_at, rowid`)
       .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }]);
   for (const [p, name] of known) names.set(p, name);
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
+  // The owner's newest record on each date of a repeating event (step 6d: each date's list is its own).
+  const repeating = rows.filter((r) => JSON.parse(String(r.content)).event?.rrule).map((r) => String(r.id));
+  for (const id of repeating) {
+    const { results } = await db.prepare("SELECT item, fp FROM sent WHERE item > ? AND item < ? ORDER BY created_at, rowid").bind(`${id}/`, `${id}0`).all();
+    for (const x of results) last.set(String(x.item), String(x.fp));
+  }
   return rows.map((r) => {
     const name = names.get(String(r.author)) ?? "Someone";
     const shown = copyFromRow({ ...r, name, origin: "", connection_id: 0 }, { names, me: me?.person ?? null });
+    const event = /** @type {any} */ (shown.event);
+    if (event?.rrule && me) event.listBase = { host: String(group.identity), me: me.person };
+    if (event?.dates && me) {
+      event.dates = event.dates.map((d) => ({ ...d, list: { host: String(group.identity), me: me.person,
+        seen: d.list ? { n: d.list.n, h: d.list.head } : null, mine: last.get(dateList(String(r.id), d.date)) ?? null } }));
+    }
     return { ...shown, connection: null, name, mine: String(r.author) === me?.person,
       list: r.list_n && me ? { host: String(group.identity), me: me.person, seen: { n: Number(r.list_n), h: String(r.list_head) },
         mine: last.get(String(r.id)) ?? null } : null };
@@ -274,11 +288,14 @@ async function ready(env, group, sent, check) {
     ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) };
 }
 
-/** Keeps the owner's own copy of what they sent a group, with the group's receipt. */
+/**
+ * Keeps the owner's own copy of what they sent a group, with the group's receipt. `item` is the list it's on (lists.js
+ * listOf): for one date of a repeating event, that date's, so the owner's next answer to it follows this one (prev).
+ */
 async function keepSent(env, record, sent, receipt) {
   const fp = await fingerprintOf("record", fromB64url(sent.record));
   await env.DB.prepare("INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(fp, record.host, record.kind === "item" ? fp : record.item, record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
+    .bind(fp, record.host, listOf(record, fp), record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
   return fp;
 }
 
@@ -349,6 +366,13 @@ export async function relayToGroup(request, env, url, group, id) {
         tally.votes ??= {};
         if (mask) tally.votes[record.author] = mask;
         else delete tally.votes[record.author];
+      } else if (ANSWERS.includes(content.answer) && record.date) {
+        // One date of a repeating event (step 6d): that date's answers, and where its list is up to now (the receipt).
+        const took = answer.receipt?.bytes ? decode(fromB64url(answer.receipt.bytes)) : null;
+        const day = tally.dates?.[record.date] ?? { answers: {}, off: null, list: null };
+        day.answers = { ...day.answers, [record.author]: { answer: content.answer, version: record.version ?? null } };
+        if (Number.isSafeInteger(took?.n) && typeof took.head === "string") day.list = { n: took.n, head: took.head };
+        tally.dates = { ...tally.dates, [record.date]: day };
       } else if (ANSWERS.includes(content.answer)) {
         tally.answers ??= {};
         tally.answers[record.author] = { answer: content.answer, version: record.version ?? null };
@@ -357,7 +381,7 @@ export async function relayToGroup(request, env, url, group, id) {
     }
   }
   await db.prepare("UPDATE groups SET items_checked_at = 0 WHERE id = ?").bind(group.id).run();
-  back.hash = `gi-${id}`;
+  back.hash = record.date && back.pathname.endsWith(`/posts/${id}`) ? `d-${record.date}` : `gi-${id}`;
   return Response.redirect(back.href, 303);
 }
 
@@ -426,17 +450,22 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   if (!["comment", "change", "calloff"].includes(note.kind)) return json({ error: "That didn't work." }, 400);
   const { entry, receipt } = note;
   const item = String(note.item ?? "");
-  if (!ID_RE.test(item) || !Number.isSafeInteger(entry?.n) || entry.n < 2 || !Number.isSafeInteger(entry.taken)
+  // One date of a repeating event called off (step 6d): on that date's own list, where it may be the first entry.
+  const date = note.kind === "calloff" && note.date !== undefined ? note.date : null;
+  if (date !== null && (typeof date !== "string" || !DATE_RE.test(date))) return json({ error: "That didn't work." }, 400);
+  const list = date ? dateList(item, date) : item;
+  if (!ID_RE.test(item) || !Number.isSafeInteger(entry?.n) || entry.n < (date ? 1 : 2) || !Number.isSafeInteger(entry.taken)
     || !ID_RE.test(entry.fp ?? "") || typeof entry.prev !== "string") return json({ error: "That didn't work." }, 400);
   // The group took it at that point: the head worked out again, and signed by the group.
   const state = await identityState(env, host);
   if (!state) return json({ error: "The group's identity couldn't be checked." }, 400);
-  const head = await headOf({ host, list: item, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
-  const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list: item });
+  const head = await headOf({ host, list, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
+  const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
   const signed = await learnPeople(env, note.people);
   const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
-  if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== host || got.record.item !== item) {
+  if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== host || got.record.item !== item
+    || (got.record.date ?? null) !== date) {
     return json({ error: "That doesn't check." }, 400);
   }
   const author = got.record.author;
@@ -463,14 +492,17 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   if (!copy) return json({ ok: true }, 202);
   const was = JSON.parse(String(copy.content));
   if (!was.event) return json({ error: "That isn't a change to an event." }, 400);
+  if (date) return dateCalledOff(env, url, work, { group, me, copy, was, item, date, entry, actor });
   if (note.kind === "change" && author !== String(copy.author)) return json({ error: "That isn't theirs to change." }, 400);
-  const event = note.kind === "calloff" ? { ...was.event, cancelled: true } : cleanEvent(got.content?.event);
-  if (!event) return json({ error: "That isn't a change to an event." }, 400);
-  const { cancelled_at: _, ...plain } = event;
-  void _;
+  // A repeating one stays one (step 6d), with its dates called off as they were.
+  const event = note.kind === "calloff" ? { ...was.event, cancelled: true } : cleanEvent(got.content?.event, { repeats: Boolean(was.event.rrule) });
+  if (!event || Boolean(event.rrule) !== Boolean(was.event.rrule)) return json({ error: "That isn't a change to an event." }, 400);
+  const { cancelled_at: _, skipped: __, ...plain } = event;
+  void _; void __;
   const cancelled = Boolean(event.cancelled) && !was.event.cancelled;
   const moved = eventChanged(was.event, plain);
-  const now_ = { ...was, event: { ...plain, ...(event.cancelled ? { cancelled_at: was.event.cancelled_at ?? entry.taken } : {}) },
+  const now_ = { ...was, event: { ...plain, ...(event.cancelled ? { cancelled_at: was.event.cancelled_at ?? entry.taken } : {}),
+    ...(plain.rrule && was.event.skipped?.length ? { skipped: was.event.skipped.filter((d) => hasDate(plain, d)) } : {}) },
     ...(note.kind === "change" && typeof got.content.text === "string" ? { text: got.content.text.slice(0, 5000) } : {}) };
   await env.DB.prepare("UPDATE copies SET content = ?, changed_at = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(now_), entry.taken, item, g).run();
   if ((moved || cancelled) && myAnswer(copy, me.person) !== "no") {
@@ -482,6 +514,59 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     }
   }
   return json({ ok: true }, 202);
+}
+
+/**
+ * One date of a repeating event called off (step 6d; the note checked by receiveGroupNote): the copy here marks it
+ * off, and the owner is told if they'd said they were going that day, or might.
+ */
+async function dateCalledOff(env, url, work, { group, me, copy, was, item, date, entry, actor }) {
+  const g = Number(group.id);
+  if (!was.event.rrule || !hasDate(was.event, date)) return json({ error: "That isn't one of its dates." }, 400);
+  const skipped = [...new Set([...(was.event.skipped ?? []), date])].sort();
+  const tally = JSON.parse(String(copy.tally ?? "null"));
+  const mine = tally?.dates?.[date]?.answers?.[me.person]?.answer ?? null;
+  if (tally?.dates?.[date]) tally.dates[date].off = { by: entry.sent && parseRecord(fromB64url(entry.sent.record))?.author, at: entry.taken };
+  await env.DB.prepare("UPDATE copies SET content = ?, tally = ?, changed_at = ? WHERE id = ? AND group_id = ?")
+    .bind(JSON.stringify({ ...was, event: { ...was.event, skipped } }), tally ? JSON.stringify(tally) : null, entry.taken, item, g).run();
+  if (mine === "going" || mine === "maybe") {
+    const words = eventWords({ ...onDate(was.event, date), rrule: null });
+    if (await keepNotice(env.DB, { kind: "cancelled", fp: entry.fp, group: g, item, target: `${item}?date=${date}`, actor, text: words })) {
+      notifyLater(env, url.origin, work, { title: String(group.name), text: `Called off: ${words}`, hidden: "Called off a date you were going to",
+        url: `/groups/${g}/posts/${item}?date=${date}`, tag: `event-g${g}-${item}-${date}` });
+    }
+  }
+  return json({ ok: true }, 202);
+}
+
+/**
+ * One date of a repeating event, read from the group and checked (step 6d): its list (lists.js dateList), under the
+ * same rules as the event's (the event's writer and the group's admins may call it off). Returns {answers (as
+ * itemkinds.js dateTally counts them, from what's signed), off, seen (where it's up to: null if nobody has answered),
+ * mine, problem} or {error}.
+ * @returns {Promise<{ error?: string, answers?: Record<string, any>, off?: any, seen?: { n: number, h: string } | null, mine?: string | null, problem?: string | null }>}
+ */
+export async function groupDate(env, from, group, id, date, admins = new Set()) {
+  let data;
+  try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: error.message }; }
+  const mine = (await env.DB.prepare("SELECT fp FROM sent WHERE item = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(dateList(id, date)).first())?.fp ?? null;
+  if (data?.empty === true) return { answers: {}, off: null, seen: null, mine, problem: null };
+  await learnPeople(env, data.people);
+  const state = await identityState(env, String(group.identity));
+  if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
+  const copy = await env.DB.prepare("SELECT author FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
+  const host = String(group.identity);
+  const list = dateList(id, date);
+  // An admin who called this date off: the owner's signed `role` the group sends with it.
+  const dateAdmins = await checkRoles(env, group, String(state.current.owner), data.roles, data.delegations);
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: state.current.hosting, host, list }));
+  const result = await checkList({ host, hostingKey: state.current.hosting, list, owner: copy ? String(copy.author) : "", entries,
+    signedHead: data.signedHead, from: from0 ? { n: from0.n, head: from0.head } : null, lookups: lookupsWith(env, data.delegations),
+    group: { owner: String(state.current.owner), admin: (p) => admins.has(p) || dateAdmins.has(p) } });
+  const day = dateTally(result.entries.map((e) => ({ e, r: e.record ? { record: e.record, content: e.content } : null })));
+  const last = entries.find((e) => e.n === result.upTo);
+  return { ...day, seen: last ? { n: last.n, h: last.head } : null, mine, problem: result.problem };
 }
 
 /** One of a group's posts this site doesn't keep (an older one, opened by a link): asked for, checked, and kept. */

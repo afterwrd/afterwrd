@@ -12,11 +12,11 @@ import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
-import { parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
-import { ANSWERS, cleanEvent } from "./calendar.js";
+import { ANSWERS, cleanEvent, hasDate } from "./calendar.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { html, now } from "./util.js";
@@ -175,13 +175,17 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
   // records too, checked when they're sent as notes or its thread is opened), and only if its first record said it's
   // one: for those invited, from a friend; for every member, in a group.
   const isEvent = got.content?.type === "event" && (group ? !got.record.audience : Boolean(got.record.audience));
-  const event = isEvent ? cleanEvent(stripCancelled(item.content?.event)) : null;
+  // In a group, an event may repeat (step 6d), with the dates called off as their signed calloffs say (signedNow).
+  const event = isEvent ? cleanEvent(stripCancelled(item.content?.event), { repeats: Boolean(group) }) : null;
+  const skipped = group && event?.rrule && Array.isArray(item.content.event.skipped)
+    ? item.content.event.skipped.filter((d) => typeof d === "string" && hasDate(event, d)).slice(0, 60) : [];
   const content = { text: typeof item.content?.text === "string" ? item.content.text.slice(0, 5000) : "",
     photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")),
     ...(Array.isArray(got.content?.mentions) && { mentions: shownMentions(got.record, got.content) }),
     ...(group && got.content?.here === true && { here: true }),
     ...(got.content?.poll && !pollTrouble(got.content.poll, Number(item.taken)) && { poll: got.content.poll }),
-    ...(event && { type: "event", event: { ...event, ...(event.cancelled && Number.isSafeInteger(item.content.event.cancelled_at) ? { cancelled_at: item.content.event.cancelled_at } : {}) } }),
+    ...(event && { type: "event", event: { ...event, ...(event.cancelled && Number.isSafeInteger(item.content.event.cancelled_at) ? { cancelled_at: item.content.event.cancelled_at } : {}),
+      ...(skipped.length && { skipped }) } }),
     // What a vote or answer names now (the item, or the owner's latest change that moved their event).
     ...(ID_RE.test(item.version ?? "") && { version: item.version }) };
   if (got.content?.type === "event" && !event) return null;
@@ -212,7 +216,10 @@ async function signedNow(env, got, item, delegations, { host, rules }) {
     if (!Number.isSafeInteger(x?.taken)) continue;
     const r = await checkRecord(x.sent, { ...lookupsWith(env, delegations), at: x.taken });
     if (!r || r.record.item !== item.id || r.record.host !== host) continue;
-    if (r.record.kind === "calloff" ? !(rules && (r.record.author === rules.owner || rules.admins.has(r.record.author))) : r.record.author !== got.record.author) continue;
+    // One date of a repeating event called off (step 6d, from that date's list): by the event's writer too.
+    if (r.record.date !== undefined && (r.record.kind !== "calloff" || x.date !== r.record.date)) continue;
+    const runs = rules && (r.record.author === rules.owner || rules.admins.has(r.record.author));
+    if (r.record.kind === "calloff" ? !(runs || (r.record.date && r.record.author === got.record.author)) : r.record.author !== got.record.author) continue;
     entries.push({ n: entries.length + 1, fp: r.fp, taken: x.taken, sent: x.sent });
   }
   const worked = itemFromList(item.id, { author: got.record.author, content: "{}", audience: "group" }, entries, null);
@@ -226,8 +233,11 @@ async function signedNow(env, got, item, delegations, { host, rules }) {
   return { content: { ...now_, photos }, earlier: worked.earlier ? JSON.parse(worked.earlier) : [], edited_at: worked.edited_at };
 }
 
-/** An event's details as a host sends them, without what cleanEvent doesn't take (when it was called off, and by whom). */
-export const stripCancelled = (e) => (e && typeof e === "object" ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== "cancelled_at" && k !== "called_off_by")) : null);
+/**
+ * An event's details as a host sends them, without what cleanEvent doesn't take (when it was called off, and by whom,
+ * and a repeating one's dates called off).
+ */
+export const stripCancelled = (e) => (e && typeof e === "object" ? Object.fromEntries(Object.entries(e).filter(([k]) => !["cancelled_at", "called_off_by", "skipped"].includes(k))) : null);
 
 const MAX_TALLY = 2000; // people in one poll's or event's totals
 /**
@@ -242,8 +252,14 @@ export function cleanTally(t) {
       ended_at: Number.isSafeInteger(t.ended_at) ? t.ended_at : null };
   }
   if (t.answers) {
-    return { answers: Object.fromEntries(entries(t.answers).filter(([, a]) => ANSWERS.includes(a?.answer))
-      .map(([p, a]) => [p, { answer: a.answer, version: ID_RE.test(a.version ?? "") ? a.version : null }])),
+    const answers = (o) => Object.fromEntries(entries(o).filter(([, a]) => ANSWERS.includes(a?.answer))
+      .map(([p, a]) => [p, { answer: a.answer, version: ID_RE.test(a.version ?? "") ? a.version : null }]));
+    // A repeating event's (a group's, step 6d): each date's answers, whether it's off, and where its list is up to.
+    const dates = t.dates && typeof t.dates === "object" ? Object.fromEntries(Object.entries(t.dates).slice(0, 60)
+      .filter(([d, x]) => DATE_RE.test(d) && x && typeof x === "object")
+      .map(([d, x]) => [d, { answers: answers(x.answers), off: x.off && ID_RE.test(x.off.by ?? "") && Number.isSafeInteger(x.off.at) ? { by: x.off.by, at: x.off.at } : null,
+        list: Number.isSafeInteger(x.list?.n) && x.list.n >= 1 && ID_RE.test(x.list.head ?? "") ? { n: x.list.n, head: x.list.head } : null }])) : null;
+    return { answers: answers(t.answers), ...(dates && { dates }),
       invited: Number.isSafeInteger(t.invited) && t.invited >= 0 && t.invited <= 10_000 ? t.invited : null };
   }
   return null;

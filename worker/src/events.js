@@ -82,7 +82,9 @@ async function readForSigning(env, form, zone) {
   const op = String(form.get("op") ?? "");
   const group = Number(form.get("group") ?? 0) || null;
   const fail = (error) => Response.json({ error }, { status: 400 });
-  const plain = ({ title, starts_at, ends_at, all_day, time_zone, place }) => ({ title, starts_at, ends_at, all_day, time_zone, place });
+  // In a signed group, an event may repeat (step 6d): its rule goes with it.
+  const plain = ({ title, starts_at, ends_at, all_day, time_zone, place, rrule }) => ({ title, starts_at, ends_at, all_day, time_zone, place,
+    ...(group && rrule ? { rrule } : {}) });
   const words = (value) => {
     const text = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
     return text.length > MAX_POST_TEXT ? null : text;
@@ -99,7 +101,7 @@ async function readForSigning(env, form, zone) {
   };
   try {
     if (op === "new") {
-      const read = readEventForm(form, zone);
+      const read = readEventForm(form, zone, { repeats: Boolean(group) });
       if (read.error) return fail(read.error);
       if (finishedAt(read.event) <= now()) return fail("That's already over: pick a time still to come.");
       const text = words(form.get("text"));
@@ -115,7 +117,7 @@ async function readForSigning(env, form, zone) {
     const content = JSON.parse(String(item.content));
     const was = plain(content.event);
     if (op === "change") {
-      const read = readEventForm(form, zone);
+      const read = readEventForm(form, zone, { repeats: Boolean(group) });
       if (read.error) return fail(read.error);
       const text = words(form.get("text"));
       if (text === null) return fail(`The words about it can be up to ${MAX_POST_TEXT} characters.`);

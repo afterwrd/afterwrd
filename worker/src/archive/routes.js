@@ -2,13 +2,13 @@
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
-import { ownHost } from "../items.js";
+import { dateOver, ownHost } from "../items.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, namesFor, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { groupPostId, postId as postAddress } from "../../public/static/activity.js";
 import { eventsFor, oldEventsGone } from "../events.js";
-import { datesOf, FINISHED_SQL, finishedAt, icsFile, monthSpan, readDay, readMonth, readWeek, weekSpan } from "../calendar.js";
+import { datesOf, FINISHED_SQL, finishedAt, hasDate, icsFile, monthSpan, readDay, readMonth, readWeek, ruleDates, weekSpan } from "../calendar.js";
 import { connectedToken } from "../cloudflare.js";
 import { findTarget, hasOldThread, latestComments, loadThreads, newCount, photoKey } from "./comments.js";
 import { sitePolls } from "../polls.js";
@@ -654,7 +654,7 @@ async function friendComments(ctx, connection, id, owner) {
     : t.changed ? `${connection.name}'s site has changed this conversation since you last saw it.` : null;
   // What was checked, for counting a poll again (only from the start: a thread read from a checkpoint can't be).
   const counted = !t.problem && read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
-  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted };
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted, admins: t.admins };
 }
 
 /** A photo in a friend's signed post, from the post (afterwrd 2): its own comments, read from their site. */
@@ -1037,11 +1037,14 @@ async function eventsIndex(ctx, params) {
   // each, as Home asks friends; at most GROUPS_ASKED groups, as a page may only ask 50 other sites on the free plan.
   // A group that doesn't answer, or isn't asked, shows the owner's own copies of their plans there.
   const unreachable = [];
-  // A signed group's events (step 6c) are kept here as copies: nothing to ask.
+  // A signed group's events (step 6c) are kept here as copies: nothing to ask. Each date of a repeating one (6d) on
+  // its own, with the owner's answer to it.
   for (const g of joined.results.filter((x) => x.identity)) {
     for (const p of await groups_.groupEvents(ctx.env, g)) {
-      if (p.event.answer === "no" || !inSpan(p.event)) continue;
-      items.push(calendarItem(p.event, { kind: "group", href: `/groups/${g.id}/posts/${p.id}`, who: g.name, answer: p.event.answer }));
+      for (const d of datesOf(p.event, { from, to })) {
+        if (d.answer === "no" || !inSpan(d)) continue;
+        items.push(calendarItem(d, { kind: "group", href: `/groups/${g.id}/posts/${p.id}${d.date ? `?date=${d.date}` : ""}`, who: g.name, answer: d.answer }));
+      }
     }
   }
   const unsigned = joined.results.filter((x) => !x.identity);
@@ -1150,7 +1153,9 @@ async function groupItemPost(ctx, params, id, itemId, photo = null) {
       const at = Number(photo);
       if (!(at >= 1 && at <= item.photos.length) || !item.photos[at - 1]?.item) throw new Error("That photo isn't there any more.");
       const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/groups/${g.id}#gi-${itemId}`;
-      return { group: info, item, index: at, back, ...(await groupComments(ctx, g, item.photos[at - 1].item, item.author, info?.people)) };
+      const { admins: _, ...photoComments } = await groupComments(ctx, g, item.photos[at - 1].item, item.author, info?.people);
+      void _;
+      return { group: info, item, index: at, back, ...photoComments };
     }
     const shown = await groupComments(ctx, g, itemId, item.author, info?.people);
     // A poll counted again from its checked list, as a friend's is (friendItemPost).
@@ -1162,8 +1167,31 @@ async function groupItemPost(ctx, params, id, itemId, photo = null) {
       }
       await ctx.db.prepare("UPDATE copies SET tally = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(worked.tally), itemId, g.id).run();
     }
+    // A repeating event (step 6d): the date asked for (?date=), or its next, read from the group and checked too, and
+    // its answers counted from what's signed.
+    if (item.event?.rrule) {
+      const asked = params.get("date");
+      const at = now();
+      const date = asked && hasDate(item.event, asked) ? asked
+        : ruleDates(item.event).find((d) => !item.event.skipped.includes(d) && dateOver(item.event, d) > at) ?? null;
+      const t = date ? await groups_.groupDate(ctx.env, ctx.url.origin, g, itemId, date, shown.admins ?? new Set()) : null;
+      if (t && !t.error) {
+        if (t.problem) shown.problem ??= `${g.name}'s site sent answers for ${date} that don't add up, so what's after that isn't shown.`;
+        const copy = await ctx.db.prepare("SELECT tally FROM copies WHERE id = ? AND group_id = ?").bind(itemId, g.id).first();
+        const tally = JSON.parse(String(copy?.tally ?? "null")) ?? { answers: {} };
+        const said = tally.dates?.[date]?.answers ?? {};
+        const plain = (o) => JSON.stringify(Object.entries(o).map(([p, a]) => [p, a.answer]).sort());
+        if (plain(said) !== plain(t.answers)) shown.problem ??= `${g.name}'s site's answers for that date were wrong; these are counted from the answers themselves.`;
+        tally.dates = { ...tally.dates, [date]: { answers: Object.fromEntries(Object.entries(t.answers).map(([p, a]) => [p, { answer: a.answer, version: a.version }])),
+          off: t.off, list: t.seen ? { n: t.seen.n, head: t.seen.h } : null } };
+        await ctx.db.prepare("UPDATE copies SET tally = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(tally), itemId, g.id).run();
+        shown.checkedDate = date;
+      }
+    }
     item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? item;
-    return { group: info, item, ...shown };
+    const { admins: _, ...rest } = shown;
+    void _;
+    return { group: info, item, ...rest };
   });
 }
 
@@ -1184,7 +1212,7 @@ async function groupComments(ctx, g, id, owner, people = []) {
   const problem = t.problem ? `${g.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${g.name}'s site has changed this conversation since you last saw it.` : null;
   const counted = !t.problem && read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
-  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted };
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted, admins: t.admins };
 }
 
 /** Changing an event the owner here added to a signed group. */

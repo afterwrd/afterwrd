@@ -567,6 +567,99 @@ await ann.goto(`${A}/groups/${annGroup}/calendar`);
 await ann.screenshot({ path: `${OUT}/group-calendar-phone.png`, fullPage: true });
 await ann.setViewport({ width: 1280, height: 800 });
 
+// Repeating events (step 6d): a list per date, named by the date, holding its answers and its calling off.
+await cat.goto(`${C}/groups/${catGroup}/calendar`);
+await addEvent(cat, { title: "Reading circle", start_date: "2027-08-03", start_time: "18:30", end_time: "20:00", place: "The library",
+  repeat: "weekly", repeat_until: "2027-08-31" });
+const circle = postBy(catPerson).find((id) => JSON.parse(sql(stateG, `SELECT content FROM items WHERE id = '${id}'`)[0].content).event?.title === "Reading circle");
+const circleEvent = () => JSON.parse(sql(stateG, `SELECT content FROM items WHERE id = '${circle}'`)[0].content).event;
+const circleTally = () => JSON.parse(sql(stateG, `SELECT tally FROM items WHERE id = '${circle}'`)[0].tally ?? "{}");
+const dateAnswer = (date, person) => circleTally().dates?.[date]?.answers?.[person]?.answer ?? null;
+const datePoint = (date) => { const r = sql(stateG, `SELECT n, head FROM lists WHERE id = '${circle}/${date}'`)[0]; return r ? { n: r.n, h: r.head } : null; };
+check("Cat adds a weekly event, its rule signed into her post", circleEvent()?.rrule === "FREQ=WEEKLY;UNTIL=20270831", JSON.stringify(circleEvent()));
+await cat.goto(`${C}/groups/${catGroup}`);
+check("its card says how it repeats, and its next date", (await text(cat, `#gi-${circle}`)).includes("Every week on Tuesday, until 31 Aug 2027")
+  && (await text(cat, `#gi-${circle}`)).includes("Tue 3 Aug 2027, 18:30–20:00"), await text(cat, `#gi-${circle}`));
+await answer(cat, `gi-${circle}`, "maybe");
+check("Cat answers its next date from the card: the date gets a list of its own", dateAnswer("2027-08-03", catPerson) === "maybe"
+  && n(stateG, `lists WHERE id = '${circle}/2027-08-03'`) === 1 && n(stateG, `lists WHERE id = '${circle}' AND n = 1`) === 1);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${circle}`);
+check("its page lists every date", (await bob.$$eval(".event-dates > li", (l) => l.length)) === 5);
+await Promise.all([settled(bob, { timeout: 30_000 }), bob.click("#d-2027-08-10 .answers button[value=going]")]);
+await Promise.all([settled(bob, { timeout: 30_000 }), bob.click("#d-2027-08-03 .answers button[value=going]")]);
+check("Bob answers two dates, each on its own", dateAnswer("2027-08-10", bobPerson) === "going" && dateAnswer("2027-08-03", bobPerson) === "going"
+  && dateAnswer("2027-08-10", catPerson) === null, JSON.stringify(circleTally()));
+check("…the second following on from Cat's answer to the 3rd", datePoint("2027-08-03")?.n === 2);
+const version = () => sql(stateG, `SELECT version FROM items WHERE id = '${circle}'`)[0].version;
+check("an answer that doesn't say which date is refused", (await relaySigned(bob, bobGroup, { kind: "answer", host: groupPerson, item: circle,
+  seen: point(circle), prev: lastSent(stateB, circle), version: version() }, { answer: "going" })) === 400);
+check("…as is one to a date it hasn't got", (await relaySigned(bob, bobGroup, { kind: "answer", host: groupPerson, item: circle, date: "2027-08-04",
+  seen: null, prev: null, version: version() }, { answer: "going" })) === 400 && n(stateG, `lists WHERE id = '${circle}/2027-08-04'`) === 0);
+check("…and a dated answer to an event that doesn't repeat", (await relaySigned(bob, bobGroup, { kind: "answer", host: groupPerson, item: swap,
+  date: "2027-06-12", seen: null, prev: null, version: sql(stateG, `SELECT version FROM items WHERE id = '${swap}'`)[0].version }, { answer: "going" })) === 400);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${circle}?date=2027-08-03`);
+check("Bob sees who's coming on the 3rd", (await text(bob, "#d-2027-08-03")).includes("Cat Example") && (await text(bob, "#d-2027-08-03")).includes("You"));
+
+// Calling off one date: by whoever added it (Cat); only those going that day hear. An admin (Bob) may too.
+const bobOff = groupNotices(stateB, "cancelled");
+await cat.goto(`${C}/groups/${catGroup}/posts/${circle}`);
+await Promise.all([settled(cat, { timeout: 30_000 }), cat.click("#d-2027-08-10 form.call-off-date button")]);
+check("Cat calls off the 10th, on its own list", circleTally().dates?.["2027-08-10"]?.off?.by === catPerson && !circleEvent().cancelled
+  && datePoint("2027-08-10")?.n === 2);
+check("…Bob, going that day, is told", await waitFor(() => groupNotices(stateB, "cancelled") === bobOff + 1));
+check("…and his copy marks the 10th off, from Cat's signed calloff", await waitFor(() => JSON.parse(sql(stateB, `SELECT content FROM copies WHERE id = '${circle}'`)[0].content)
+  .event.skipped?.includes("2027-08-10")));
+await bob.goto(`${B}/activity`);
+check("Bob's Notifications say one date is off", (await text(bob)).includes("Cat Example called off one date of an event you're going to"), (await text(bob)).slice(0, 300));
+check("an answer to the 10th is refused now", (await relaySigned(bob, bobGroup, { kind: "answer", host: groupPerson, item: circle, date: "2027-08-10",
+  seen: datePoint("2027-08-10"), prev: lastSent(stateB, `${circle}/2027-08-10`), version: version() }, { answer: "maybe" })) === 400);
+check("…and it can't be called off twice", (await relaySigned(cat, catGroup, { kind: "calloff", host: groupPerson, item: circle, date: "2027-08-10",
+  about: circle, seen: datePoint("2027-08-10"), prev: lastSent(stateC, `${circle}/2027-08-10`) })) === 400);
+check("…nor can a date of an event that doesn't repeat", (await relaySigned(cat, catGroup, { kind: "calloff", host: groupPerson, item: swap,
+  date: "2027-06-12", about: swap, seen: null, prev: null })) === 400);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${circle}`);
+await Promise.all([settled(bob, { timeout: 30_000 }), bob.click("#d-2027-08-17 form.call-off-date button")]);
+check("Bob, an admin, calls off the 17th", circleTally().dates?.["2027-08-17"]?.off?.by === bobPerson);
+await cat.goto(`${C}/groups/${catGroup}/posts/${circle}?date=2027-08-17`);
+check("…which Cat's site checks from his signed role", (await text(cat, "#d-2027-08-17")).includes("Called off") && !(await text(cat)).includes("don't add up"),
+  (await text(cat)).slice(0, 300));
+
+// Changing it: the time of every date moves; answers stay with their date, said before it changed.
+await cat.goto(`${C}/groups/${catGroup}/posts/${circle}/edit`);
+check("the change form keeps how it repeats, and can't stop it", await cat.$eval("form.event-form", (f) => f.elements.repeat.value === "weekly"
+  && ![...f.elements.repeat.options].some((o) => o.value === "")));
+await cat.$eval("form.event-form", (f) => { f.elements.start_time.value = "19:00"; f.elements.end_time.value = "20:30"; });
+await Promise.all([cat.waitForNavigation(), cat.click("form.event-form button.primary")]);
+check("Cat moves it to 19:00", circleEvent().starts_at === Date.UTC(2027, 7, 3, 18) / 1000 && dateAnswer("2027-08-03", bobPerson) === "going");
+check("…and Bob, going on the 3rd, is told", await waitFor(() => groupNotices(stateB, "changed") === 2));
+await bob.goto(`${B}/groups/${bobGroup}/posts/${circle}?date=2027-08-03`);
+check("…where his answer says it was before the change", (await text(bob, "#d-2027-08-03")).includes("You (said before it changed)"), await text(bob, "#d-2027-08-03"));
+await bob.screenshot({ path: `${OUT}/group-repeating.png`, fullPage: true });
+
+// The group can't make up answers: the date opened is counted from what's signed.
+const realTally = sql(stateG, `SELECT tally FROM items WHERE id = '${circle}'`)[0].tally;
+const madeUp = JSON.parse(realTally);
+madeUp.dates["2027-08-03"].answers[annPerson] = { answer: "going", version: version() };
+sql(stateG, `UPDATE items SET tally = '${JSON.stringify(madeUp).replace(/'/g, "''")}', changed_at = changed_at + 5 WHERE id = '${circle}'`);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${circle}?date=2027-08-03`);
+check("a group that adds Ann's answer to the 3rd is caught when it's opened", (await text(bob)).includes("answers for that date were wrong")
+  && !(await text(bob, "#d-2027-08-03")).includes("Ann Example"), (await text(bob)).slice(0, 400));
+sql(stateG, `UPDATE items SET tally = '${realTally.replace(/'/g, "''")}' WHERE id = '${circle}'`);
+
+// Each date on the calendars; the calendar file leaves out those called off.
+await bob.goto(`${B}/events?month=2027-08`);
+check("Bob's Events show each date on its own", (await bob.$$eval(".cal-event.cal-group", (es) => es.filter((e) => e.textContent.includes("Reading circle")).length)) >= 4);
+await cat.goto(`${C}/groups/${catGroup}/calendar?month=2027-08`);
+check("…and so does the group's calendar", (await cat.$$eval(".calendar .cal-event", (es) => es.filter((e) => e.textContent.includes("Reading circle")).length)) >= 4);
+const circleIcs = await bob.evaluate((p) => fetch(p).then((r) => r.text()), `/groups/${bobGroup}/posts/${circle}/event.ics`);
+check("its calendar file lists the dates still on", circleIcs.includes("RDATE:") && circleIcs.includes("20270824T180000Z") && !circleIcs.includes("20270810T180000Z"),
+  circleIcs.slice(0, 500));
+
+// Deleting it takes every date's list with it.
+check("Cat deletes it, and its dates' lists go too", (await relaySigned(cat, catGroup, { kind: "delete", host: groupPerson, item: circle, about: circle,
+  seen: point(circle), prev: lastSent(stateC, circle) })) !== 400 && n(stateG, `lists WHERE id = '${circle}' AND deleted_at IS NOT NULL`) === 1 && n(stateG, `list_pages WHERE list > '${circle}/' AND list < '${circle}0'`) === 0
+  && n(stateG, `lists WHERE id > '${circle}/' AND id < '${circle}0' AND deleted_at IS NULL`) === 0);
+
 // Polls are public in a group too (decision 10): everyone in it sees who chose what. Mentions are of members, by who
 // they are; @here (the owner and admins) reaches everyone, but only the first a day reaches the phone.
 async function mention(page, box, typed) {

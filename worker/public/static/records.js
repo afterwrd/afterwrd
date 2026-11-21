@@ -13,6 +13,8 @@
 //                           members, a member's join; for calloff, the event)
 //   role_at {n, h}          for an admin's action in a group: the point in its members list at which they held the role
 //   version                 for vote and answer: the fingerprint of the item's version they answer
+//   date                    for answer and calloff on one date of a repeating event (a group's): that date, YYYY-MM-DD
+//                           where it's held (its list is "<item>/<date>": src/lists.js dateList)
 //   mentions                person ids it mentions
 //   audience                for item and change: who it's for, {kind: "invited", fp} (an event's guests: audienceOf),
 //                           never the list itself; none for everyone the writer's friends with
@@ -34,6 +36,9 @@ export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote"
 export const ABOUT = new Set(["edit", "delete", "remove", "approve", "role", "calloff"]);
 /** Kinds that answer a version of the item. */
 export const VERSIONED = new Set(["vote", "answer"]);
+/** Kinds that may be about one date of a repeating event. */
+export const DATED = new Set(["answer", "calloff"]);
+export const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 export const SALT_BYTES = 16;
 export const MAX_RECORD = 4096;
 export const MAX_CONTENT = 16 * 1024;
@@ -80,6 +85,7 @@ export function parseRecord(bytes) {
   if (ABOUT.has(r.kind) !== ID_RE.test(r.about ?? "")) return null;
   if (VERSIONED.has(r.kind) !== ID_RE.test(r.version ?? "")) return null;
   if (r.role_at !== undefined && (!r.role_at || !point(r.role_at))) return null;
+  if (r.date !== undefined && (!DATED.has(r.kind) || typeof r.date !== "string" || !DATE_RE.test(r.date))) return null;
   if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
   if (r.audience !== undefined && (!["item", "change"].includes(r.kind) || r.audience?.kind !== "invited" || !ID_RE.test(r.audience.fp ?? ""))) return null;
   return r;

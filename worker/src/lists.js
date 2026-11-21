@@ -14,7 +14,7 @@
 //   gone    "deleted" or "removed": what became of it (a reader checks there's a signed record saying so)
 // A signed head ({v: 2, kind: "head", host, list, n, head}, signed by the host's hosting key) is a receipt when handed
 // to a writer, and a checkpoint every CHECKPOINT entries, so a new reader of a long list starts from one.
-import { ABOUT } from "../public/static/records.js";
+import { ABOUT, DATE_RE } from "../public/static/records.js";
 import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, signAs, utf8 } from "../public/static/signed.js";
 import { checkRecord } from "./records.js";
 
@@ -26,6 +26,22 @@ export const EDIT_SECONDS = 15 * 60;
 /** Kinds only a group's members list holds (members.js). */
 export const MEMBERS_ONLY = new Set(["join", "approve", "leave", "role"]);
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * One date of a repeating event has a list of its own (step 6d), holding its answers and its calling off: named by the
+ * event and the date (YYYY-MM-DD where it's held), so answers stay with their date if the pattern changes.
+ */
+export const dateList = (item, date) => `${item}/${date}`;
+
+/** The list a record is on: its item's (or the item it makes), or, for one date of a repeating event, that date's. */
+export const listOf = (record, fp) => (record.kind === "item" ? fp : record.date ? dateList(record.item, record.date) : record.item);
+
+/** A list's id read: {item, date} (date null for an item's own list or a members list), or null if it isn't one. */
+export function parseListId(list) {
+  const [item, date, more] = String(list).split("/");
+  if (!ID_RE.test(item) || more !== undefined || (date !== undefined && !DATE_RE.test(date))) return null;
+  return { item, date: date ?? null };
+}
 
 /** The running fingerprint after an entry. */
 export const headOf = ({ host, list, prev, n, fp, taken }) => fingerprintOf("head", utf8(`${host}\n${list}\n${prev}\n${n}\n${fp}\n${taken}`));
@@ -54,6 +70,11 @@ export class Rules {
     this.host = host;
     this.list = list;
     this.owner = owner;
+    // One date of a repeating event (dateList): `item` is the event, `date` the date; otherwise `item` is the list.
+    const parsed = parseListId(list);
+    this.item = parsed?.item ?? list;
+    this.date = parsed?.date ?? null;
+    this.off = false; // that date called off
     this.heads = new Map([[0, ""]]); // n -> running fingerprint
     this.byFp = new Map(); // fp -> {n, author, kind, taken}  (author null for an entry whose record is gone)
     this.lastOf = new Map(); // author -> fp of their newest record here
@@ -80,8 +101,13 @@ export class Rules {
       if (n !== 1 || fp !== this.list) return "That isn't this item.";
       return null;
     }
-    if (record.item !== this.list) return "That belongs to something else.";
+    if (listOf(record, fp) !== this.list) return "That belongs to something else.";
     if (MEMBERS_ONLY.has(record.kind)) return "That belongs in a group's members list.";
+    // A date's list holds only answers to that date and its calling off (once), about the event.
+    if (this.date) {
+      if (record.kind !== "answer" && record.kind !== "calloff") return "That doesn't belong to one date.";
+      if (this.off) return "That date's been called off.";
+    }
     if (this.closed && record.kind !== "remove") return "This is closed.";
     // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
     // Not the item's owner's changes (inviting people to an event one by one, say, mustn't run out); their words and
@@ -92,7 +118,12 @@ export class Rules {
     }
     const out = this.order({ record, byHost }, n, checkpointed);
     if (out) return out;
-    if (ABOUT.has(record.kind)) {
+    if (this.date && record.kind === "calloff") {
+      // About the event, which is in its own list.
+      if (record.about !== this.item) return "That isn't this event.";
+      const why = this.actTrouble(record, null, byHost);
+      if (why) return why;
+    } else if (ABOUT.has(record.kind)) {
       const target = this.byFp.get(record.about);
       if (!target && !checkpointed) return "That acts on something that isn't here.";
       if (record.kind === "edit" || record.kind === "delete") {
@@ -179,6 +210,7 @@ export class Rules {
     }
     if (record?.kind === "close") this.closed = true;
     if (record?.kind === "end") this.ended = true;
+    if (record?.kind === "calloff" && this.date) this.off = true;
     return head;
   }
 
@@ -210,13 +242,18 @@ export class GroupRules extends Rules {
 
   /** @param {any} record @param {any} target @param {boolean} byHost @returns {string | null} */
   actTrouble(record, target, byHost) {
-    if (record.kind === "calloff" && record.about !== this.list) return "That isn't this event.";
+    if (record.kind === "calloff" && record.about !== this.item) return "That isn't this event.";
     if (byHost) return record.kind === "remove" ? null : "Only the group's admins call things off.";
+    // One date of a repeating event: its writer may call that date off too (the whole of it, they change it).
+    if (this.date && record.kind === "calloff" && record.author === this.owner) return null;
     const owner = record.author === this.group.owner;
     if (!owner && !this.group.admin(record.author, record.role_at ?? null)) {
       return record.kind === "remove" ? "Only the group's admins can remove that." : "Only the group's admins can call that off.";
     }
-    if (!owner && target?.author === this.group.owner) return "Only the group's owner can remove what they wrote.";
+    // (On one date, the event is in its own list: its writer is this list's owner.)
+    if (!owner && (target?.author ?? (this.date ? this.owner : null)) === this.group.owner) {
+      return record.kind === "remove" ? "Only the group's owner can remove what they wrote." : "Only the group's owner can call off what they added.";
+    }
     return null;
   }
 }
