@@ -93,6 +93,9 @@ if (stage === "before") {
     comments: [...a.querySelectorAll(".comment .said")].map((c) => c.textContent) }));
   check("the post keeps its address, with both photos and its comment", card.text === "Before the upgrade" && card.photos === 2
     && card.comments.join() === "Still here?", JSON.stringify(card));
+  // Written before signing: the owner's alone, read-only, until migration turns it into a signed post.
+  check("…only the owner's now, and read-only", (await page.$eval("main article.card", (a) => a.textContent)).includes("Only you can see this for now")
+    && !(await page.$("main article.card form")) && !(await page.$("main article.card details.more")));
   // On its own (from 0.45.0, a post's photos link to themselves "in" the post, which names the post instead).
   await page.goto(BASE + was.photo.split("?")[0]);
   check("its photo keeps its comment, in Posted on afterwrd", (await said(".info")).join() === "Nice photo"
@@ -112,8 +115,7 @@ if (stage === "before") {
     await page.goto(`${BASE}/posts`);
     const poll = await page.$$eval(`${own} .poll-option`, (l) => l.map((o) => ({ text: o.textContent.trim(), chosen: o.classList.contains("chosen") })));
     check("the poll keeps its answer", poll.length === 2 && poll[0].chosen && poll[0].text.startsWith("Tea"), JSON.stringify(poll));
-    await Promise.all([settled(page), page.click(`${own} .poll-form button.poll-option:nth-of-type(2)`)]);
-    check("…and can still be answered", await page.$eval(`${own} .poll-option:nth-of-type(2)`, (o) => o.classList.contains("chosen")).catch(() => false));
+    check("…read-only now", !(await page.$(`${own} .poll-form`)));
   } else console.log(`SKIP  [${stage}] no polls on that release`);
 
   await page.goto(BASE + was.album);
@@ -135,14 +137,10 @@ if (stage === "before") {
   await page.type("#composer textarea", "After the upgrade");
   await Promise.all([page.waitForNavigation(), page.click("#composer button.post")]);
   check("new posts work too", (await page.$eval(`${own}:first-of-type .text`, (t) => t.textContent)) === "After the upgrade");
-  // Comments made before the upgrade can be changed like any other (still within their 15 minutes here).
+  // Comments made before the upgrade stay as they were, until migration turns them into signed comments.
   await page.goto(BASE + was.address);
-  await page.click("main article.card .comment .under details.more summary");
-  await page.click("main article.card .comment .under details.more a[href^='#edit']");
-  await page.$eval("main article.card .comment div.edit textarea", (t) => { t.value = "Still here, after the upgrade"; });
-  await Promise.all([settled(page), page.click("main article.card .comment div.edit button")]);
-  check("a comment from before the upgrade can be changed", (await said("main article.card")).join() === "Still here, after the upgrade"
-    && (await page.$eval("main article.card .comment details.edited", (d) => d.textContent).catch(() => "")).includes("Still here?"));
+  check("a comment from before the upgrade stays as it was, with no way to change it", (await said("main article.card")).join() === "Still here?"
+    && !(await page.$("main article.card .comment details.more")));
 
   // The site moved into its own object (src/sitecopy.js): its old D1 database is kept, marked moved, so an older
   // version would say the site is being updated rather than carry on with it.

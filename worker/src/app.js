@@ -1,25 +1,23 @@
 // Everything a request to the site goes through, wherever its database is (index.js decides: D1 here, or the site's
 // object). Pages are built from the database, photos and videos come from the media store (/files/<sha256>), and the
-// stylesheet and import scripts from public/static. Everything the owner imports arrives through /_admin/import, and
-// comments through /_comments. Every request comes through here first (run_worker_first), so nothing is reachable
-// without a session, apart from sign-in, a Connect link, and connected friends' sites and groups the owner's in, which
-// carry a key (connect.js, peers.js, membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
+// stylesheet and import scripts from public/static. Everything the owner imports arrives through /_admin/import. Every
+// request comes through here first (run_worker_first), so nothing is reachable without a session, apart from sign-in,
+// a Connect link, friends' sites, which make signed calls (calls.js: friendhost.js, friendcalls.js, notes.js), and
+// groups the owner's in, which carry a key (membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
 import { receiveNotes } from "./notes.js";
 import { handleIdentity } from "./identities.js";
 import { handleAdmin } from "./admin.js";
-import { handleComments } from "./archive/comments.js";
 import { renderArchive } from "./archive/routes.js";
 import { currentUser, handleAuth, safeNext } from "./auth.js";
 import { handleCloudflare } from "./cloudflare.js";
 import { handleConnectLink } from "./connect.js";
-import { handleFeed } from "./feed.js";
 import { handleGroupApi, handleJoinLink } from "./groups.js";
 import { HASH_RE, mediaStore } from "./media.js";
 import { handleGroupActions, handleMember } from "./membership.js";
 import { checkNewer, databaseIsNewer, ensureSchema } from "./migrate.js";
-import { handlePeer } from "./peers.js";
+import { friendCallRoute, handleFriendCalls } from "./friendcalls.js";
 import { messagePage } from "./views/pages.js";
 import { signedFor } from "./share.js";
 import { PUBLIC_APP, PUBLIC_FONT, PUBLIC_SIGNING, serveStatic } from "./static.js";
@@ -48,7 +46,7 @@ export const HEADERS = {
 // What a self-hosted site doesn't have (hosting.js): automatic updates and Connect (/_auto, /_cloudflare), friends'
 // checks both ways (/_check, /_admin/checks, and the protocol's check calls), and getting back in through Cloudflare
 // (/_auth/recover). Updating (update.js) and starting groups (groupsites.js) say what to do instead.
-const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_peer\/(check-request|check-token|check-soon|check-failed|checked)$/;
+const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_p\/(check-request|check-token|check-soon|check-failed|checked)$/;
 
 /**
  * One request, start to finish, wherever the site's database is: in this Worker (D1), or inside the site's object
@@ -121,9 +119,8 @@ async function route(request, env, work) {
   // The steps of an automatic update, asked for by the site's own daily run with a key only it has (auto.js).
   if (url.pathname.startsWith("/_auto/")) return handleAutoStep(request, env, url);
   if (url.pathname.startsWith("/_auth/")) return handleAuth(request, env, url);
-  // A friend's Connect link, and their site's calls once connected, which carry a key instead of a session.
+  // A friend's Connect link, and their site asking to be friends: signed calls (connect.js).
   if (url.pathname.startsWith("/_connect/")) return handleConnectLink(request, env, url);
-  if (url.pathname.startsWith("/_peer/")) return handlePeer(request, env, url, work);
   // afterwrd 2 (identities.js): the owner's identity, public; their profile, to friends' signed calls.
   if (url.pathname === "/.well-known/afterwrd" || url.pathname === "/_p/profile") {
     return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
@@ -131,6 +128,8 @@ async function route(request, env, work) {
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
   if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleFriendItems(request, env, url, work);
   if (url.pathname === "/_p/notes" && request.method === "POST") return receiveNotes(request, env, url, work);
+  // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
+  if (friendCallRoute(`${request.method} ${url.pathname}`)) return handleFriendCalls(request, env, url);
   // A group the owner's in, calling with the key this site gave it.
   if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url, work);
   // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.
@@ -205,9 +204,7 @@ async function ownerRoute(request, env, url, user, work) {
   // So is the read-only access friends' sites check this one with (friendchecks.js).
   if (url.pathname.startsWith("/_cloudflare/checks-")) return (await handleChecksConnect(request, env, url)) ?? new Response("Not found", { status: 404 });
   if (url.pathname.startsWith("/_cloudflare/")) return (await handleCloudflare(request, env, url)) ?? new Response("Not found", { status: 404 });
-  if (url.pathname === "/_comments" || url.pathname.startsWith("/_comments/")) return handleComments(request, env, url, user);
   if (url.pathname === "/_live") return handleLive(request, env, url, user, work);
-  if (url.pathname.startsWith("/_feed/")) return handleFeed(request, env, url);
   // This device saying yes or no to notifications about events (push.js).
   if (url.pathname.startsWith("/_push/")) return handlePush(request, env, url, user);
   if (url.pathname.startsWith("/_groups/")) return handleGroupActions(request, env, url);

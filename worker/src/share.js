@@ -1,26 +1,21 @@
-// What this site shows a connected friend's site (peers.js), so its owner can read the posts and photos here from
-// their own site: the same as they'd see visiting, as ActivityStreams (public/static/activity.js).
-//   posts(page)      posts, newest first, with photos and comments
-//   post(key)        one post, with its comments
+// What this site shows a friend's site of the owner's Facebook archive and albums (friendcalls.js, in signed calls), so
+// its owner can see them from their own site, as ActivityStreams (public/static/activity.js). The owner's signed posts
+// go by friendhost.js instead; posts written on afterwrd before signing are the owner's alone until they're turned
+// into signed posts (docs/signed-conversations.md, step 10), so they, and photos that came with them, aren't shown.
+//   posts(page)      Facebook's posts, newest first, with photos, if the owner shares them
+//   post(key)        one of those
 //   albums()         the albums, with covers
 //   album(key, page) one album's photos and videos
-//   photo(hash)      one photo or video, with comments, the post it came with, and its neighbours
+//   photo(hash)      one photo or video, the Facebook post it came with, and its neighbours
 // Photos and videos aren't sent: each comes with a link signed here ("afterwrd:fetch") for that one friend, which
 // their browser loads straight from this site for the next day or two, while they're still a friend (signedFile,
 // checked in app.js).
-//
-// Who sees a post: all friends (posts.audience 'friends'), or only those listed in post_audience ('chosen': an
-// event, seen only by those invited). Every answer here is for one friend (`peer`, their connection), and leaves out
-// what isn't shared with them, photos that came with it included. postShared and SHARED_SQL are the rule.
-import { actorId, commentAuthor, commentNote, editedFields, iso, mediaObject, postId } from "../public/static/activity.js";
-import { postVersions } from "./edits.js";
-import { loadThreads } from "./archive/comments.js";
+// Every answer is for one friend (`peer`, their connection): their links to files are theirs alone. postShared and
+// photoShared are the rule for what's shown.
+import { actorId, iso, mediaObject, postId } from "../public/static/activity.js";
 import { mediaSet } from "./archive/routes.js";
 import { profilePictures } from "./photos.js";
-import { pollObject, sitePolls } from "./polls.js";
-import { eventsFor, guestEventObject } from "./events.js";
 import { fromBase64Url, now, randomToken, toBase64Url } from "./util.js";
-import { mentionTags, readMentions } from "./mentions.js";
 
 const POSTS_PAGE = 30;
 const PHOTOS_PAGE = 150;
@@ -121,24 +116,8 @@ async function media(env, site, m, { long = false, friend = null } = {}) {
   return object;
 }
 
-async function threadOf(db, site, target) {
-  const comments = (await loadThreads(db, [target])).get(target);
-  return { type: "Collection", totalItems: comments.length, items: comments.map((c) => withMentions(commentNote(site, c, commentAuthor(site, c)), c)) };
-}
-
-/** A comment's note with who it mentions (mentions.js), if anyone. */
-const withMentions = (note, c) => {
-  const tags = mentionTags(readMentions(c.mentions));
-  return tags.length ? { ...note, tag: tags } : note;
-};
-
-/**
- * Posts as Notes for a friend (`peer`, their connection: {id, origin}), with photos (signed links), tags, place, a
- * poll if one asks something and an event if there's one (each with the friend's own answer), and, unless asked not
- * to, their comments. Facebook posts take no comments (for now), so they come without `replies`.
- */
-export async function notes(env, site, posts, { replies = true, peer }) {
-  const viewer = peer.origin;
+/** Facebook's posts as Notes for a friend (`peer`, their connection), with photos (signed links for them), tags and place. */
+async function notes(env, site, posts, peer) {
   const db = env.DB;
   if (!posts.length) return [];
   const ids = posts.map((p) => p.id);
@@ -148,11 +127,6 @@ export async function notes(env, site, posts, { replies = true, peer }) {
     db.prepare(`SELECT t.post_id, p.name FROM facebook_post_tags t JOIN facebook_people p ON p.id = t.person_id
       WHERE t.post_id IN (${marks})`).bind(...ids),
   ]);
-  const own = posts.filter((p) => p.source === "afterwrd");
-  const threads = replies ? await loadThreads(db, own.map((p) => p.key)) : new Map();
-  const polls = await sitePolls(db, own.map((p) => p.id), viewer);
-  const events = await eventsFor(db, own.map((p) => p.id), peer);
-  const earlier = await postVersions(db, own.filter((p) => p.edited_at).map((p) => p.id));
   return Promise.all(posts.map(async (p) => ({
     type: "Note",
     id: postId(site, p.key),
@@ -165,49 +139,35 @@ export async function notes(env, site, posts, { replies = true, peer }) {
       ...await Promise.all(photos.results.filter((m) => m.post_id === p.id).map((m) => media(env, site, m, { friend: peer.id }))),
       ...(p.link_url ? [{ type: "Link", href: p.link_url }] : []),
     ],
-    // People tagged on Facebook (a name only), then who it mentions (mentions.js: with their site's address).
-    tag: [...tags.results.filter((t) => t.post_id === p.id).map((t) => ({ type: "Mention", name: t.name })), ...mentionTags(readMentions(p.mentions))],
+    tag: tags.results.filter((t) => t.post_id === p.id).map((t) => ({ type: "Mention", name: t.name })),
     location: p.place_name ? { type: "Place", name: p.place_name } : undefined,
     context: p.group_name ? { type: "Group", name: p.group_name } : undefined,
-    ...editedFields({ ...p, earlier: earlier.get(p.id) }),
-    "afterwrd:kind": p.kind ?? undefined, // Facebook's; afterwrd's own posts have none
-    "afterwrd:poll": polls.has(p.id) ? pollObject(polls.get(p.id)) : undefined,
-    "afterwrd:event": events.has(p.id) ? guestEventObject(events.get(p.id)) : undefined,
-    replies: threads.has(p.key) ? {
-      type: "Collection", totalItems: threads.get(p.key).length,
-      items: threads.get(p.key).map((c) => withMentions(commentNote(site, c, commentAuthor(site, c)), c)),
-    } : undefined,
+    "afterwrd:kind": p.kind ?? undefined,
   })));
 }
 
-/**
- * SQL: the post `p` is shared with the friend whose connection is bound at `param` (say "?1"): one for all friends,
- * or one they're among those chosen for. (Whether Facebook's posts are shared at all is up to `sections`.)
- */
-export const SHARED_SQL = (param, p = "p") => `(${p}.audience = 'friends'
-  OR EXISTS (SELECT 1 FROM post_audience sa WHERE sa.post_id = ${p}.id AND sa.connection_id = ${param}))`;
-
-/** The owner's posts a friend (`peer`) may see, a page at a time, newest first. */
+/** Facebook's posts a friend (`peer`) may see, a page at a time, newest first: all, if the owner shares them; else none. */
 export async function sharePosts(env, site, page, name, peer) {
   const db = env.DB;
-  const where = `WHERE ${(await chosen(db)).includes("posts") ? "" : "p.source = 'afterwrd' AND "}${SHARED_SQL("?1")}`;
-  const [count, rows] = await db.batch([
-    db.prepare(`SELECT COUNT(*) AS n FROM posts p ${where}`).bind(peer.id),
-    db.prepare(`SELECT p.* FROM posts p ${where} ORDER BY p.created_at DESC, p.id DESC LIMIT ?2 OFFSET ?3`)
-      .bind(peer.id, POSTS_PAGE, (page - 1) * POSTS_PAGE),
-  ]);
-  const total = count.results[0].n;
+  const shared = (await chosen(db)).includes("posts");
+  const where = "WHERE p.source <> 'afterwrd'";
+  const [count, rows] = shared ? await db.batch([
+    db.prepare(`SELECT COUNT(*) AS n FROM posts p ${where}`),
+    db.prepare(`SELECT p.* FROM posts p ${where} ORDER BY p.created_at DESC, p.id DESC LIMIT ?1 OFFSET ?2`)
+      .bind(POSTS_PAGE, (page - 1) * POSTS_PAGE),
+  ]) : [{ results: [{ n: 0 }] }, { results: [] }];
+  const total = Number(count.results[0].n);
   return {
     type: "OrderedCollectionPage", attributedTo: await ownerActor(env, site, name), totalItems: total, "afterwrd:page": page,
-    "afterwrd:hasNext": page * POSTS_PAGE < total, orderedItems: await notes(env, site, rows.results, { peer }),
+    "afterwrd:hasNext": page * POSTS_PAGE < total, orderedItems: await notes(env, site, rows.results, peer),
   };
 }
 
-/** One post (by its key), with its comments, if `peer` may see it; else null. */
+/** One of Facebook's posts (by its key), if `peer` may see it; else null. */
 export async function sharePost(env, site, key, name, peer) {
   const post = await env.DB.prepare("SELECT * FROM posts WHERE key = ?").bind(key).first();
-  if (!post || !(await postShared(env.DB, post, peer.id))) return null;
-  return { ...(await notes(env, site, [post], { peer }))[0], attributedTo: await ownerActor(env, site, name) };
+  if (!post || !(await postShared(env.DB, post))) return null;
+  return { ...(await notes(env, site, [post], peer))[0], attributedTo: await ownerActor(env, site, name) };
 }
 
 /** The albums the friend may see: all of them if Photos is published, otherwise just those made on afterwrd. */
@@ -217,9 +177,9 @@ async function setKeys(db) {
   return [...results.map((a) => String(a.id)), ...(imported ? ["other", "videos"] : [])];
 }
 
-// Photos that came with a post shared with only some friends are never in an album friends are shown (events have
-// none, but the rule holds whatever comes with a post later).
-const NOT_CHOSEN = "NOT EXISTS (SELECT 1 FROM posts q WHERE q.id = media.post_id AND q.audience = 'chosen')";
+// Photos that came with a post written on afterwrd before signing are that post's, and the owner's alone for now, so
+// they're never in an album friends are shown. (A signed post's photos are items of their own: sharePhoto.)
+const NOT_CHOSEN = "NOT EXISTS (SELECT 1 FROM posts q WHERE q.id = media.post_id AND q.source = 'afterwrd')";
 
 async function setInfo(db, key) {
   const { where, ...rest } = mediaSet(key);
@@ -259,15 +219,9 @@ export async function shareAlbum(env, site, key, page, peer) {
   };
 }
 
-/**
- * Whether the friend whose connection is `connectionId` may see this post: one written here for all friends or for
- * them among others, or one of Facebook's if the owner has shared those.
- */
-export async function postShared(db, post, connectionId) {
-  if (post.source !== "afterwrd") return (await chosen(db)).includes("posts");
-  if (post.audience === "friends") return true;
-  return Boolean(await db.prepare("SELECT 1 FROM post_audience WHERE post_id = ? AND connection_id = ?")
-    .bind(post.id, connectionId).first());
+/** Whether friends may see this post: one of Facebook's, if the owner has shared those. */
+async function postShared(db, post) {
+  return post.source !== "afterwrd" && (await chosen(db)).includes("posts");
 }
 
 /** The album (or Facebook set) a photo is shown in: share.js setKeys' key for it; null for none. */
@@ -276,23 +230,23 @@ const setKey = (m) => (m.album_id ? String(m.album_id) : m.source !== "facebook"
 const postById = (db, id) => db.prepare("SELECT * FROM posts WHERE id = ?").bind(id).first();
 
 /**
- * Whether the friend whose connection is `connectionId` may see this photo or video: it's in an album they're shown,
- * or it came with a post they're shown, and it didn't come with a post they aren't. Anything else isn't theirs to
- * see, even if they know its fingerprint.
+ * Whether friends may see this photo or video: it's in an album they're shown, or it came with a post they're shown,
+ * and it didn't come with a post written here before signing. Anything else isn't theirs to see, even if they know
+ * its fingerprint.
  */
-export async function photoShared(db, m, connectionId) {
+async function photoShared(db, m) {
   const post = m.post_id ? await postById(db, m.post_id) : null;
-  if (post?.audience === "chosen" && !(await postShared(db, post, connectionId))) return false;
+  if (post?.source === "afterwrd") return false;
   const key = setKey(m);
   if (key && (await setKeys(db)).includes(key)) return true;
-  return Boolean(post) && postShared(db, post, connectionId);
+  return Boolean(post) && postShared(db, post);
 }
 
 export async function sharePhoto(env, site, hash, peer) {
   const db = env.DB;
   // A picture both imported and posted on afterwrd is shown as afterwrd's.
   const m = await db.prepare("SELECT * FROM media WHERE hash = ? ORDER BY source = 'afterwrd' DESC, id LIMIT 1").bind(hash).first();
-  if (!m || !(await photoShared(db, m, peer.id))) return null;
+  if (!m || !(await photoShared(db, m))) return null;
   const key = setKey(m);
   const neighbours = {};
   if (key && (await setKeys(db)).includes(key)) {
@@ -319,12 +273,10 @@ export async function sharePhoto(env, site, hash, peer) {
   }
   // The post it came with, if that's one the friend may see.
   const withPost = m.post_id && await postById(db, m.post_id);
-  const post = withPost && (await postShared(db, withPost, peer.id)) ? withPost : null;
+  const post = withPost && (await postShared(db, withPost)) ? withPost : null;
   return {
     ...await media(env, site, m, { friend: peer.id }),
     ...neighbours,
-    "afterwrd:postedWith": post ? (await notes(env, site, [post], { replies: false, peer }))[0] : undefined,
-    // Only photos made on afterwrd take comments, for now.
-    replies: m.source === "afterwrd" ? await threadOf(db, site, `photo-${hash}`) : undefined,
+    "afterwrd:postedWith": post ? (await notes(env, site, [post], peer))[0] : undefined,
   };
 }

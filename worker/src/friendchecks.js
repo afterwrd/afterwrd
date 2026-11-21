@@ -14,12 +14,12 @@
 //   POST /_cloudflare/checks-finish   swaps it for a refresh token, kept in the outbox's vault (never in D1)
 //   POST /_admin/checks/let-off       forgets it (and says to Revoke in Cloudflare too)
 //   POST /_admin/checks/let-later     "Not now" on Home's offer
-// Friends' sites, with their key (peers.js):
-//   POST /_peer/check-token   {type: "CheckToken"}: an access token for a check (a few a day; the same token, while it
-//                             has long enough left, so friends checking at once don't end each other's)
-//   POST /_peer/check-soon    {type: "CheckSoon"}: their site was just updated; please check it soon
-//   POST /_peer/check-failed  {type: "CheckFailed", site, version, problems}: their check of this site found something
-//                             (a pass is POST /_peer/checked, as for a check by link: checks.js)
+// Friends' sites, in signed calls (friendcalls.js):
+//   POST /_p/check-token    {type: "CheckToken"}: an access token for a check (a few a day; the same token, while it
+//                           has long enough left, so friends checking at once don't end each other's)
+//   POST /_p/check-soon     {type: "CheckSoon"}: their site was just updated; please check it soon
+//   POST /_p/check-failed   {type: "CheckFailed", site, version, problems}: their check of this site found something
+//                           (a pass is POST /_p/checked, as for a check by link: checks.js)
 // The checking site: runFriendChecks(), after the daily automatic-update run, has each part of a check done by a
 // request to its own address (auto.js step(), so each gets the free plan's 50 outside calls): "fc-site" (the code and
 // setup: checks.js checkSite), "fc-versions" (every upload since the last check), "fc-files" (the site files). It
@@ -30,7 +30,7 @@ import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
 import { checkSite, cloudflareReader, siteFiles, siteIn } from "./checks.js";
-import { callSite } from "./peers.js";
+import { callFriend } from "./calls.js";
 import { signedList } from "./signing.js";
 import { onCloudflare } from "./hosting.js";
 import { knownLatest } from "./update.js";
@@ -194,7 +194,7 @@ export async function letOff(env) {
 }
 
 /**
- * A friend's site asking for a token to check this one (POST /_peer/check-token). Returns [body, status].
+ * A friend's site asking for a token to check this one (POST /_p/check-token). Returns [body, status].
  * @returns {Promise<import("./util.js").Answer>}
  */
 export async function giveCheckToken(env, url, peer, body) {
@@ -248,12 +248,12 @@ async function checkAccess(env, origin) {
 }
 
 /** After an update: two friends, picked at random, are asked to check soon. Best effort. */
-export async function askFriendsToCheckSoon(env) {
+export async function askFriendsToCheckSoon(env, origin) {
   if (!(await checkGrant(env.DB)).on) return;
-  const { results } = await env.DB.prepare(`SELECT origin, their_key FROM connections WHERE connected_at IS NOT NULL
-    AND approved_at IS NOT NULL AND their_key IS NOT NULL ORDER BY RANDOM() LIMIT 20`).all();
+  const { results } = await env.DB.prepare(`SELECT origin FROM connections WHERE connected_at IS NOT NULL
+    AND approved_at IS NOT NULL ORDER BY RANDOM() LIMIT 20`).all();
   for (const friend of results.filter((f) => onCloudflare(f.origin, env)).slice(0, 2)) { // self-hosted ones can't check
-    await callSite(friend.origin, "/_peer/check-soon", { key: friend.their_key, timeout: 5000, body: { type: "CheckSoon" } }).catch(() => {});
+    await callFriend(env, origin, friend.origin, "/_p/check-soon", { timeout: 5000, body: { type: "CheckSoon" } }).catch(() => {});
   }
 }
 
@@ -274,7 +274,7 @@ const FOUND = {
 };
 
 /**
- * A friend's check of this site that found something (POST /_peer/check-failed). Returns [body, status].
+ * A friend's check of this site that found something (POST /_p/check-failed). Returns [body, status].
  * @returns {Promise<import("./util.js").Answer>}
  */
 export async function receiveCheckFailed(env, url, peer, body) {
@@ -312,7 +312,7 @@ export async function lastFailure(db) {
 // --- the checking site --------------------------------------------------------------------------------------------
 
 /**
- * A friend's site saying it was just updated (POST /_peer/check-soon). Returns [body, status].
+ * A friend's site saying it was just updated (POST /_p/check-soon). Returns [body, status].
  * @returns {Promise<import("./util.js").Answer>}
  */
 export async function receiveCheckSoon(env, peer, body) {
@@ -352,10 +352,10 @@ async function whoToCheck(env, everyone) {
   const at = now();
   // Only friends' sites on Cloudflare: a self-hosted one can't be checked (hosting.js), so it's never asked, and never
   // counted as refusing.
-  const { results: found } = await db.prepare(`SELECT c.id, c.name, c.origin, c.their_key,
+  const { results: found } = await db.prepare(`SELECT c.id, c.name, c.origin,
       (SELECT MAX(checked_at) FROM friend_checks f WHERE f.connection_id = c.id) AS last,
       (SELECT at FROM check_soon s WHERE s.connection_id = c.id) AS soon
-    FROM connections c WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL AND c.their_key IS NOT NULL`).all();
+    FROM connections c WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL`).all();
   const friends = found.filter((f) => onCloudflare(f.origin, env));
   const rested = (f) => !f.last || f.last < at - 86400; // never the same friend twice in a day
   const picked = friends.filter((f) => f.soon && f.soon > at - SOON_DAYS * 86400 && f.soon > (f.last ?? 0) && rested(f))
@@ -379,7 +379,7 @@ async function checkFriend(env, origin, friend) {
   const refused = (why, more = {}) => keep(env.DB, friend, "couldn't check", { site: friend.origin, why: String(why).slice(0, 300), startedAt, ...more });
   let token;
   try {
-    token = (await callSite(friend.origin, "/_peer/check-token", { key: friend.their_key, body: { type: "CheckToken" } })).token;
+    token = (await callFriend(env, origin, friend.origin, "/_p/check-token", { body: { type: "CheckToken" } })).token;
   } catch (error) {
     return refused(error.message, { off: error.status === 409 || error.status === 404 });
   }
@@ -409,9 +409,9 @@ async function checkFriend(env, origin, friend) {
   await keep(env.DB, friend, found, result);
   // Their site is told either way: a pass (as for a check by link), or what was found, as codes.
   const tell = found === "all good"
-    ? { path: "/_peer/checked", body: { type: "Checked", site: friend.origin, version: result.version } }
-    : { path: "/_peer/check-failed", body: { type: "CheckFailed", site: friend.origin, version: result.version ?? null, found: findingCodes(result) } };
-  await callSite(friend.origin, tell.path, { key: friend.their_key, timeout: 5000, body: tell.body }).catch(() => {});
+    ? { path: "/_p/checked", body: { type: "Checked", site: friend.origin, version: result.version } }
+    : { path: "/_p/check-failed", body: { type: "CheckFailed", site: friend.origin, version: result.version ?? null, found: findingCodes(result) } };
+  await callFriend(env, origin, friend.origin, tell.path, { timeout: 5000, body: tell.body }).catch(() => {});
 }
 
 /** When this site last checked friend `connectionId` all the way through (started), or 0. */

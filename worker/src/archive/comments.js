@@ -1,22 +1,11 @@
-// Comments the owner writes on their own site, under their posts and photos (friends' comments arrive through
-// /_peer/comments from their own sites). They show straight away; the author or the owner can delete one. Forms post
-// here and land back on the page they came from:
-//   POST /_comments                 target, text, back
-//   POST /_comments/<id>/delete     back
-//   POST /_comments/<id>/edit       text, back: the owner changes their own comment (edits.js)
-// A comment's `target` is the post's address (posts.key) or the picture's (photo-<sha256>). Only posts and photos made
-// on afterwrd take comments, for now: a Facebook post's address may not survive a new download (docs/tables-plan.md).
-import { safeNext } from "../auth.js";
-import { messagePage } from "../views/pages.js";
-import { html, now, Refusal } from "../util.js";
-import { INBOX_JOIN, notifyComment, notifyMentions } from "../notify.js";
-import { cleanMentions, keptMentions } from "../mentions.js";
-import { commentVersions, EDIT_SECONDS, editableComments, editComment, versionsGone } from "../edits.js";
+// Comments from before signing (afterwrd 2: docs/signed-conversations.md, step 4e): those on the owner's own posts and
+// photos written on afterwrd, kept as they were, the owner's alone and read-only until migration turns them into
+// signed records (step 10). New comments are signed records on an item's list (items.js). Also the Notifications page's
+// list, which still shows these among everything else.
+// A comment's `target` is the post's address (posts.key) or the picture's (photo-<sha256>).
+import { commentVersions } from "../edits.js";
 
 export const MAX_COMMENT = 2000;
-// Plenty for a conversation, too few for a runaway script.
-const RATE = { count: 30, seconds: 600 };
-const DAILY = 200; // from one person in a day, whatever the pace
 const TARGET_RE = /^(?:post-\d+-[0-9a-f]{8}|photo-([0-9a-f]{64}))$/;
 
 export const photoKey = (m) => (m.hash ? `photo-${m.hash}` : null);
@@ -25,48 +14,38 @@ const COMMENT_SQL = `
   SELECT c.*, COALESCE(u.name, c.author_name) AS name, (c.author_id IS NOT NULL) AS author_is_owner FROM comments c
   LEFT JOIN users u ON u.id = c.author_id`;
 
-/**
- * Map of target -> its comments, oldest first, each with `earlier` (its earlier versions, if edited) and `editable`
- * (whoever wrote it can still change it: edits.js).
- */
+/** Map of target -> its comments, oldest first, each with `earlier` (its earlier versions, if edited). */
 export async function loadThreads(db, keys) {
   const wanted = [...new Set(keys.filter(Boolean))];
   const threads = new Map(wanted.map((k) => [k, []]));
   if (!wanted.length) return threads;
   const { results } = await db.prepare(`${COMMENT_SQL} WHERE c.target IN (${wanted.map(() => "?").join(",")})
     ORDER BY c.id`).bind(...wanted).all();
-  // Only comments from the last few minutes can still be changed: ask about those alone.
-  const recent = results.filter((c) => c.created_at > now() - EDIT_SECONDS).map((c) => c.id);
-  const [earlier, editable] = await Promise.all([commentVersions(db, results.filter((c) => c.edited_at).map((c) => c.id)), editableComments(db, recent)]);
+  const earlier = await commentVersions(db, results.filter((c) => c.edited_at).map((c) => c.id));
   // author_is_owner comes back from SQLite as 1/0: a bare 0 would print as "0" under someone else's comment.
   for (const c of results) threads.get(c.target).push({ ...c, author_is_owner: Boolean(c.author_is_owner), earlier: earlier.get(c.id) ?? [],
-    editable: editable.has(c.id) });
+    editable: false });
   return threads;
 }
 
 // In a group: what it said (group_inbox, see notify.js), while the owner's still in it.
 const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g.joined_at IS NOT NULL";
 
-// Notifications: comments here (comments), comments on friends' posts and photos the owner has commented on
-// too, and friends' invitations to their events and changes to them, which their sites send (inbox, see notify.js and
-// events.js), and comments in groups and changes to events there the owner is going to. One list, newest first. For a
-// friend or group, `connection_id` is the friend or group, `friend` their name, `target` the post. `kind` is NULL for
-// a comment, or 'invite' (a friend's), 'changed' or 'cancelled' for an event, or 'mention' (mentions.js: someone
-// mentioned the owner, or used @here in a group). `own_post`: whether the owner wrote it (groups). `date`: which date of
-// a repeating group event, when a note's about one date. `mentions`: who a comment here mentions (mentions.js).
-const FRIEND_NOTES = "('comment', 'invite', 'changed', 'cancelled', 'mention')";
+// Notifications: comments here from before signing (comments), notices about signed posts (notices, below), and
+// comments in groups and changes to events there the owner is going to. One list, newest first. For a friend or group,
+// `connection_id` is the friend or group, `friend` their name, `target` the post. `kind` is NULL for a comment, or
+// 'invite' (a friend's), 'changed' or 'cancelled' for an event, or 'mention' (mentions.js: someone mentioned the owner,
+// or used @here in a group). `own_post`: whether the owner wrote it (groups). `date`: which date of a repeating group
+// event, when a note's about one date. `mentions`: who a comment here mentions (mentions.js).
 // Signed posts (afterwrd 2: notes.js): comments and mentions on friends' posts the owner's in, and on their own
-// ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new post is a notice too, but only for the live bar.)
+// ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new
+// post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
   WHERE n.kind IN ('comment', 'mention', 'invite', 'changed', 'cancelled')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions
   FROM comments c LEFT JOIN users u ON u.id = c.author_id
-  UNION ALL
-  SELECT 'friend', i.id, i.target, i.text, i.created_at, i.actor, NULL, i.connection_id, co.name, NULL,
-    CASE WHEN i.kind = 'comment' THEN NULL ELSE i.kind END, NULL, NULL
-  FROM inbox i ${INBOX_JOIN} WHERE i.kind IN ${FRIEND_NOTES}
   UNION ALL
   SELECT CASE WHEN n.own = 1 THEN 'own' ELSE 'signed' END, n.id, n.target, n.text, n.created_at, n.actor, NULL, n.connection_id, co.name,
     NULL, n.kind, NULL, NULL
@@ -91,7 +70,6 @@ export async function latestComments(db, page, size) {
 export async function newCount(db, user) {
   const row = await db.prepare(`SELECT
     (SELECT COUNT(*) FROM comments WHERE created_at > ?1 AND (author_id IS NULL OR author_id != ?2))
-    + (SELECT COUNT(*) FROM inbox i ${INBOX_JOIN} WHERE i.kind IN ${FRIEND_NOTES} AND i.created_at > ?1)
     + (SELECT COUNT(*) ${NOTICES} AND n.created_at > ?1)
     + (SELECT COUNT(*) ${GROUP_THERE} WHERE i.created_at > ?1) AS n`)
     .bind(user.activity_seen_at ?? 0, user.id).first();
@@ -114,77 +92,7 @@ export async function findTarget(db, target) {
 }
 
 /**
- * Whether what findTarget found takes comments here: only posts and photos made on afterwrd. Not a photo in a signed
- * post (afterwrd 2: media.item_id): that's an item of its own, whose comments are signed records on its list (items.js).
+ * Whether what findTarget found may have comments from before signing: posts and photos made on afterwrd, apart from a
+ * photo in a signed post (media.item_id), an item of its own whose comments are signed records on its list (items.js).
  */
-export const commentable = (found) => (found?.post ?? found?.photo)?.source === "afterwrd" && !found?.photo?.item_id;
-
-export async function handleComments(request, env, url, user) {
-  if (request.method !== "POST") return new Response("Not found", { status: 404 });
-  const form = await request.formData().catch(() => new FormData());
-  const back = new URL(safeNext(String(form.get("back") ?? "/"), url), url.origin);
-  try {
-    if (url.pathname === "/_comments") {
-      const made = await addComment(env, url.origin, user, { target: String(form.get("target") ?? ""), text: String(form.get("text") ?? ""),
-        mentions: form.get("mentions") });
-      if (made) back.hash = `c${made.id}`;
-      return Response.redirect(back.href, 303);
-    }
-    const change = /^\/_comments\/(\d+)\/edit$/.exec(url.pathname);
-    if (change) {
-      await editComment(env, Number(change[1]), { owner: true }, String(form.get("text") ?? ""), MAX_COMMENT);
-      back.hash = `c${change[1]}`;
-      return Response.redirect(back.href, 303);
-    }
-    const del = /^\/_comments\/(\d+)\/delete$/.exec(url.pathname);
-    if (del) {
-      const gone = await deleteComment(env, Number(del[1]));
-      if (gone) back.hash = `t-${gone.target}`;
-      return Response.redirect(back.href, 303);
-    }
-  } catch (error) {
-    if (error instanceof Refusal) return message(error.message, back, error.status);
-    throw error;
-  }
-  return new Response("Not found", { status: 404 });
-}
-
-// --- actions (see util.js Refusal) -----------------------------------------------------------------------------------
-
-/**
- * The owner comments on their own post or photo (`target`, its key), perhaps mentioning friends (mentions.js). Returns
- * { id }, or null if there's nothing to say.
- */
-export async function addComment(env, origin, user, { target, text, mentions: given = null }) {
-  const db = env.DB;
-  text = text.replace(/\r\n?/g, "\n").trim();
-  if (!text) return null;
-  if (text.length > MAX_COMMENT) throw new Refusal(`Comments can be up to ${MAX_COMMENT} characters.`, 400);
-  const found = await findTarget(db, target);
-  if (!found) throw new Refusal("That's no longer here.", 404);
-  if (!commentable(found)) throw new Refusal("Only posts and photos added on afterwrd take comments.", 403);
-  // The limits are checked in the same statement as the insert, so comments sent all at once can't slip past.
-  const mentions = cleanMentions(given, text, env);
-  const row = await db.prepare(`INSERT INTO comments (target, author_id, author_name, text, created_at, origin, mentions)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?10
-    WHERE (SELECT COUNT(*) FROM comments WHERE author_id = ?2 AND created_at > ?5 - ?7) < ?8
-      AND (SELECT COUNT(*) FROM comments WHERE author_id = ?2 AND created_at > ?5 - 86400) < ?9
-    RETURNING id`).bind(target, user.id, user.name, text, now(), "site", RATE.seconds, RATE.count, DAILY, keptMentions(mentions)).first();
-  if (!row) throw new Refusal("That's a lot of comments for now. Try again later.", 429);
-  await notifyComment(env, origin, target, { name: user.name, text, mentions });
-  await notifyMentions(env, origin, target, { name: user.name, text, mentions, comment: true });
-  return { id: row.id };
-}
-
-/** Deletes a comment here. Returns { target } (what it was on), or null if it wasn't here. */
-export async function deleteComment(env, id) {
-  const db = env.DB;
-  const comment = await db.prepare("SELECT * FROM comments WHERE id = ?").bind(id).first();
-  if (!comment) return null;
-  await db.batch([db.prepare("DELETE FROM comments WHERE id = ?").bind(comment.id), ...versionsGone(db)]);
-  return { target: comment.target };
-}
-
-function message(text, back, status) {
-  return html(messagePage(text, { href: back.pathname + back.search, label: "Go back" }), status);
-}
+export const hasOldThread = (found) => (found?.post ?? found?.photo)?.source === "afterwrd" && !found?.photo?.item_id;

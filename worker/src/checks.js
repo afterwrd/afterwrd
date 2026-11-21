@@ -28,13 +28,14 @@
 //     in, must get the sign-in redirect the code gives, not the file from Cloudflare directly);
 //   - what apps (OAuth) and API tokens did in the account since the Worker was made, marking what afterwrd doesn't do.
 // The code carries the hash of every static file (src/static.js), so with the above it covers the whole site.
-// A check that passes is then told to the site checked, if it's a friend's (POST /_peer/checked): it's a snapshot,
+// A check that passes is then told to the site checked, if it's a friend's (POST /_p/checked): it's a snapshot,
 // so that site shows who checked it last, and stops suggesting a check.
 import pkg from "../package.json";
 import { CODE_RE, donePage, exchangeCode, readCookie, relayLink, testingHere, withCookie } from "./cloudflare.js";
 import { API } from "./deploy.js";
 import { checkLinkPage, messagePage } from "./views/pages.js";
-import { callSite, ownerName, siteOrigin } from "./peers.js";
+import { ownerName, siteOrigin } from "./sites.js";
+import { callFriend } from "./calls.js";
 import { knownLatest, newer } from "./update.js";
 import { laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
 import { signedList } from "./signing.js";
@@ -98,7 +99,7 @@ export async function handleCheckAdmin(request, env, url) {
   const body = await request.json().catch(() => ({}));
   try {
     // The owner asking a friend to check their site: their site is sent the request, and shows it on its Home.
-    if (url.pathname === "/_admin/checks/ask") return json({ ok: true, ...await askForCheck(env, Number(body.connection)) });
+    if (url.pathname === "/_admin/checks/ask") return json({ ok: true, ...await askForCheck(env, url.origin, Number(body.connection)) });
     if (url.pathname === "/_admin/checks/new") {
       return json(await makeCheckLink(env, url.origin, { connection: body.connection == null ? null : Number(body.connection), site: body.site }));
     }
@@ -290,7 +291,7 @@ async function auditStep(request, env, url, body) {
     result.audit[how] = true;
     const marked = await env.DB.prepare("UPDATE site_checks SET result = ?, checked_at = ? WHERE id = ? AND checked_at IS NULL")
       .bind(JSON.stringify(result), now(), check.id).run();
-    if (marked.meta.changes) await tellChecked(env, check.site, result);
+    if (marked.meta.changes) await tellChecked(env, url.origin, check.site, result);
     return withCookie(json({ done: true }), clearRun);
   };
   if (body.stop === true) return done("stopped"); // the page gave up (too many pages): it says the log wasn't all read
@@ -613,17 +614,17 @@ export function tooSoonToCheck(env) {
 }
 
 /** Asks friend `connection` to check this site: their site shows the request on its Home. Returns { name }. */
-export async function askForCheck(env, connection) {
+export async function askForCheck(env, origin, connection) {
   const wait = tooSoonToCheck(env);
   if (wait) throw new Refusal(`Your site was updated less than an hour ago. Ask after ${when(wait)}.`, 409);
-  const friend = Number.isInteger(connection) && await env.DB.prepare(`SELECT name, origin, their_key FROM connections WHERE id = ?
-    AND connected_at IS NOT NULL AND approved_at IS NOT NULL AND their_key IS NOT NULL`).bind(connection).first();
+  const friend = Number.isInteger(connection) && await env.DB.prepare(`SELECT name, origin FROM connections WHERE id = ?
+    AND connected_at IS NOT NULL AND approved_at IS NOT NULL`).bind(connection).first();
   if (!friend) throw new Refusal("That isn't one of your friends.", 404);
   if (!onCloudflare(friend.origin, env)) throw new Refusal(`${friend.name}'s site is self-hosted, so it can't check sites.`, 409);
   try {
-    await callSite(friend.origin, "/_peer/check-request", { key: friend.their_key, body: { type: "CheckRequest" } });
+    await callFriend(env, origin, friend.origin, "/_p/check-request", { body: { type: "CheckRequest" } });
   } catch (error) {
-    // A site from before 0.35.0 doesn't know the request: the page offers the message to send instead.
+    // A site on an older afterwrd doesn't know the request: the page offers the message to send instead.
     if (error.status === 404) throw new Refusal(`${friend.name}'s site is on an older afterwrd, so send them a message instead.`, 409, { older: true });
     throw new Refusal(`Couldn't reach ${friend.name}'s site: ${error.message}`, 502);
   }
@@ -631,7 +632,7 @@ export async function askForCheck(env, connection) {
 }
 
 /**
- * A friend's site asking for a check (POST /_peer/check-request). Returns [body, status].
+ * A friend's site asking for a check (POST /_p/check-request). Returns [body, status].
  * @returns {Promise<import("./util.js").Answer>}
  */
 export async function receiveCheckRequest(env, peer, body) {
@@ -663,17 +664,17 @@ export async function checkRequests(db) {
  * Home, and says on Update who checked it last. Only a pass is sent (the person saw the result either way), only
  * to a friend, and only once. Best effort: a site that can't be reached just isn't told.
  */
-async function tellChecked(env, site, result) {
+async function tellChecked(env, origin, site, result) {
   if (!site || verdict(result) !== "all good") return;
-  const friend = await env.DB.prepare(`SELECT origin, their_key FROM connections WHERE origin = ? AND connected_at IS NOT NULL
-    AND approved_at IS NOT NULL AND their_key IS NOT NULL`).bind(site).first();
+  const friend = await env.DB.prepare(`SELECT origin FROM connections WHERE origin = ? AND connected_at IS NOT NULL
+    AND approved_at IS NOT NULL`).bind(site).first();
   if (!friend) return;
-  await callSite(friend.origin, "/_peer/checked", { key: friend.their_key, timeout: 5000,
+  await callFriend(env, origin, friend.origin, "/_p/checked", { timeout: 5000,
     body: { type: "Checked", site: friend.origin, version: result.version } }).catch(() => {});
 }
 
 /**
- * A friend's site saying it checked this one and found it genuine (POST /_peer/checked). Returns [body, status].
+ * A friend's site saying it checked this one and found it genuine (POST /_p/checked). Returns [body, status].
  * It's their word, as a friend: it only changes what this site suggests to its owner, and says who it came from.
  * @returns {Promise<import("./util.js").Answer>}
  */

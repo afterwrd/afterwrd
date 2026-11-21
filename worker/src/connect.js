@@ -1,17 +1,18 @@
 // Connecting with a friend's afterwrd site. The owner makes a one-time Connect link on /_admin/connections and
-// sends it to a friend, who opens it, says where their own site is, and confirms there. Their site then:
-//   1. keeps a new key for this site to call it with, and sends it to POST /_connect/<token>/accept here;
-//   2. this site proves the key is theirs, and meant for this site, by calling their /_peer/hello?from=<this site>
-//      with it; then keeps it and answers with a key for them to call this site with.
-// Connections are mutual: both owners read each other's posts and photos from their own sites, on Home and on friend
-// pages, and can comment on them (peers.js, friends.js). A link only asks: the site that made it shares nothing
-// until its owner approves the request on Friends, so a link passed on to someone else gets them nowhere.
+// sends it to a friend, who opens it, says where their own site is, and confirms there. Their site then makes a signed
+// call (calls.js) to POST /_connect/<token>/accept here, with its owner's signed name. This site checks the call was
+// signed by the identity their own address gives (/.well-known/afterwrd), and answers with its owner's signed name; their
+// site checks this site's identity at this address the same way. So each site knows the other by identity, and nothing
+// secret is handed over or kept: every later call between them is signed too.
+// Connections are mutual: both owners read each other's posts from their own sites, on Home and on friend pages, and can
+// comment on them (friendhost.js, friendcopies.js). A link only asks: the site that made it shares nothing until its
+// owner approves the request on Friends, so a link passed on to someone else gets them nowhere.
 // Links made with "Invite to afterwrd" on Friends (POST …/invite) are for one person in the Facebook download, last
 // 30 days, and link the new friend to that person when approved.
 //
 // Asking without a link (0.32.0): the same handshake, sent to POST /_connect/ask instead of a link's accept, and only
 // accepted from someone in a group with this site's owner (checked by asking the group) or introduced to them by one
-// of their friends (an introduction this site was sent: POST /_peer/introduce, below). Anyone else needs a link. A
+// of their friends (an introduction this site was sent: POST /_p/introduce, below). Anyone else needs a link. A
 // declined request can't be made again this way; still nothing is shared until the owner approves.
 //
 // Without a session:   GET /_connect/<token>  (the page the link opens), GET …/info, POST …/accept, POST /_connect/ask
@@ -24,18 +25,19 @@ import { safeNext } from "./auth.js";
 import { testingHere } from "./cloudflare.js";
 import { loadMembers } from "./membership.js";
 import { connectLinkPage, messagePage } from "./views/pages.js";
-import { callSite, host, KEY_RE, ownerName, siteOrigin } from "./peers.js";
-import { html, json, now, pageData, randomToken, Refusal, sha256, withoutKeys } from "./util.js";
+import { callSite, host, ownerName, siteOrigin } from "./sites.js";
+import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.js";
 import { headerMe } from "./photos.js";
 import { confirmPage, connectionsMessage, connectionsPage, introducedPage, introducePage, togetherPage } from "./views/connections.js";
 import { rateWindow } from "./limits.js";
-import { friendPerson } from "./calls.js";
+import { bodyBytes, bodyJson, callFriend, siteCalling } from "./calls.js";
+import { checkProfile, fetchIdentity, identityState } from "./identities.js";
+import { pullItems } from "./friendcopies.js";
 
 // A friend link lasts 30 days, enough for someone new to set up their own site first (and wait for Facebook's
 // download, if they want it). It works once, and only asks: nothing is shared until its owner approves.
 const LINK_SECONDS = 30 * 24 * 3600;
 const INSTALLER = "https://install.afterwrd.app/";
-const PENDING_SECONDS = 600; // a connection half made is given up after this
 const LINK_RE = /^\/_connect\/([\w-]{40,100})$/;
 const ASKS_WAITING = 20; // requests waiting for the owner, at most
 const ASKS = { hour: 30, perSite: 5 }; // requests without a link (with a reason) in an hour, at most: overall, and from one site
@@ -76,45 +78,62 @@ export async function handleConnectLink(request, env, url) {
   return new Response("Not found", { status: 404 });
 }
 
+/** This site's owner's signed profile (their name), as sent to someone asking to be friends, or null. */
+async function ownProfile(db) {
+  const row = await db.prepare("SELECT profile FROM own_identity WHERE id = 1").first();
+  return row?.profile ? JSON.parse(String(row.profile)) : null;
+}
+
+/**
+ * Their owner's name: from their signed profile, if it's `person`'s (identities.js checkProfile); otherwise the name
+ * their site gave (`said`), as before signing, until their browser has signed a profile.
+ */
+async function signedName(env, person, profile, said) {
+  const state = profile && (await identityState(env, person));
+  const checked = state && !state.frozen && (await checkProfile(profile, state));
+  return cleanName(checked?.name ?? said);
+}
+
+/**
+ * Someone with a friend link asking to be friends: their site's signed call, with their signed profile. Connected,
+ * but waiting for this site's owner to approve (approved_at): nothing is shared until then.
+ */
 async function accept(request, env, url, token) {
   const db = env.DB;
-  const body = await request.json().catch(() => ({}));
-  const origin = siteOrigin(body.origin, env);
-  if (!origin || origin === url.origin || !KEY_RE.test(body.key ?? "")) return json({ error: "That doesn't look like an afterwrd site." }, 400);
-
-  // Prove the key belongs to the site it claims to be from, and was made for connecting with this one.
-  let them;
-  try {
-    them = await callSite(origin, `/_peer/hello?from=${encodeURIComponent(url.origin)}`, { key: body.key });
-  } catch (error) {
-    return json({ error: `Couldn't confirm your site: ${error.message}` }, 400);
-  }
+  const bytes = await bodyBytes(request);
+  if (!bytes) return json({ error: "That's too big." }, 413);
+  if (!(await openLink(db, token))) return json({ error: "This friend link has already been used." }, 404);
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller) return json({ error: "Couldn't confirm your site: it needs a newer afterwrd, with signing set up in Your devices." }, 400);
+  const origin = caller.from;
+  if (origin === url.origin) return json({ error: "That's a link to your own site." }, 400);
   const existing = await db.prepare("SELECT 1 FROM connections WHERE origin = ? AND connected_at IS NOT NULL").bind(origin).first();
   if (existing) return json({ error: "Your sites are already connected." }, 409);
   const link = await openLink(db, token);
   const spent = await db.prepare("UPDATE connect_links SET used_at = ? WHERE token_hash = ? AND used_at IS NULL")
     .bind(now(), await sha256(token)).run();
   if (!link || !spent.meta.changes) return json({ error: "This friend link has already been used." }, 404);
-
-  // Connected, but waiting for this site's owner to approve (approved_at): nothing is shared until then.
-  const key = randomToken();
+  const asked = bodyJson(bytes);
+  const name = await signedName(env, caller.person, asked.profile, asked.name);
   await db.batch([
     db.prepare("DELETE FROM connections WHERE origin = ?").bind(origin),
-    db.prepare(`INSERT INTO connections (origin, name, their_key, key_hash, created_at, connected_at, invited_as)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(origin, cleanName(them.name), body.key, await sha256(key), now(), now(), link.person_name ?? null),
+    db.prepare(`INSERT INTO connections (origin, name, identity, created_at, connected_at, invited_as)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(origin, name, caller.person, now(), now(), link.person_name ?? null),
   ]);
-  return json({ name: await ownerName(db), key });
+  return json({ name: await ownerName(db), profile: await ownProfile(db) });
 }
 
 /**
  * Someone asking to be friends without a link: only from someone in a group with the owner here, or introduced to
- * them by a friend. Otherwise as accept, above: their key is checked with their site, and the owner here decides.
+ * them by a friend. Otherwise as accept, above: their call is checked with their identity, and the owner here decides.
  */
 async function ask(request, env, url) {
   const db = env.DB;
-  const body = await request.json().catch(() => ({}));
-  const origin = siteOrigin(body.origin, env);
-  if (!origin || origin === url.origin || !KEY_RE.test(body.key ?? "")) return json({ error: "That doesn't look like an afterwrd site." }, 400);
+  const bytes = await bodyBytes(request);
+  if (!bytes) return json({ error: "That's too big." }, 413);
+  const body = bodyJson(bytes);
+  const origin = siteOrigin(request.headers.get("Afterwrd-From"), env);
+  if (!origin || origin === url.origin) return json({ error: "That doesn't look like an afterwrd site." }, 400);
   // Until the asker has proved it's that site, every refusal is the same, so nobody can find out from here who the
   // owner is friends with, has turned down, has been introduced to, or shares a group with.
   const notAllowed = () => json({ error: NOT_ALLOWED }, 403);
@@ -128,28 +147,24 @@ async function ask(request, env, url) {
       AND (SELECT COUNT(*) FROM ask_log WHERE origin = ?2 AND at > ?1 - ?5) < ?4 RETURNING at`).bind(at, origin, ASKS.hour, ASKS.perSite, rateWindow(3600)),
   ]);
   if (!counted.results.length) return json({ error: "Lots of people are asking to be friends just now. Try again later." }, 429);
-  let them;
-  try {
-    them = await callSite(origin, `/_peer/hello?from=${encodeURIComponent(url.origin)}`, { key: body.key });
-  } catch {
-    return notAllowed();
-  }
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller || caller.from !== origin) return notAllowed();
   // Proved: now it may hear how things stand between it and the owner here.
   const existing = await db.prepare("SELECT approved_at FROM connections WHERE origin = ? AND connected_at IS NOT NULL").bind(origin).first();
   if (existing?.approved_at) return json({ error: "You're already friends." }, 409);
   // Already asking, or turned down: the same answer.
   if (existing || await db.prepare("SELECT 1 FROM declined_asks WHERE origin = ?").bind(origin).first()) return json({ error: "You've already asked." }, 409);
-  const key = randomToken();
+  const name = await signedName(env, caller.person, body.profile, body.name);
   const [, added] = await db.batch([
     db.prepare("DELETE FROM connections WHERE origin = ? AND connected_at IS NULL").bind(origin),
     // Limits checked in the same statement as the insert, so requests sent all at once can't slip past.
-    db.prepare(`INSERT INTO connections (origin, name, their_key, key_hash, created_at, connected_at, via_kind, via_name)
-      SELECT ?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7 WHERE NOT EXISTS (SELECT 1 FROM connections WHERE origin = ?1)
-        AND (SELECT COUNT(*) FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL) < ?8 RETURNING id`)
-      .bind(origin, cleanName(them.name), body.key, await sha256(key), at, via.kind, via.name, ASKS_WAITING),
+    db.prepare(`INSERT INTO connections (origin, name, identity, created_at, connected_at, via_kind, via_name)
+      SELECT ?1, ?2, ?3, ?4, ?4, ?5, ?6 WHERE NOT EXISTS (SELECT 1 FROM connections WHERE origin = ?1)
+        AND (SELECT COUNT(*) FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL) < ?7 RETURNING id`)
+      .bind(origin, name, caller.person, at, via.kind, via.name, ASKS_WAITING),
   ]);
   if (!added.results.length) return json({ error: `${await ownerName(db)} has a lot of friend requests waiting. Try again later.` }, 429);
-  return json({ name: await ownerName(db), key });
+  return json({ name: await ownerName(db), profile: await ownProfile(db) });
 }
 
 // Introductions still good: from a friend still here who has also approved the owner here (their site has answered).
@@ -200,19 +215,15 @@ async function reasonFor(env, origin, via) {
  * @returns {Promise<import("./util.js").Answer>}
  */
 export async function receiveIntroduction(env, url, peer, body) {
+  // (`peer`: the friend's connection, from their signed call: calls.js friendCalling.)
   const db = env.DB;
   const origin = siteOrigin(body?.origin, env);
   if (!origin || origin === url.origin || origin === peer.origin) return [{ error: "That isn't someone to be introduced to." }, 400];
   const note = typeof body.content === "string" ? body.content.replace(/\r\n?/g, "\n").trim().slice(0, MAX_NOTE) : "";
   // Only from a friend who has approved the owner here too (not just someone the owner asked): their site has
   // answered this one. If it never has, it's asked once now.
-  if (!peer.reached_at) {
-    try {
-      await callSite(peer.origin, "/_peer/feed", { key: peer.their_key });
-    } catch {
-      return [{ error: `${await ownerName(db)} hasn't approved you as a friend yet.` }, 403];
-    }
-    await db.prepare("UPDATE connections SET reached_at = ?, missing_since = NULL, said_no = 0 WHERE id = ?").bind(now(), peer.id).run();
+  if (!peer.reached_at && (await pullItems(env, url.origin, peer)) === null) {
+    return [{ error: `${await ownerName(db)} hasn't approved you as a friend yet.` }, 403];
   }
   // Already friends (or asking), turned down, or already introduced by them: nothing to do, and nothing said about which.
   const known = await db.prepare(`SELECT 1 FROM connections WHERE origin = ?1 AND connected_at IS NOT NULL
@@ -268,7 +279,7 @@ export async function handleConnections(request, env, url, owner) {
   // group's members to there (?back=<path>); otherwise to Friends.
   const decide = /^\/(\d+)\/(approve|decline)$/.exec(path);
   if (request.method === "POST" && decide) {
-    await decideRequest(env, Number(decide[1]), decide[2] === "approve");
+    await decideRequest(env, url.origin, Number(decide[1]), decide[2] === "approve");
     const back = url.searchParams.get("back");
     return Response.redirect(`${url.origin}${back === "home" ? "/" : back ? safeNext(back, url) : "/friend"}`, 303);
   }
@@ -289,12 +300,12 @@ export async function handleConnections(request, env, url, owner) {
   if (path === "/together") {
     if (request.method === "GET") {
       const friends = await introducible(env.DB);
-      return html(togetherPage(pageData(env, { friends: friends.map(withoutKeys), max: TOGETHER_MAX, maxNote: MAX_NOTE, me })));
+      return html(togetherPage(pageData(env, { friends, max: TOGETHER_MAX, maxNote: MAX_NOTE, me })));
     }
     if (request.method !== "POST") return new Response("Not found", { status: 404 });
     const body = await request.json().catch(() => ({}));
     return answerJson(async () => {
-      await introduceTogether(env, body);
+      await introduceTogether(env, url.origin, body);
       return { ok: true };
     });
   }
@@ -316,7 +327,7 @@ export async function handleConnections(request, env, url, owner) {
   }
   const disconnect = /^\/(\d+)\/disconnect$/.exec(path);
   if (request.method === "POST" && disconnect) {
-    await removeFriend(env, Number(disconnect[1]));
+    await removeFriend(env, url.origin, Number(disconnect[1]));
     // From a form (Remove friend on their page, or on Friends), back to Friends; from this site's script, JSON.
     const form = /form/.test(request.headers.get("Content-Type") ?? "");
     return form ? Response.redirect(`${url.origin}/friend`, 303) : json({ ok: true });
@@ -339,7 +350,7 @@ async function introducing(request, env, id, me) {
   if (request.method === "POST") {
     const form = await request.formData().catch(() => new FormData());
     try {
-      const { friend, other, trouble } = await introduceFriend(env, id, { to: Number(form.get("to")), note: String(form.get("note") ?? "") });
+      const { friend, other, trouble } = await introduceFriend(env, new URL(request.url).origin, id, { to: Number(form.get("to")), note: String(form.get("note") ?? "") });
       return html(introducedPage(pageData(env, { friend, other, trouble, me })), trouble.length === 2 ? 400 : 200);
     } catch (error) {
       if (error instanceof Refusal) return html(connectionsMessage({ message: error.message, me }), error.status);
@@ -351,7 +362,7 @@ async function introducing(request, env, id, me) {
   if (!friend) return html(connectionsMessage({ message: NOT_INTRODUCIBLE, me }), 404);
   if (request.method !== "GET") return new Response("Not found", { status: 404 });
   const others = friends.filter((c) => c.id !== id);
-  return html(introducePage(pageData(env, { friend: withoutKeys(friend), others: others.map(withoutKeys), maxNote: MAX_NOTE, me })));
+  return html(introducePage(pageData(env, { friend, others, maxNote: MAX_NOTE, me })));
 }
 
 // --- actions (see util.js Refusal) -----------------------------------------------------------------------------------
@@ -404,14 +415,15 @@ export async function inviteFromFacebook(env, origin, name) {
  * Someone asked to be friends (`id`, still waiting): approve (share, and link them to who the invite was for) or
  * decline (forget them; if they asked without a link, they can't again that way). Nothing if there's no such request.
  */
-export async function decideRequest(env, id, approving) {
+export async function decideRequest(env, origin, id, approving) {
   const db = env.DB;
   const connection = await db.prepare("SELECT * FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NULL")
     .bind(id).first();
   if (connection && approving) await approve(env, connection);
   else if (connection) {
-    await callSite(connection.origin, "/_peer/disconnect", { key: connection.their_key, body: {} }).catch(() => {});
+    await callFriend(env, origin, connection.origin, "/_p/disconnect", { body: {} }).catch(() => {});
     await db.batch([
+      ...friendGone(db, connection.id), // first: it reads who they were
       db.prepare("DELETE FROM connections WHERE id = ?").bind(connection.id),
       db.prepare("DELETE FROM introductions WHERE origin = ?").bind(connection.origin),
       ...(connection.via_kind ? [db.prepare("INSERT OR REPLACE INTO declined_asks (origin, declined_at) VALUES (?, ?)").bind(connection.origin, now())] : []),
@@ -444,11 +456,11 @@ export async function linkToFacebook(env, id, { unlink, none, name }) {
 }
 
 /** Removes friend `id`: their site is told if it can be reached; either way this side forgets them. */
-export async function removeFriend(env, id) {
+export async function removeFriend(env, origin, id) {
   const db = env.DB;
   const connection = await db.prepare("SELECT * FROM connections WHERE id = ?").bind(id).first();
   if (!connection) return;
-  await callSite(connection.origin, "/_peer/disconnect", { key: connection.their_key, body: {} }).catch(() => {});
+  if (connection.connected_at) await callFriend(env, origin, connection.origin, "/_p/disconnect", { body: {} }).catch(() => {});
   // The owner's copies of what they said on that site (comments_elsewhere) stay: they're theirs.
   await db.batch([
     ...friendGone(db, connection.id), // first: it reads who they were
@@ -475,40 +487,35 @@ function parseLink(link, url, env) {
 }
 
 /**
- * Asks the site at `origin` to be friends, at `path` there (a link's accept, or /_connect/ask with `extra`): keeps a
- * key for it to call this site with, sends it, and keeps the key it answers with. Returns { name } or { error, status }.
+ * Asks the site at `origin` to be friends, at `path` there (a link's accept, or /_connect/ask with `extra`): a signed
+ * call with the owner's signed name. Their identity is learnt first, at their own address, so this site knows who it's
+ * asking; their answer (their signed name) comes from that address too. Returns { name } or { error, status }.
  */
 async function handshake(env, url, origin, path, extra = {}) {
   const db = env.DB;
   const existing = await db.prepare("SELECT * FROM connections WHERE origin = ?").bind(origin).first();
   if (existing?.connected_at) return { error: `You're already connected with ${existing.name}.`, status: 409 };
-  const key = randomToken();
-  await db.batch([
-    db.prepare("DELETE FROM connections WHERE origin = ? OR (connected_at IS NULL AND created_at < ?)").bind(origin, now() - PENDING_SECONDS),
-    db.prepare("INSERT INTO connections (origin, name, key_hash, created_at) VALUES (?, ?, ?, ?)").bind(origin, "A friend", await sha256(key), now()),
-  ]);
+  const identity = await fetchIdentity(env, origin).catch(() => null);
+  if (!identity) return { error: `${host(origin)} needs a newer afterwrd, with signing set up in Your devices.`, status: 400, gone: true };
+  let reply;
   try {
-    // Long enough for their site to call this one back (see accept) before answering.
-    const reply = await callSite(origin, path, { body: { origin: url.origin, key, ...extra }, timeout: 25_000 });
-    if (!KEY_RE.test(reply.key ?? "")) throw new Error("Their site sent something unexpected.");
-    const name = cleanName(reply.name);
-    // This side asked, so it's approved here; theirs waits for their owner.
-    await db.batch([
-      db.prepare("UPDATE connections SET name = ?, their_key = ?, connected_at = ?, approved_at = ? WHERE origin = ?")
-        .bind(name, reply.key, now(), now(), origin),
-      db.prepare("DELETE FROM declined_asks WHERE origin = ?").bind(origin),
-    ]);
-    // Their identity (afterwrd 2), which their signed posts are checked against and mentions name them by.
-    const made = await db.prepare("SELECT * FROM connections WHERE origin = ?").bind(origin).first();
-    if (made) await friendPerson(env, made).catch(() => null);
-    return { name };
+    reply = await callFriend(env, url.origin, origin, path,
+      { body: { name: await ownerName(db), profile: await ownProfile(db), ...extra }, timeout: 25_000 });
   } catch (error) {
-    await db.prepare("DELETE FROM connections WHERE origin = ? AND connected_at IS NULL").bind(origin).run();
     return { error: error.message, status: 400, gone: error.status === 404 };
   }
+  const name = await signedName(env, identity.id, reply.profile, reply.name);
+  // This side asked, so it's approved here; theirs waits for their owner.
+  await db.batch([
+    db.prepare("DELETE FROM connections WHERE origin = ?").bind(origin),
+    db.prepare(`INSERT INTO connections (origin, name, identity, created_at, connected_at, approved_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(origin, name, identity.id, now(), now(), now()),
+    db.prepare("DELETE FROM declined_asks WHERE origin = ?").bind(origin),
+  ]);
+  return { name };
 }
 
-/** Approves someone's request: they're friends now, tied to their identity if their site says it (calls.js). */
+/** Approves someone's request: they're friends now (tied to their identity when they asked). */
 async function approve(env, connection) {
   const db = env.DB;
   await db.batch([
@@ -518,7 +525,6 @@ async function approve(env, connection) {
     ...(connection.invited_as ? [db.prepare("INSERT OR REPLACE INTO friend_links (connection_id, person_name, created_at) VALUES (?, ?, ?)")
       .bind(connection.id, connection.invited_as, now())] : []),
   ]);
-  await friendPerson(env, connection).catch(() => null);
 }
 
 /**
@@ -563,7 +569,7 @@ const NOT_INTRODUCIBLE = "You can introduce friends once you've seen their posts
  * Introduces friend `id` to another friend (`to`), with a note: both their sites are told. Returns { friend, other,
  * trouble } (the two, and what went wrong telling either; both going wrong is a failure too, shown as such).
  */
-export async function introduceFriend(env, id, { to, note }) {
+export async function introduceFriend(env, origin, id, { to, note }) {
   // Friends both ways: their sites have answered this one, so they've approved the owner here too.
   const friends = await introducible(env.DB);
   const friend = friends.find((c) => c.id === id);
@@ -572,12 +578,12 @@ export async function introduceFriend(env, id, { to, note }) {
   const other = others.find((c) => c.id === to);
   if (!other) throw new Refusal("Choose who to introduce them to.", 400);
   note = note.replace(/\r\n?/g, "\n").trim().slice(0, MAX_NOTE);
-  const tell = (whom, about) => callSite(whom.origin, "/_peer/introduce", { key: whom.their_key,
-    body: { type: "Introduce", origin: about.origin, name: about.name, ...(note && { content: note }) } });
+  const tell = (whom, about) => callFriend(env, origin, whom.origin, "/_p/introduce",
+    { body: { type: "Introduce", origin: about.origin, name: about.name, ...(note && { content: note }) } });
   const told = await Promise.allSettled([tell(friend, other), tell(other, friend)]);
   const trouble = told.map((t, i) => t.status === "rejected" && `${[friend, other][i].name}'s site: ${t.reason.status === 404
     ? "it needs a newer afterwrd first" : t.reason.message}`).filter(Boolean);
-  return { friend: withoutKeys(friend), other: withoutKeys(other), trouble };
+  return { friend, other, trouble };
 }
 
 /** Friends both ways (their sites have answered this one, so they've approved the owner here too), by name. */
@@ -591,7 +597,7 @@ const TOGETHER_MAX = 10; // people introduced to each other at once (each site t
  * {to, others, note} tells one of them (to) about each of the rest; the page calls it once for each person chosen, so
  * a call never needs more than TOGETHER_MAX - 1 of the 50 calls to other sites a request gets.
  */
-export async function introduceTogether(env, body) {
+export async function introduceTogether(env, origin, body) {
   const friends = await introducible(env.DB);
   const byId = new Map(friends.map((c) => [c.id, c]));
   const friend = byId.get(Number(body.to));
@@ -600,8 +606,8 @@ export async function introduceTogether(env, body) {
   if (!friend || !others.length || others.length !== ids.length) throw new Refusal("Choose friends who've approved you too.", 400);
   if (others.length > TOGETHER_MAX - 1) throw new Refusal(`Up to ${TOGETHER_MAX} people at a time.`, 400);
   const note = String(body.note ?? "").replace(/\r\n?/g, "\n").trim().slice(0, MAX_NOTE);
-  const told = await Promise.allSettled(others.map((about) => callSite(friend.origin, "/_peer/introduce", { key: friend.their_key,
-    body: { type: "Introduce", origin: about.origin, name: about.name, ...(note && { content: note }) } })));
+  const told = await Promise.allSettled(others.map((about) => callFriend(env, origin, friend.origin, "/_p/introduce",
+    { body: { type: "Introduce", origin: about.origin, name: about.name, ...(note && { content: note }) } })));
   const failed = told.find((t) => t.status === "rejected")?.reason;
   if (!failed) return;
   throw new Refusal(failed.status === 404 ? "their site needs a newer afterwrd first"

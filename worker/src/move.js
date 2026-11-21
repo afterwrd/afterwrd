@@ -23,7 +23,7 @@ import { MAX_COMMENT } from "./archive/comments.js";
 import { MAX_POST_TEXT } from "./edits.js";
 import { MAX_MENTIONS } from "./mentions.js";
 import { MAX_OPTION, MAX_OPTIONS } from "./polls.js";
-import { siteOrigin } from "./peers.js";
+import { siteOrigin } from "./sites.js";
 import { headerMe } from "./photos.js";
 import { html, json, now, pageData } from "./util.js";
 import { movePage } from "./views/import.js";

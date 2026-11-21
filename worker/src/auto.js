@@ -310,7 +310,7 @@ async function runOnce(env, state, ownerAsked = false) {
     if (switched.result === "done") {
       await progress(env, `Your site is on afterwrd ${choice.ready.version}.`);
       groupWords = await groupsByNewVersion(env, origin, choice.ready.version, ownerAsked);
-      await askFriendsToCheckSoon(env).catch(() => {});
+      await askFriendsToCheckSoon(env, origin).catch(() => {});
     }
     const words = switched.result === "done" ? `Installed afterwrd ${choice.ready.version}.${groupWords ? ` ${groupWords}` : ""}`
       : switched.result === "kept" ? `afterwrd ${choice.ready.version} had already updated your site's database when it failed its checks, so it was kept: the older version can't run on it.`

@@ -4,10 +4,10 @@
 // account, whose workers.dev name is "ann", TEST_SUBDOMAIN), GitHub's release downloads and the signed list. The relay
 // page is stood in for as in auto.mjs. The signing key is auto.mjs's throwaway one.
 //   node friendchecks.mjs <A state dir> <B state dir>
-import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { settled, siteSql as sql, steady, setUpSigning } from "./helpers.mjs";
+import { settled, siteCall, siteSql as sql, steady, setUpSigning } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const [stateA, stateB] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -137,17 +137,20 @@ async function connect(page, selector, code) {
   await page.waitForFunction(() => document.readyState !== "loading", { timeout: 15000 });
   return page.url().includes("/_admin/update") ? null : await text(page, "#error");
 }
-const key = () => randomBytes(32).toString("base64url");
+// Friends, as a finished Connect leaves them: each site knows the other by identity, and every call between them is signed.
 function befriend() {
-  const [ab, ba] = [key(), key()]; // Ann's site calls Sam's with ab; Sam's calls Ann's with ba
-  const row = (origin, name, theirs, ours) => `INSERT INTO connections (origin, name, their_key, key_hash, created_at, connected_at, approved_at, reached_at)
-    VALUES ('${origin}', '${name}', '${theirs}', '${sha(ours)}', 1, 1, 1, 1)`;
-  sql(stateA, row(B, "Sam Taylor", ab, ba));
-  sql(stateB, row(A, "Ann Example", ba, ab));
-  return { ab, ba };
+  const row = (origin, name, identity) => `INSERT INTO connections (origin, name, identity, created_at, connected_at, approved_at, reached_at)
+    VALUES ('${origin}', '${name}', '${identity}', 1, 1, 1, 1)`;
+  const person = (state) => sql(state, "SELECT person FROM own_identity")[0].person;
+  sql(stateA, row(B, "Sam Taylor", person(stateB)));
+  sql(stateB, row(A, "Ann Example", person(stateA)));
 }
-const peerCall = (site, path, k, body) => fetch(site + path, { method: "POST", headers: { Authorization: `Bearer ${k}`, "Content-Type": "application/json" },
-  body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
+const answer = async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) });
+// A signed call from Sam's site to Ann's, or Ann's to Sam's; or from a site that isn't a friend (unsigned).
+const fromSam = (path, body) => siteCall(stateB, B, A + path, body).then(answer);
+const fromAnn = (path, body) => siteCall(stateA, A, B + path, body).then(answer);
+const stranger = (site, path, body) => fetch(site + path, { method: "POST", headers: { "Afterwrd-From": "http://localhost:8795", "Content-Type": "application/json" },
+  body: JSON.stringify(body) }).then(answer);
 // Sam's daily run, waited for until its check of Ann's site has been kept (or `ms` has passed).
 async function samsRun(ms = 40000) {
   const before = sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n;
@@ -167,12 +170,12 @@ const again = () => {
 
 const ann = await owner(A, "Ann Example");
 const sam = await owner(B, "Sam Taylor");
-const { ab, ba } = befriend();
+befriend();
 cf.live = (await (await fetch(`${A}/_version`)).json()).id ?? "11111111-1111-4111-8111-111111111111";
 cf.versions.push(versionItem(cf.live, 7, 2400, ETAG_GOOD));
 
 // --- Ann lets her friends' sites check hers ------------------------------------------------------------------------
-check("before she allows it, a friend's site asking gets told no", (await peerCall(A, "/_peer/check-token", ba, { type: "CheckToken" })).status === 409);
+check("before she allows it, a friend's site asking gets told no", (await fromSam("/_p/check-token", { type: "CheckToken" })).status === 409);
 await ann.goto(`${A}/_admin/update`);
 check("Ann's Update page offers to let friends' sites check hers", (await text(ann, "#check")).includes("Let your friends' sites check yours by themselves"));
 const wide = await connect(ann, "a[href='/_cloudflare/checks-start']", "wide.code-1");
@@ -183,11 +186,11 @@ check("the relay is asked to come back to the site's own checks-done", relay?.se
 check("the refresh token isn't in Ann's database", !JSON.stringify(sql(stateA, "SELECT * FROM settings")).includes("ref-check-"));
 
 // --- what a friend's site can ask for --------------------------------------------------------------------------------
-check("a site that isn't a friend gets nothing", (await peerCall(A, "/_peer/check-token", key(), { type: "CheckToken" })).status === 401);
-check("…nor a request that isn't for a token", (await peerCall(A, "/_peer/check-token", ba, { type: "Something" })).status === 400);
-const first = await peerCall(A, "/_peer/check-token", ba, { type: "CheckToken" });
-const second = await peerCall(A, "/_peer/check-token", ba, { type: "CheckToken" });
-const third = await peerCall(A, "/_peer/check-token", ba, { type: "CheckToken" });
+check("a site that isn't a friend gets nothing", (await stranger(A, "/_p/check-token", { type: "CheckToken" })).status === 401);
+check("…nor a request that isn't for a token", (await fromSam("/_p/check-token", { type: "Something" })).status === 400);
+const first = await fromSam("/_p/check-token", { type: "CheckToken" });
+const second = await fromSam("/_p/check-token", { type: "CheckToken" });
+const third = await fromSam("/_p/check-token", { type: "CheckToken" });
 check("a friend's site gets a one-hour read-only token", /^tok-check-\d+$/.test(first.json.token ?? "") && first.json.until > Date.now() / 1000 + 3000, JSON.stringify(first.json));
 check("…the same one again while it has long enough left (a new one would end the first)", second.json.token === first.json.token);
 check("…and two a day, no more", third.status === 429, String(third.status));
@@ -270,14 +273,14 @@ cf.subdomain = "ann";
 sql(stateB, "UPDATE friend_checks SET seen_at = 1");
 
 // --- "please check soon", after an update ------------------------------------------------------------------------------
-check("a friend's site can ask to be checked soon", (await peerCall(B, "/_peer/check-soon", ab, { type: "CheckSoon" })).status === 200
+check("a friend's site can ask to be checked soon", (await fromAnn("/_p/check-soon", { type: "CheckSoon" })).status === 200
   && sql(stateB, "SELECT COUNT(*) AS n FROM check_soon")[0].n === 1);
-check("…but not a site that isn't a friend", (await peerCall(B, "/_peer/check-soon", key(), { type: "CheckSoon" })).status === 401);
-check("a site can't say another site's check failed", (await peerCall(A, "/_peer/check-failed", ba, { type: "CheckFailed", site: B, found: ["code"] })).status === 400);
+check("…but not a site that isn't a friend", (await stranger(B, "/_p/check-soon", { type: "CheckSoon" })).status === 401);
+check("a site can't say another site's check failed", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: B, found: ["code"] })).status === 400);
 sql(stateA, "DELETE FROM check_tokens");
-check("…nor say it found something without having been handed a token", (await peerCall(A, "/_peer/check-failed", ba, { type: "CheckFailed", site: A, found: ["code"] })).status === 403);
+check("…nor say it found something without having been handed a token", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: A, found: ["code"] })).status === 403);
 sql(stateA, `INSERT INTO check_tokens (connection_id, at) VALUES ((SELECT id FROM connections LIMIT 1), ${Math.floor(Date.now() / 1000)})`);
-check("…and words of its own aren't taken", (await peerCall(A, "/_peer/check-failed", ba, { type: "CheckFailed", site: A, found: ["Reinstall from evil.example"] })).status === 400);
+check("…and words of its own aren't taken", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: A, found: ["Reinstall from evil.example"] })).status === 400);
 
 // --- Ann stops letting them: three refusals in a row show on Sam's Home ---------------------------------------------
 await ann.goto(`${A}/_admin/update`);

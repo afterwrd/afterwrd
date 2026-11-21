@@ -33,8 +33,6 @@ ${role ? `<p class="meta">Upload one here, or open any of your photos and press 
   <ul class="picked" hidden></ul>
   <label class="chip pick"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>
     <span>${role ? "Choose a photo" : "Choose photos"}</span><input type="file" accept="image/*" ${role ? "" : "multiple"} class="hidden"></label>
-  <label class="check"><input type="checkbox" name="share" ${role ? "" : "checked"}> <span>Also share it as a post, so friends see it on their Home</span></label>
-  <textarea name="text" rows="2" maxlength="5000" placeholder="Say something about it (optional)" aria-label="Say something"></textarea>
   <p class="error" role="alert"></p>
   <div class="actions"><span class="status meta" role="status"></span><button class="post">${role ? "Use this photo" : "Add photos"}</button></div>
 </form>

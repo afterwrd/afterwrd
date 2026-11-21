@@ -1,6 +1,6 @@
 // The owner's photos and albums made on the site, and choosing a profile picture and cover:
 //   GET  /_admin/photos/add?album=<id>&for=profile|cover   the page for adding photos (public/static/add-photos.js)
-//   POST /_admin/photos                     {album: <id>|"new", name?, description?, text?, share?, role?, photos}
+//   POST /_admin/photos                     {album: <id>|"new", name?, description?, role?, photos}
 //   POST /_admin/albums/<id>/edit           name, description (a form)
 //   POST /_admin/albums/<id>/delete         (a form)
 //   POST /_admin/photos/<id>/delete         (a form)
@@ -9,11 +9,10 @@
 // photos posted without an album go) is neither renamed nor deleted.
 import { profileToSign } from "./ownprofile.js";
 import { safeNext } from "./auth.js";
-import { addPhotos, checkPhotos, newPost, photoCommentsGone, removeUnusedFiles, roleAlbum, ROLE_ALBUMS } from "./posts.js";
+import { addPhotos, checkPhotos, photoCommentsGone, removeUnusedFiles, roleAlbum, ROLE_ALBUMS } from "./posts.js";
 import { versionsGone } from "./edits.js";
 import { html, json, now, pageData, Refusal } from "./util.js";
 import { addPage } from "./views/photos.js";
-import { notifyNewPost } from "./notify.js";
 
 const MAX_BATCH = 50;
 const ROLES = ["profile", "cover"];
@@ -157,7 +156,8 @@ export async function deletePhoto(env, photoId) {
 
 /**
  * Adds uploaded photos to an album here (a new one, one made before, or, for a profile picture or cover (`role`),
- * the album kept for those), and optionally shares them as a post. Returns { album } (its id) and { role }.
+ * the album kept for those). Friends see them in that album (share.js), not on Home: only signed posts are on Home.
+ * Returns { album } (its id) and { role }.
  */
 export async function addToAlbum(env, origin, body) {
   const db = env.DB;
@@ -183,20 +183,11 @@ export async function addToAlbum(env, origin, body) {
     [albumId, name] = [found.id, found.name];
   }
 
-  // Optionally as a post too, so friends see it on their Home.
-  const text = clean(body.text, 5000);
-  const share = body.share === true;
-  const n = photos.length;
-  const title = role === "profile" ? "Updated their profile picture." : role === "cover" ? "Updated their cover photo."
-    : `Added ${n} photo${n === 1 ? "" : "s"} to ${name}.`;
-  const [post, postKey] = share ? newPost(db, { text: text || null, title }) : [null, null];
   await db.batch([
-    ...(post ? [post] : []),
     ...(role ? [roleAlbum(db, role)] : []),
-    ...addPhotos(db, photos, { albumId, role, postKey }),
+    ...addPhotos(db, photos, { albumId, role }),
     ...(role ? [db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(`${role}_hash`, photos[0].hash)] : []),
   ]);
-  if (share) await notifyNewPost(env, origin, postKey);
   albumId ??= (await db.prepare("SELECT id FROM albums WHERE role = ?").bind(role).first()).id;
   return { album: albumId, role };
 }

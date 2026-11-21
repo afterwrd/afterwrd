@@ -166,8 +166,8 @@ check("it has the rows of every table that moves", ["posts", "media", "albums", 
   .every((t) => zip.list.some((f) => f.endsWith(`/site/${t}.json`))));
 check("…and the thumbnails", zip.list.some((f) => f.endsWith(`/site/thumbs/${photo.thumb_hash}.jpg`)));
 const rowsText = zip.list.filter((f) => f.includes("/site/") && f.endsWith(".json")).map((f) => zip.read(f.slice(f.indexOf("/") + 1)).toString()).join("");
-const keys = sql(stateA, "SELECT their_key, key_hash FROM connections")[0];
-check("no keys in the site's rows", !rowsText.includes(keys.their_key) && !rowsText.includes(keys.key_hash) && !rowsText.includes("key_hash")
+const hosting = sql(stateA, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value;
+check("no keys in the site's rows", !rowsText.includes(hosting) && !rowsText.includes("hosting_key")
   && !rowsText.includes("challenge_key") && !rowsText.includes("media_key"));
 
 // The new site.

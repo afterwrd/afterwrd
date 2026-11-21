@@ -178,7 +178,8 @@ run_forged() {
   echo "== forged"
   node "$WORKER/scripts/asset-hashes.mjs" # the static file hashes src/static.js bundles
   "$WORKER/node_modules/.bin/esbuild" "$HERE/unit-entry.js" --bundle --format=esm --platform=node --loader:.json=json \
-    --loader:.sql=text --alias:cloudflare:workers="$HERE/workers-stub.js" --outfile="$OUT/bundle.mjs" --log-level=error
+    --loader:.sql=text --alias:cloudflare:workers="$HERE/workers-stub.js" --outfile="$OUT/bundle.mjs" --log-level=error \
+    || { echo "FAIL  the code for the unit tests didn't build (see above)"; FAILED=1; return; }
   (cd "$HERE" && node forged.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node keys.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node lists.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1

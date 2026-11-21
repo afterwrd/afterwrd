@@ -11,7 +11,6 @@ import { handleConnections } from "./connect.js";
 import { handleExport } from "./export.js";
 import { handleImport } from "./importer.js";
 import { handlePhotos, headerMe } from "./photos.js";
-import { handlePosts } from "./posts.js";
 import { handleEvents } from "./events.js";
 import { handleUpdate } from "./update.js";
 import { recoveredSeen, recovering } from "./recover.js";
@@ -35,7 +34,6 @@ export async function handleAdmin(request, env, url, owner) {
     return handleUpdate(request, env, url, owner);
   }
   if (url.pathname.startsWith("/_admin/checks/")) return handleCheckAdmin(request, env, url);
-  if (url.pathname === "/_admin/posts" || url.pathname.startsWith("/_admin/posts/")) return handlePosts(request, env, url);
   if (url.pathname === "/_admin/events" || url.pathname.startsWith("/_admin/events/")) return handleEvents(request, env, url);
   if (/^\/_admin\/(photos|albums|profile)(\/|$)/.test(url.pathname)) return handlePhotos(request, env, url, owner);
   if (url.pathname === "/_admin/export" || url.pathname.startsWith("/_admin/export/")) return handleExport(request, env, url, owner);

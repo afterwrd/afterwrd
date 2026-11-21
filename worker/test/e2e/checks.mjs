@@ -9,6 +9,7 @@ import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { sql, setUpSigning } from "./helpers.mjs";
+import { standInIdentity } from "./standin.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BASE = "http://localhost:8787";
@@ -118,13 +119,17 @@ const direct = createServer((req, res) => {
   if (req.url === "/_version") { res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify({ id: "v-1" })); }
   res.statusCode = req.url.startsWith("/static/") ? 200 : 404; res.end();
 });
-const toldChecked = []; // what this site told the friend's site after its checks (POST /_peer/checked)
+const toldChecked = []; // what this site told the friend's site after its checks (POST /_p/checked)
+// The friend's site has an identity of its own, as a real one does, which this site checks its calls against.
+const friend = await standInIdentity(FRIEND_SITE);
 const friendSite = createServer((req, res) => {
-  if (req.method === "POST" && req.url === "/_peer/checked") {
+  if (req.method === "POST" && req.url === "/_p/checked") {
     let body = "";
     req.on("data", (c) => { body += c; });
-    return req.on("end", () => { toldChecked.push({ auth: req.headers.authorization, body: JSON.parse(body) }); res.setHeader("Content-Type", "application/json"); res.end("{}"); });
+    return req.on("end", () => { toldChecked.push({ from: req.headers["afterwrd-from"], signed: req.headers["signature-input"] ?? "", body: JSON.parse(body) });
+      res.setHeader("Content-Type", "application/json"); res.end("{}"); });
   }
+  if (req.url === "/.well-known/afterwrd") { res.setHeader("Content-Type", "application/json"); return res.end(friend.wellKnown); }
   if (req.url === "/_version") { res.setHeader("Content-Type", "application/json"); return res.end(JSON.stringify({ id: "v-1" })); }
   res.statusCode = 302; res.setHeader("Location", "/_auth/login"); res.end();
 });
@@ -199,15 +204,15 @@ check("…or on Add a friend", !(await textOf("/_admin/connections")).includes("
 check("…but Update says it hasn't been", (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
 
 // The site being checked is a friend's: once a check passes, its site is told (and only then).
-const THEIR_KEY = "k".repeat(43); // what this site sends when calling theirs
-const OUR_KEY = "o".repeat(43); // what theirs sends when calling this one
-sql(`INSERT INTO connections (origin, name, their_key, key_hash, created_at, connected_at, approved_at)
-  VALUES ('${FRIEND_SITE}', 'Bob Example', '${THEIR_KEY}', '${sha(OUR_KEY)}', 1, 1, 1)`);
+sql(`INSERT INTO connections (origin, name, identity, created_at, connected_at, approved_at)
+  VALUES ('${FRIEND_SITE}', 'Bob Example', '${friend.person}', 1, 1, 1)`);
+const ownPerson = sql("SELECT person FROM own_identity")[0].person;
 
 // --- a genuine site ----------------------------------------------------------------------------------------------
 const good = await runCheck("match");
-check("a friend's site that passes is told it was checked, with this site's key for it", toldChecked.length === 1
-  && toldChecked[0].auth === `Bearer ${THEIR_KEY}` && JSON.stringify(toldChecked[0].body) === JSON.stringify({ type: "Checked", site: FRIEND_SITE, version: "9.9.9" }),
+check("a friend's site that passes is told it was checked, in a call this site signs", toldChecked.length === 1
+  && toldChecked[0].from === BASE && toldChecked[0].signed.includes(`keyid="${ownPerson}"`)
+  && JSON.stringify(toldChecked[0].body) === JSON.stringify({ type: "Checked", site: FRIEND_SITE, version: "9.9.9" }),
   JSON.stringify(toldChecked));
 check("the owner's message carries a one-time check link", /\/_check\/[\w-]{43}$/.test(good.checkLink) && good.message.includes("read-only"));
 check("the friend's page says what will happen, without signing in", good.before.includes("Ann Example would like to check your site") && good.before.includes("can't change anything"));
@@ -342,9 +347,12 @@ check("a made-up link says so", (await fetch(`${BASE}/_check/${"a".repeat(43)}`)
 
 
 // --- this site being told it was checked -------------------------------------------------------------------------
-const tell = (body, key = OUR_KEY) => fetch(`${BASE}/_peer/checked`, { method: "POST",
-  headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-check("only a friend can say they checked this site", (await tell({ type: "Checked", site: BASE, version: "9.9.9" }, "x".repeat(43))).status === 401);
+const tell = async (body, signed = true) => {
+  const text = JSON.stringify(body);
+  const headers = signed ? await friend.signedHeaders("POST", `${BASE}/_p/checked`, text) : { "Afterwrd-From": FRIEND_SITE };
+  return fetch(`${BASE}/_p/checked`, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: text });
+};
+check("only a friend can say they checked this site", (await tell({ type: "Checked", site: BASE, version: "9.9.9" }, false)).status === 401);
 check("…and only of this site", (await tell({ type: "Checked", site: "http://localhost:8789", version: "9.9.9" })).status === 400
   && (await textOf("/_admin/update", "#last-checked")) === "Your site hasn't been checked yet.");
 check("a friend's site saying it checked this one is kept", (await tell({ type: "Checked", site: BASE, version: "9.9.9" })).status === 200);

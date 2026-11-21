@@ -6,7 +6,7 @@ import { MAX_GROUP_TEXT } from "../groups.js";
 import { fmtAgo, fmtDatetime, linkify } from "./format.js";
 
 import { icon } from "./nav.js";
-import { host } from "../peers.js";
+import { host } from "../sites.js";
 import { html, raw } from "./html.js";
 import { groupEventBlock } from "./events.js";
 import { faceFor, notFriend, remoteMedia } from "./friends.js";

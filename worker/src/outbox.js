@@ -1,19 +1,16 @@
-// Notes waiting to go to other sites (notify.js), sent a batch at a time by this Durable Object's alarm (and, apart
-// from them, in a separate object of this class named "vault", the few secrets the site keeps for automatic updates:
-// auto.js, the vault table below): to friends'
-// sites (POST /_peer/notify) and, in a group's Worker, to its members' sites (POST /_member/notify). One request
-// may only call 50 other sites on Cloudflare's free plan; batches of 40, one after another, let a post reach any
-// number of friends. A site that can't be reached is tried again later (after 1, 5 and 30 minutes, then 2 and 6
-// hours) and then given up on; a site that says no (it's disconnected, or doesn't want the note) isn't asked again.
-// Notes hold the connection or member, not its key: the key is looked up in D1 when sending, so a disconnect (or a
-// member leaving) stops them at once. The same alarm also fetches friends' newest posts again for Home, with whatever
-// calls the notes leave (feed.js refreshCopies).
+// Notes waiting to go to other sites, sent a batch at a time by this Durable Object's alarm (and, apart from them, in a
+// separate object of this class named "vault", the few secrets the site keeps for automatic updates: auto.js, the vault
+// table below): fat notes about signed posts to friends' sites (notes.js: POST /_p/notes, signed) and, in a group's
+// Worker, notes to its members' sites (notify.js: POST /_member/notify, with the member's key). One request may only
+// call 50 other sites on Cloudflare's free plan; batches of 40, one after another, let a post reach any number of
+// friends. A site that can't be reached is tried again later and then given up on; a site that says no (it's
+// disconnected, or doesn't want the note) isn't asked again. Notes hold the connection or member, not its address or
+// key: those are looked up when sending, so a disconnect (or a member leaving) stops them at once.
 //
 // One more object of this class, named "site", holds the site's whole database and answers its requests, right next
 // to the data (docs/site-object-plan.md). The other objects reach that database through it (sqlite.js remote).
 import { DurableObject } from "cloudflare:workers";
 import { handle, HEADERS } from "./app.js";
-import { refreshCopies } from "./feed.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
 import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
@@ -31,19 +28,16 @@ const DONE = Number.MAX_SAFE_INTEGER; // a fat note's `due` once everyone's had 
 
 export const outbox = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
 
-// Who each kind of note goes to: its table here, how to find their site and key in D1, and where to send it.
-const FRIENDS = "SELECT id, origin, their_key FROM connections WHERE approved_at IS NOT NULL AND id IN";
+// Who each kind of keyed note goes to: its table here, how to find their site and key, and where to send it. (Groups'
+// only, until groups are signed too: docs/signed-conversations.md, step 6.)
 const MEMBERS = "SELECT id, origin, their_key FROM group_members WHERE approved_at IS NOT NULL AND id IN";
 const KINDS = {
-  // Invitations to the owner's events (events.js): what becomes of each is kept with whoever it's for (post_audience).
-  invites: { column: "connection_id", more: "post_id INTEGER NOT NULL,", path: "/_peer/notify", sql: FRIENDS, invite: true },
-  notes: { column: "connection_id", path: "/_peer/notify", sql: FRIENDS },
   member_notes: { column: "member_id", path: "/_member/notify", sql: MEMBERS },
 };
-// Queues there once were, for messages between friends and in groups' chats (gone in 0.47.0), and friends to fetch
-// again a row each (refreshes, until 0.59: now refresh_queue): anything still waiting in them goes, unsent (a refresh
-// is asked for again the next time Home opens).
-const GONE = ["messages", "group_messages", "member_messages", "refreshes"];
+// Queues there once were: for messages between friends and in groups' chats (gone in 0.47.0); friends to fetch again
+// (refreshes, then refresh_queue); and notes and invitations to friends' sites before posts were signed (notes,
+// invites: gone in step 4e). Anything still waiting in them goes, unsent.
+const GONE = ["messages", "group_messages", "member_messages", "refreshes", "refresh_queue", "notes", "invites"];
 
 /** While the site's database is being moved into its object (sitecopy.js): a page or a JSON error, and nothing done. */
 function moving(request) {
@@ -73,9 +67,9 @@ export class Outbox extends DurableObject {
     const counted = measured(env);
     this.env = { ...counted, DB: remote(counted) };
     for (const table of GONE) this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
-    for (const [table, { column, more = "" }] of Object.entries(KINDS)) {
+    for (const [table, { column }] of Object.entries(KINDS)) {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ${column} INTEGER NOT NULL, ${more} body TEXT NOT NULL,
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ${column} INTEGER NOT NULL, body TEXT NOT NULL,
         tries INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
       )`);
     }
@@ -84,10 +78,6 @@ export class Outbox extends DurableObject {
     // a new version), and the key its own update steps carry. Here rather than in D1, so they're never in an export, a
     // restored database or anything a page reads.
     this.sql.exec("CREATE TABLE IF NOT EXISTS vault (name TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    // Friends whose newest posts are to be fetched again for Home (feed.js refreshCopies), each once however often asked,
-    // in the order asked: one row, the list of them. A row for each friend was two rows written for every friend each
-    // time Home opened (queued, then taken): with hundreds of friends, a good share of a day's writes.
-    this.sql.exec("CREATE TABLE IF NOT EXISTS refresh_queue (id INTEGER PRIMARY KEY CHECK (id = 1), ids TEXT NOT NULL)");
     // Fat notes about signed posts (notes.js, afterwrd 2): one row per note, not per recipient. `audience` "friends"
     // goes to every friend in turn (`cursor`: the last connection id sent to); otherwise `recipients` lists them
     // (`cursor`: how many have been sent). A recipient that couldn't be reached gets a row in note_retries.
@@ -163,27 +153,6 @@ export class Outbox extends DurableObject {
     return done;
   }
 
-  /** The friends waiting to have their posts fetched again (refresh_queue), oldest first. */
-  queued() {
-    const row = this.sql.exec("SELECT ids FROM refresh_queue WHERE id = 1").toArray()[0];
-    return row ? /** @type {number[]} */ (JSON.parse(String(row.ids))) : [];
-  }
-
-  /** Sets the friends waiting to have their posts fetched again: one row written. */
-  setQueued(ids) {
-    if (ids.length) this.sql.exec("INSERT INTO refresh_queue (id, ids) VALUES (1, ?) ON CONFLICT (id) DO UPDATE SET ids = excluded.ids", JSON.stringify(ids));
-    else this.sql.exec("DELETE FROM refresh_queue WHERE id = 1");
-  }
-
-  /** Has these friends' newest posts fetched again soon, in the background, for Home (feed.js). */
-  async refresh(connectionIds) {
-    const waiting = this.queued();
-    const have = new Set(waiting);
-    const more = [...new Set(connectionIds.map(Number))].filter((id) => Number.isSafeInteger(id) && !have.has(id));
-    if (more.length) this.setQueued([...waiting, ...more]);
-    await this.wake(Date.now());
-  }
-
   /** A secret kept here (auto.js), or null. */
   secret(name) {
     return this.sql.exec("SELECT value FROM vault WHERE name = ?", name).toArray()[0]?.value ?? null;
@@ -204,24 +173,11 @@ export class Outbox extends DurableObject {
     await this.wake(Date.now());
   }
 
-  /** Queues `body` for each connection id (friends' sites), and sees that the alarm will send it. */
-  send(connectionIds, body) {
-    return this.queue("notes", connectionIds, body);
-  }
-
   /** Queues a fat note about a signed post (notes.js): {origin, kind, item, fp?, audience? | recipients?}. */
   async sendNote({ origin, kind, item, fp = null, audience = null, recipients = null }) {
     const at = Date.now();
     this.sql.exec("INSERT INTO fat_notes (origin, kind, item, fp, audience, recipients, due) VALUES (?, ?, ?, ?, ?, ?, ?)",
       origin, kind, item, fp, audience, recipients && JSON.stringify(recipients), at);
-    await this.wake(at);
-  }
-
-  /** Queues an invitation to the event in post `postId` (events.js) for each connection id, noting what becomes of it. */
-  async sendInvites(connectionIds, postId, body) {
-    const text = JSON.stringify(body);
-    const at = Date.now();
-    for (const id of connectionIds) this.sql.exec("INSERT INTO invites (connection_id, post_id, body, due) VALUES (?, ?, ?, ?)", id, postId, text, at);
     await this.wake(at);
   }
 
@@ -257,20 +213,7 @@ export class Outbox extends DurableObject {
     let room = BATCH;
     room -= await this.sendNotes(room);
     for (const table of Object.keys(KINDS)) room -= await this.sendDue(table, room);
-    // Then, with the calls left, friends' posts to fetch again (notes first: they're what tells friends' sites).
-    // A refresh is due from when it was asked for (refresh()): the oldest first, as many as there's room for. The rest
-    // stay waiting, written back before fetching, so anything asked for meanwhile joins them.
-    let waiting = Infinity;
-    if (room > 0) {
-      const all = this.queued();
-      const ids = all.slice(0, room);
-      if (ids.length) {
-        this.setQueued(all.slice(room));
-        await refreshCopies(this.env, ids).catch((error) => console.error("Refreshing friends' posts:", error.message));
-      }
-    }
-    if (this.queued().length) waiting = Date.now();
-    const next = Math.min(waiting, ...[...Object.keys(KINDS), "fat_notes", "note_retries"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t} WHERE due < ?`, DONE).one().due ?? Infinity));
+    const next = Math.min(...[...Object.keys(KINDS), "fat_notes", "note_retries"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t} WHERE due < ?`, DONE).one().due ?? Infinity));
     if (next !== Infinity) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
   }
 
@@ -362,18 +305,7 @@ export class Outbox extends DurableObject {
     const ids = [...new Set(due.map((n) => n[column]))];
     const { results } = ids.length ? await this.env.DB.prepare(`${sql} (${ids.map(() => "?").join(",")})`).bind(...ids).all() : { results: [] };
     const recipients = new Map(results.map((c) => /** @type {[any, any]} */ ([c.id, c])));
-    // An invitation taken back since (or whose event has gone) isn't sent: only those still invited are.
-    const invited = !KINDS[table].invite || !due.length ? null : new Set((await this.env.DB.prepare(
-      `SELECT post_id || ':' || connection_id AS k FROM post_audience WHERE post_id IN (SELECT value FROM json_each(?))`)
-      .bind(JSON.stringify([...new Set(due.map((n) => n.post_id))])).all()).results.map((r) => r.k));
-
-    // What became of each invitation, saved together at the end: one call to the site's object, not one each.
-    const deliveries = [];
     await Promise.all(due.map(async (note) => {
-      if (invited && !invited.has(`${note.post_id}:${note.connection_id}`)) {
-        this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, note.id);
-        return;
-      }
       const to = recipients.get(note[column]);
       let delivered = false;
       let again = Boolean(to);
@@ -391,12 +323,7 @@ export class Outbox extends DurableObject {
       const finished = delivered || !again || note.tries >= RETRY_SECONDS.length;
       if (finished) this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, note.id);
       else this.sql.exec(`UPDATE ${table} SET tries = tries + 1, due = ? WHERE id = ?`, at + RETRY_SECONDS[note.tries] * 1000, note.id);
-      if (KINDS[table].invite && finished) {
-        deliveries.push(this.env.DB.prepare("UPDATE post_audience SET delivery = ? WHERE post_id = ? AND connection_id = ?")
-          .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.post_id, note.connection_id));
-      }
     }));
-    if (deliveries.length) await this.env.DB.batch(deliveries);
     return due.length;
   }
 }

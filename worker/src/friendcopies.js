@@ -20,6 +20,9 @@ import { messagePage } from "./views/pages.js";
 import { html, now } from "./util.js";
 
 export const PULL_SECONDS = 3600; // how often a friend's site is asked (docs/signed-conversations.md decision 12)
+// A friend's site that hasn't answered for a day (or says this site isn't connected) stops being mentioned on Home,
+// and Friends says so instead, with a way to remove them (views/friends.js). It's still asked, once an hour.
+export const QUIET_SECONDS = 86_400;
 const PAGES = 3;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
@@ -32,20 +35,80 @@ const lookupsWith = (env, delegations) => ({
   delegationOf: async (key) => delegations?.[key] ?? null,
 });
 
+/** @type {(db: D1Database, id: unknown) => Promise<Row<"connections"> | null>} */
+export const connectionById = (db, id) => db.prepare("SELECT * FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL")
+  .bind(Number(id) || 0).first();
+
+/**
+ * Remembers a friend's profile picture link (and when it stops working), from what their site just sent.
+ * @param {D1Database} db
+ * @param {Row<"connections">} connection
+ * @param {{ thumbSrc?: string } | null | undefined} avatar
+ */
+export function rememberPicture(db, connection, avatar) {
+  const exp = Number(/[?&]exp=(\d+)/.exec(avatar?.thumbSrc ?? "")?.[1]) || null;
+  if (!exp || connection.avatar_url === avatar.thumbSrc) return null;
+  connection.avatar_url = avatar.thumbSrc;
+  connection.avatar_exp = exp;
+  return db.prepare("UPDATE connections SET avatar_url = ?, avatar_exp = ? WHERE id = ?").bind(avatar.thumbSrc, exp, connection.id);
+}
+
+/**
+ * Whether the owner here asked to be friends and is still waiting for them to approve: their site has been asked, is
+ * there, and has never shared anything (noteAnswer). Home says so, and asks their site each time it opens (pullNew).
+ */
+export const waitingFor = (c) => Boolean(c.items_checked_at && !c.reached_at && !c.missing_since && !c.said_no);
+
+/** Whether a friend's site has gone quiet, or says this site isn't connected any more: shown on Friends, not Home. */
+export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && c.missing_since <= at - QUIET_SECONDS));
+
+/**
+ * Notes how a friend's site just answered (`error`: what callFriend threw, if anything) on `connection` itself, and
+ * returns the statement that keeps it. 401 means their site doesn't know this one (calls.js friendCalling): they
+ * removed the owner here. 403 means their owner hasn't approved the owner here yet: their site is there, so it isn't
+ * missing (waitingFor). Any other error (or none reaching it: status 0) is their site not answering.
+ * @param {D1Database} db
+ * @param {Row<"connections">} connection
+ * @param {any} [error]
+ * @param {number} [at]
+ */
+export function noteAnswer(db, connection, error = null, at = now()) {
+  Object.assign(connection, !error ? { reached_at: at, missing_since: null, said_no: 0 }
+    : error.status === 403 ? { missing_since: null, said_no: 0 }
+    : { missing_since: connection.missing_since ?? at, said_no: error.status === 401 ? 1 : 0 });
+  return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
+    .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
+}
+
 /**
  * Asks a friend's site for the posts that changed since this site last asked, and keeps them, each post's first record
  * checked against their identity (it must be theirs, on their site). Returns how many came, or null if their site
- * couldn't be asked (not set up for signed posts yet, or away).
+ * couldn't be asked (not set up for signed posts yet, or away). Either way it's noted when it was asked, so a site
+ * that's away isn't asked again for an hour (Home doesn't wait for it), and whether it answered (noteAnswer). A site
+ * that says it doesn't know this one any more (they removed the owner here) has its posts forgotten at once.
  */
 export async function pullItems(env, from, connection) {
+  const failed = async (error) => {
+    await env.DB.batch([
+      noteAnswer(env.DB, connection, error),
+      env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(now(), connection.id),
+      ...(error.status === 401 ? [env.DB.prepare("DELETE FROM copies WHERE connection_id = ?").bind(connection.id)] : []),
+    ]);
+    return null;
+  };
   const person = await friendPerson(env, connection);
-  if (!person) return null;
+  if (!person) return failed({ status: 0 });
   let since = Number(connection.items_since ?? 0);
   let count = 0;
   for (let page = 0; page < PAGES; page++) {
     let data;
-    try { data = await callFriend(env, from, String(connection.origin), `/_p/items?since=${since}`); } catch { return count || null; }
-    const statements = [];
+    try {
+      data = await callFriend(env, from, String(connection.origin), `/_p/items?since=${since}`);
+    } catch (error) {
+      if (page === 0) return failed(error);
+      return count;
+    }
+    const statements = [noteAnswer(env.DB, connection)];
     for (const item of Array.isArray(data.items) ? data.items : []) {
       const kept = await keepItem(env, connection, person, item, data.delegations);
       if (!kept) continue;
@@ -128,12 +191,13 @@ export async function pullFriends(env, from) {
 }
 
 /**
- * Asks, while Home waits, the sites of friends whose posts this site has never had (as Home always has with no copy it
- * can show), for at most `ms`: everyone else is asked after the page has gone (pullFriends).
+ * Asks, while Home waits, the sites of friends whose posts this site has never had: never asked, or not yet approving
+ * the owner here (waitingFor), so their posts show as soon as they do. For at most `ms`: everyone else is asked after
+ * the page has gone (pullFriends).
  */
 export async function pullNew(env, from, ms = 4000) {
   const { results } = await env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
-    AND items_checked_at IS NULL LIMIT 10`).all();
+    AND (items_checked_at IS NULL OR (reached_at IS NULL AND missing_since IS NULL AND said_no = 0)) LIMIT 10`).all();
   if (!results.length) return;
   await Promise.race([Promise.all(results.map((c) => pullItems(env, from, c).catch(() => null))), new Promise((r) => setTimeout(r, ms))]);
 }

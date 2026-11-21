@@ -4,9 +4,10 @@ import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
 
 import { icon } from "./nav.js";
-import { host } from "../peers.js";
+import { host } from "../sites.js";
 import { html, raw } from "./html.js";
-import { askedBecause, friendFace, introductionCard, remoteCard } from "./friends.js";
+import { askedBecause, friendFace, introductionCard } from "./friends.js";
+import { gone, waitingFor } from "../friendcopies.js";
 import { MEMORIES, page } from "./layout.js";
 import { composer, postCard } from "./parts.js";
 
@@ -40,13 +41,16 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], feed, onThisDay, friends, newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
     ...friendOwn.map((item) => ({ at: item.created_at, card: friendItemCard(ctx, item) })),
-    ...feed.posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, p.connection, p) })),
   ].sort((a, b) => b.at - a.at);
+  // A friend whose site has gone quiet for a day, or says it doesn't know this one, is on Friends instead (friendcopies.js).
+  const friends = all.filter((c) => !gone(c));
+  const unreachable = friends.filter((c) => c.missing_since);
+  const waiting = friends.filter(waitingFor);
   return page(ctx, "Home", html`
 <div class="home">
   <section class="stream" aria-label="Posts">
@@ -160,9 +164,10 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], feed, onThisDa
       });
     </script>`}
     ${composer()}
-    ${feed.unreachable.length > 2
-      ? html`<p class="notice">Couldn't reach ${feed.unreachable.length} friends' sites just now, so their newest posts may be missing.</p>`
-      : feed.unreachable.map((u) => html`<p class="notice">Couldn't load ${u.connection.name}'s posts: ${u.error}</p>`)}
+    ${unreachable.length > 2
+      ? html`<p class="notice">Couldn't reach ${unreachable.length} friends' sites lately, so their newest posts may be missing.</p>`
+      : unreachable.map((c) => html`<p class="notice">Couldn't reach ${c.name}'s site lately, so their newest posts may be missing.</p>`)}
+    ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
     ${stream.length ? stream.map((s) => s.card) : html`<div class="empty"><p>Nothing here yet. Write your first post above.</p></div>`}
   </section>
   <aside class="side">

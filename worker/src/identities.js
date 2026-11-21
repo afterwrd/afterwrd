@@ -10,7 +10,7 @@
 // different versions: someone holding one of its keys is fighting the owner, so nothing it signs is trusted.
 import { forked, readIdentity } from "./identity.js";
 import { checkCall } from "./signedcalls.js";
-import { siteOrigin } from "./peers.js";
+import { siteOrigin } from "./sites.js";
 import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { checkDelegation } from "./identity.js";
 import { json, now } from "./util.js";

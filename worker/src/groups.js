@@ -57,7 +57,7 @@ import { mediaStore } from "./media.js";
 import { notifyEventChange, notifyGroupComment, notifyGroupMentions } from "./notify.js";
 import { HERE, keptMentions, mentionTags, noteMentions, readMentions } from "./mentions.js";
 import { groupLinkPage, messagePage } from "./views/pages.js";
-import { callSite, KEY_RE, PROTOCOL, siteOrigin } from "./peers.js";
+import { callSite, KEY_RE, PROTOCOL, siteOrigin } from "./sites.js";
 import { removeUnusedFiles } from "./posts.js";
 import { signedFile } from "./share.js";
 import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";

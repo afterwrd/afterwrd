@@ -1,16 +1,11 @@
-// Reading a connected friend's site from this one: their posts and photos (and their newest posts, for Home) come as
-// ActivityStreams from their /_peer endpoints (share.js on their side). Everything is checked here and turned into
-// plain shapes for the pages; anything malformed is dropped, and every address must be on their own site.
-// Photos and videos are shown from the signed links their site gives ("afterwrd:fetch"), which the browser loads
-// straight from there.
-import { actorId, POST_KEY_RE, seconds } from "../public/static/activity.js";
-import { MAX_COMMENT } from "./archive/comments.js";
-import { MAX_POST_TEXT } from "./edits.js";
+// Reading a friend's shared Facebook archive and albums from this one: they come as ActivityStreams from their /_p/
+// routes, in signed calls (friendcalls.js and share.js on their side). Everything is checked here and turned into plain
+// shapes for the pages; anything malformed is dropped, and every address must be on their own site. (Their signed posts
+// come by friendcopies.js.) Photos and videos are shown from the signed links their site gives ("afterwrd:fetch"),
+// which the browser loads straight from there.
+import { POST_KEY_RE, seconds } from "../public/static/activity.js";
 import { HASH_RE } from "./media.js";
-import { callSite, siteOrigin } from "./peers.js";
-import { parsePoll } from "./polls.js";
-import { parseSharedEvent } from "./events.js";
-import { noteMentions } from "./mentions.js";
+import { callFriend } from "./calls.js";
 
 const text = (v, max) => (typeof v === "string" && v.length <= max ? v : null);
 const count = (n) => (Number.isSafeInteger(n) && n > 0 ? n : null);
@@ -52,25 +47,8 @@ export function parseEdits(item, created, max) {
   return { edited_at: editedAt, earlier };
 }
 
-/**
- * Comments on something with address `base` (a post's or a photo's), as their site lists them; null if it doesn't
- * take comments (their site sent no `replies`: something from their Facebook download).
- */
-function parseThread(collection, base, site, friendName, env = null) {
-  if (!collection || typeof collection !== "object") return null;
-  const items = Array.isArray(collection?.items) ? collection.items.slice(0, 500) : [];
-  return items.flatMap((c) => {
-    const n = /^#c(\d{1,15})$/.exec((typeof c?.id === "string" && c.id.startsWith(base) && c.id.slice(base.length)) || "");
-    const author = c?.attributedTo;
-    const name = author === actorId(site) ? friendName : text(author?.name, 100);
-    const from = typeof author?.id === "string" && author.id !== actorId(site) ? siteOrigin(author.id.replace(/\/$/, ""), env) : null;
-    const at = seconds(c?.published);
-    return c?.type === "Note" && n && name && text(c.content, MAX_COMMENT) && at !== null
-      ? [{ id: Number(n[1]), name, text: c.content, created_at: at, from, mentions: noteMentions(c, c.content, env), ...parseEdits(c, at, MAX_COMMENT) }] : [];
-  });
-}
-
-export function parseNote(note, site, friendName, env = null) {
+/** One of their Facebook posts, as their site sent it; null if it isn't one. */
+export function parseNote(note, site) {
   const key = own(site, note?.id, "/posts/");
   const created = seconds(note?.published);
   if (note?.type !== "Note" || !POST_KEY_RE.test(key ?? "") || created === null) return null;
@@ -85,16 +63,9 @@ export function parseNote(note, site, friendName, env = null) {
     link_url: link ? text(link.href, 2000) : null,
     place: text(note.location?.name, 300),
     group: text(note.context?.name, 300),
-    // People tagged in a post from their Facebook download (a Mention with no address); mentions have one (below).
+    // People tagged in it on Facebook (a name only).
     tags: (Array.isArray(note.tag) ? note.tag.slice(0, 50) : []).filter((t) => t?.href === undefined).map((t) => text(t?.name, 100)).filter(Boolean),
-    mentions: noteMentions(note, text(note.content, 60_000) ?? "", env),
     photos: attachments.map((m) => parseMedia(m, site)).filter(Boolean),
-    comments: parseThread(note.replies, note.id, site, friendName, env),
-    ...parseEdits(note, created, MAX_POST_TEXT), // earlier words of a post written on afterwrd: no longer than it allows
-    // Their poll, if the post asks one: how many chose what, and what the owner here chose. Never who.
-    poll: note["afterwrd:poll"] === undefined ? null : parsePoll(note["afterwrd:poll"], env),
-    // Their event, if it's one (shown only to those they invited): who's coming, and the owner here's answer.
-    event: note["afterwrd:event"] === undefined ? null : parseSharedEvent(note["afterwrd:event"], env),
   };
 }
 
@@ -107,56 +78,36 @@ function parseActor(actor, site) {
   };
 }
 
-/**
- * A connected site's newest posts, for Home. Its owner's own comments are named as it says (attributedTo), or, when it
- * sends only what's changed, which doesn't say again, as `name` (what the site here calls them).
- */
-export function cleanFeed(data, site, env = null, name = null) {
-  const actor = parseActor(data?.attributedTo, site);
-  const items = Array.isArray(data?.orderedItems) ? data.orderedItems.slice(0, 50) : [];
-  return { ...actor, posts: items.map((n) => parseNote(n, site, actor.name ?? name, env)).filter(Boolean) };
-}
+/** Calls a friend's site (`connection`), signed by this one (`from`: its address). */
+const call = (env, from, connection, path) => callFriend(env, from, connection.origin, path);
 
-/**
- * The keys of a connected site's newest posts, from the addresses it gave with only its changed ones (peers.js feed,
- * afterwrd:newest), newest first; null if that isn't a list of up to 50 different addresses of its own posts.
- */
-export function newestKeys(data, site) {
-  const list = data?.["afterwrd:newest"];
-  if (!Array.isArray(list) || list.length > 50) return null;
-  const keys = list.map((id) => own(site, id, "/posts/"));
-  return keys.every((k) => POST_KEY_RE.test(k ?? "")) && new Set(keys).size === keys.length ? keys : null;
-}
-
-const call = (connection, path) => callSite(connection.origin, path, { key: connection.their_key });
-
-export async function friendPosts(connection, page, env = null) {
-  const data = await call(connection, `/_peer/posts?page=${page}`);
+export async function friendPosts(env, from, connection, page) {
+  const data = await call(env, from, connection, `/_p/posts?page=${page}`);
   const items = Array.isArray(data?.orderedItems) ? data.orderedItems.slice(0, 100) : [];
   const { avatar, cover } = parseActor(data?.attributedTo, connection.origin);
   return {
     avatar, cover,
-    posts: items.map((n) => parseNote(n, connection.origin, connection.name, env)).filter(Boolean),
+    posts: items.map((n) => parseNote(n, connection.origin)).filter(Boolean),
     paging: { page, total: count(data?.totalItems) ?? 0, hasNext: data?.["afterwrd:hasNext"] === true },
   };
 }
 
-/** One of their posts, with its comments; null if their site says it isn't there (or isn't shown to this one). */
-export async function friendPost(connection, key, env = null) {
+/** One of their Facebook posts; null if their site says it isn't there (or isn't shown to this one). */
+export async function friendPost(env, from, connection, key) {
   let data;
   try {
-    data = await call(connection, `/_peer/posts/${key}`);
+    data = await call(env, from, connection, `/_p/posts/${key}`);
   } catch (error) {
     if (error.status === 404) return null;
     throw error;
   }
-  const post = parseNote(data, connection.origin, connection.name, env);
+  const post = parseNote(data, connection.origin);
   if (post?.key !== key) throw new Error("Their site sent something unexpected.");
   return post;
 }
 
-export async function friendAlbums(connection) {
-  const data = await call(connection, "/_peer/albums");
+export async function friendAlbums(env, from, connection) {
+  const data = await call(env, from, connection, "/_p/albums");
   const items = Array.isArray(data?.items) ? data.items.slice(0, 2000) : [];
   return items.flatMap((a) => {
     const key = text(a?.["afterwrd:key"], 20);
@@ -167,8 +118,8 @@ export async function friendAlbums(connection) {
   });
 }
 
-export async function friendAlbum(connection, key, page) {
-  const data = await call(connection, `/_peer/albums/${key}?page=${page}`);
+export async function friendAlbum(env, from, connection, key, page) {
+  const data = await call(env, from, connection, `/_p/albums/${key}?page=${page}`);
   const items = Array.isArray(data?.orderedItems) ? data.orderedItems.slice(0, 500) : [];
   return {
     key, name: text(data?.name, 300) ?? "Album", description: text(data?.summary, 5000),
@@ -178,9 +129,9 @@ export async function friendAlbum(connection, key, page) {
   };
 }
 
-export async function friendPhoto(connection, hash) {
+export async function friendPhoto(env, from, connection, hash) {
   const site = connection.origin;
-  const data = await call(connection, `/_peer/photos/${hash}`);
+  const data = await call(env, from, connection, `/_p/photos/${hash}`);
   const m = parseMedia(data, site);
   if (!m || m.hash !== hash) throw new Error("Their site sent something unexpected.");
   const album = data["afterwrd:album"];
@@ -192,10 +143,9 @@ export async function friendPhoto(connection, hash) {
     } : null,
     prev: neighbour(data["afterwrd:prev"]),
     next: neighbour(data["afterwrd:next"]),
-    post: data["afterwrd:postedWith"] ? parseNote(data["afterwrd:postedWith"], site, connection.name) : null,
+    post: data["afterwrd:postedWith"] ? parseNote(data["afterwrd:postedWith"], site) : null,
     // afterwrd 2: a photo in their signed post (share.js): opened there instead.
     inItem: /^[A-Za-z0-9_-]{43}$/.test(data["afterwrd:item"]?.post ?? "") && Number.isSafeInteger(data["afterwrd:item"].index)
       ? { post: data["afterwrd:item"].post, index: data["afterwrd:item"].index } : null,
-    comments: parseThread(data.replies, `${site}/photos/sha256/${hash}`, site, connection.name),
   };
 }

@@ -1,177 +1,31 @@
-// Notes between connected sites, so a friend's site can say "something new" without asking every site in turn.
-// Queued in the outbox (outbox.js), which sends them in batches to each friend's POST /_peer/notify:
-//   a new post here        {type: "Create", object: {type: "Note", id: <the post's address>, content: <its start>}}
-//                          to every approved connection it's shared with (share.js)
-//   a comment here         {type: "Create", object: {type: "Note", inReplyTo: <the post or photo's address>,
-//                          content, attributedTo: {name}}} to the approved connections whose owners have commented
-//                          on that post or photo and can still see it, apart from the one who wrote it
-// Received (receiveNote, from peers.js): kept in `inbox` only if it's about the sender's own post or photo and, for a
-// comment, only if the owner here has commented on it too. Cut to size, rate-limited, pruned after 60 days, and
-// shown as text: Notifications lists the comments, and open pages count the posts (live.js).
-//
-// Groups work the same way, through POST /_member/notify: a group's Worker sends a comment on one of its posts to the
-// members' sites whose owners wrote that post or commented on it (notifyGroupComment). New posts in a group aren't sent
-// anywhere: members' sites read the group when they open it. A member's site keeps a note in `group_inbox` only if its
+// Notes from a group's Worker to its members' sites, so a member's site can say "something new" without asking every
+// group in turn (until groups are signed too: docs/signed-conversations.md, step 6; friends' notes about signed posts
+// are notes.js). Queued in the outbox (outbox.js), sent through POST /_member/notify: a group's Worker sends a comment on
+// one of its posts to the members' sites whose owners wrote that post or commented on it (notifyGroupComment). New
+// posts in a group aren't sent anywhere: members' sites read the group when they open it. A member's site keeps a note in `group_inbox` only if its
 // owner wrote or commented on that post there (receiveGroupNote). The only other note a group sends is to those going
 // to an event (or who might) when it changes or is called off (notifyEventChange); a member's site keeps it only if
 // its owner still has plans for that event (events_elsewhere).
 //
-// Mentions (mentions.js): a post or comment here that mentions friends who can see it tells each of them, with
-//   {type: "Create", object: {type: "Note", id or inReplyTo, content, attributedTo: {name}, "afterwrd:mention": true,
-//   tag: [Mention…]}}; their site keeps it as kind 'mention', and it may buzz their phones. A group does the same for
-//   the members a post or comment there mentions (or everyone, for @here).
-import { CONTEXT, groupPostId, POST_KEY_RE, postId, targetId } from "../public/static/activity.js";
+// Mentions (mentions.js): a post or comment in a group that mentions members (or everyone, for @here) tells each of them,
+// with {type: "Create", object: {type: "Note", …, "afterwrd:mention": true, tag: [Mention…]}}; their site keeps it as
+// kind 'mention' (or 'here'), and it may buzz their phones.
+import { CONTEXT, groupPostId } from "../public/static/activity.js";
 import { eventObject, eventWhen, hasDate, parseEvent } from "./calendar.js";
 import { dateCopy, sameCopy } from "./membership.js";
 import { outbox } from "./outbox.js";
-import { SHARED_SQL } from "./share.js";
-import { receiveFriendEventNote } from "./events.js";
 import { now } from "./util.js";
-import { HERE, mentionTags } from "./mentions.js";
+import { HERE } from "./mentions.js";
 import { rateWindow } from "./limits.js";
 
 const SNIPPET = 200;
 const KEEP_SECONDS = 60 * 86400;
-const RATE = { count: 60, seconds: 600 }; // notes from one site
+const RATE = { count: 60, seconds: 600 }; // comment notes from one group
 const DAILY = 500;
 // Notes from a group about events the owner's going to: changed or called off. A handful is plenty.
 const EVENT_RATE = { count: 10, seconds: 600, daily: 30 };
 
 const snippet = (text, size = SNIPPET) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, size) : "");
-
-// Queues `note` for each connection; the outbox sends them, a batch at a time, and tries again if a site is down.
-async function send(env, connections, note) {
-  if (connections.length) await outbox(env).send(connections.map((c) => c.id), { "@context": CONTEXT, ...note });
-}
-
-/** Tells the friends a new post here is shared with about it, by its address (posts.key), once it's been made. */
-export async function notifyNewPost(env, origin, key) {
-  const db = env.DB;
-  const post = await db.prepare("SELECT * FROM posts WHERE key = ? AND source = 'afterwrd'").bind(key).first();
-  if (!post) return;
-  const { results } = await db.prepare(`SELECT c.id FROM connections c, posts p
-    WHERE p.id = ?1 AND c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL AND ${SHARED_SQL("c.id")} ORDER BY c.id`).bind(post.id).all();
-  await send(env, results, { type: "Create", object: { type: "Note", id: postId(origin, post.key), content: snippet(post.text || post.title) } });
-}
-
-/**
- * Tells the friends who've commented on `target` here (a post's key, or photo-<sha256>) about a new comment on it,
- * apart from its writer's site, and anyone it's no longer shared with (share.js: the post, or the post a photo came
- * with).
- */
-export async function notifyComment(env, origin, target, { name, text, from = null, mentions = [] }) {
-  // Not to those it mentions: they're told by notifyMentions instead, once.
-  const { results } = await env.DB.prepare(`SELECT DISTINCT c.id FROM connections c
-    JOIN comments s ON s.origin = c.origin AND s.target = ?1
-    WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL AND c.origin != ?2
-      AND c.origin NOT IN (SELECT value FROM json_each(?3))
-      AND NOT EXISTS (SELECT 1 FROM posts p WHERE (p.key = ?1 OR p.id IN (SELECT post_id FROM media WHERE 'photo-' || hash = ?1))
-        AND NOT ${SHARED_SQL("c.id")})
-    ORDER BY c.id`).bind(target, from ?? "", JSON.stringify(mentions.map((m) => m.origin))).all();
-  await send(env, results, { type: "Create", object: { type: "Note", inReplyTo: targetId(origin, target), content: snippet(text),
-    attributedTo: { type: "Person", name: snippet(name, 100) } } });
-}
-
-/**
- * Tells the friends a post or comment here mentions (`mentions`: mentions.js) that it does, if they can see `target`
- * (a post's key, or photo-<sha256>), apart from `from` (a friend who wrote it) and the owner here. `comment`: whether
- * it's a comment on `target` rather than the post itself.
- * @param {any} env
- * @param {string} origin this site
- * @param {string} target
- * @param {{ name: string, text: string, mentions: import("./mentions.js").Mention[], comment?: boolean, from?: string | null }} what
- */
-export async function notifyMentions(env, origin, target, { name, text, mentions, comment = false, from = null }) {
-  const wanted = mentions.map((m) => m.origin).filter((o) => o !== HERE && o !== origin && o !== from);
-  if (!wanted.length) return;
-  const { results } = await env.DB.prepare(`SELECT c.id FROM connections c WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL
-      AND c.origin IN (SELECT value FROM json_each(?2))
-      AND NOT EXISTS (SELECT 1 FROM posts p WHERE (p.key = ?1 OR p.id IN (SELECT post_id FROM media WHERE 'photo-' || hash = ?1))
-        AND NOT ${SHARED_SQL("c.id")})
-    ORDER BY c.id`).bind(target, JSON.stringify(wanted)).all();
-  const address = targetId(origin, target);
-  await send(env, results, { type: "Create", object: { type: "Note", ...(comment ? { inReplyTo: address } : { id: address }),
-    content: snippet(text), attributedTo: { type: "Person", name: snippet(name, 100) }, "afterwrd:mention": true, tag: mentionTags(mentions) } });
-}
-
-/** A post or photo address on `origin` (the sender's own site) as a key: post-… or photo-<sha256>; else null. */
-function keyOn(origin, address) {
-  if (typeof address !== "string") return null;
-  const posts = postId(origin, "");
-  if (address.startsWith(posts)) return POST_KEY_RE.test(address.slice(posts.length)) ? address.slice(posts.length) : null;
-  const photos = `${origin}/photos/sha256/`;
-  if (address.startsWith(photos)) return /^[0-9a-f]{64}$/.test(address.slice(photos.length)) ? `photo-${address.slice(photos.length)}` : null;
-  return null;
-}
-
-/**
- * A note from a connected (approved) site: kept, ignored, or refused. Returns [body, status]. `tell` is given what
- * to say on the owner's devices (push.js notifyDevices) about an invitation or a change to an event, once it's kept.
- * @param {any} db
- * @param {any} peer
- * @param {any} note
- * @param {(notice: import("./push.js").Notice) => void} [tell]
- * @returns {Promise<[object, number, boolean?]>} the reply (util.js Answer), and whether a post or comment note was kept
- */
-export async function receiveNote(db, peer, note, tell = () => {}) {
-  // About one of their events: an invitation, a change, or an invitation taken back (events.js).
-  if (["Invite", "Update", "Undo"].includes(note?.type)) return receiveFriendEventNote(db, peer, note, tell);
-  const object = note?.type === "Create" && note.object?.type === "Note" ? note.object : null;
-  if (object?.["afterwrd:mention"] === true) return receiveMention(db, peer, object, tell);
-  const isComment = typeof object?.inReplyTo === "string";
-  const target = object && keyOn(peer.origin, isComment ? object.inReplyTo : object.id);
-  if (!target || (!isComment && !target.startsWith("post-"))) return [{ error: "That isn't about something on your site." }, 400];
-  // A comment is only news here if this site's owner has commented on that post or photo too.
-  if (isComment && !(await db.prepare("SELECT 1 FROM comments_elsewhere WHERE connection_id = ? AND target = ? LIMIT 1")
-    .bind(peer.id, target).first())) {
-    return [{ ok: true }, 202];
-  }
-  // The limits, and only one note per post, are checked in the same statement as the insert.
-  const at = now();
-  const row = await db.prepare(`INSERT INTO inbox (connection_id, kind, target, actor, text, created_at)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6
-    WHERE (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?6 - ?7) < ?8
-      AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?6 - 86400) < ?9
-      AND NOT (?2 = 'post' AND EXISTS (SELECT 1 FROM inbox WHERE connection_id = ?1 AND kind = 'post' AND target = ?3))
-    RETURNING id`).bind(peer.id, isComment ? "comment" : "post", target,
-    isComment ? snippet(object.attributedTo?.name, 100) || "Someone" : null, snippet(object.content) || null,
-    at, rateWindow(RATE.seconds), RATE.count, DAILY).first();
-  // Only what's past keeping: it uses inbox_by_time, so it reads just those. A removed friend's notes go when they're
-  // removed (events.js friendGone); until then nothing shows them anyway (INBOX_JOIN), and ids aren't used again.
-  await db.prepare("DELETE FROM inbox WHERE created_at < ?").bind(at - KEEP_SECONDS).run();
-  if (!row && isComment) return [{ error: "That's a lot of notes for now." }, 429];
-  // And whether it was kept (within the limits above): what has Home's copy of their posts fetched again (peers.js).
-  return [{ ok: true }, 202, Boolean(row)];
-}
-
-/**
- * A friend's site saying its post (or a comment on it) mentions the owner here (notifyMentions there): kept as kind
- * 'mention', within the same limits as their other notes, and said on the owner's devices that take mentions
- * (`tell`). Only about their own posts and photos, like every note. Returns [body, status, kept].
- * @returns {Promise<[object, number, boolean?]>}
- */
-async function receiveMention(db, peer, object, tell) {
-  const target = keyOn(peer.origin, typeof object.inReplyTo === "string" ? object.inReplyTo : object.id);
-  if (!target) return [{ error: "That isn't about something on your site." }, 400];
-  const actor = snippet(object.attributedTo?.name, 100) || peer.name;
-  const text = snippet(object.content);
-  const at = now();
-  const row = await db.prepare(`INSERT INTO inbox (connection_id, kind, target, actor, text, created_at)
-    SELECT ?1, 'mention', ?2, ?3, ?4, ?5
-    WHERE (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?5 - ?6) < ?7
-      AND (SELECT COUNT(*) FROM inbox WHERE connection_id = ?1 AND kind IN ('post', 'comment', 'mention') AND created_at > ?5 - 86400) < ?8
-    RETURNING id`).bind(peer.id, target, actor, text || null, at, rateWindow(RATE.seconds), RATE.count, DAILY).first();
-  if (!row) return [{ error: "That's a lot of notes for now." }, 429];
-  // On the owner's phones within an allowance of its own (fewer than are kept): one at a time per post, the newest in
-  // place of the last. Named as the friend's site is known here, with nothing else they chose unless previews are on.
-  if (await pushAllowed(db, "SELECT COUNT(*) AS n FROM inbox WHERE connection_id = ?1 AND kind = 'mention' AND created_at > ?2", peer.id, at)) {
-    const page = target.startsWith("post-") ? `/friend/${peer.id}/posts/${target}` : `/friend/${peer.id}/photos/${target.slice(6)}`;
-    const comment = typeof object.inReplyTo === "string";
-    tell({ kind: "mention", title: peer.name, text: `${actor === peer.name ? "Mentioned you" : `${actor} mentioned you`}: ${text}`,
-      hidden: comment ? "Mentioned you in a comment" : "Mentioned you in a post", url: page, tag: `mention-${peer.id}-${target}` });
-  }
-  return [{ ok: true }, 202, true];
-}
 
 /**
  * In a group's Worker: tells the members' sites that will want to know about a new comment (`id`) on `post`:
@@ -381,6 +235,3 @@ async function receiveGroupMention(db, group, post, object, tell) {
   }
   return [{ ok: true }, 202];
 }
-
-/** Notes from a current, approved connection: the join every read of `inbox` uses. */
-export const INBOX_JOIN = "JOIN connections co ON co.id = i.connection_id AND co.approved_at IS NOT NULL";

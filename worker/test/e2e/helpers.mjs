@@ -50,6 +50,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { signCall } from "../../src/signedcalls.js";
 import { fileURLToPath } from "node:url";
 
 const WORKER = fileURLToPath(new URL("../..", import.meta.url));
@@ -159,3 +160,18 @@ export const browserKeyOf = (page) => page.evaluate(() => new Promise((resolve) 
       resolve(k ? { extractable: k.privateKey.extractable, publicKey: k.publicKey, person: k.person, expires: k.expires } : null); };
   };
 }));
+
+/**
+ * A call from the site whose database is at `state` (its address `from`) to `url`, signed with that site's hosting
+ * key, as its own code would make it (src/calls.js callFriend): what friends' sites say to each other. `body` (an
+ * object) makes it a POST. `headers` adds or replaces any. Returns the Response.
+ */
+export async function siteCall(state, from, url, body = null, { headers = {}, at } = {}) {
+  const person = siteSql(state, "SELECT person FROM own_identity")[0].person;
+  const privateKey = await crypto.subtle.importKey("pkcs8",
+    Buffer.from(siteSql(state, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"), { name: "Ed25519" }, false, ["sign"]);
+  const text = body === null ? null : JSON.stringify(body);
+  const signed = await signCall({ method: text === null ? "GET" : "POST", url, body: text, person, from, privateKey, ...(at && { at }) });
+  return fetch(url, { method: text === null ? "GET" : "POST", redirect: "manual",
+    headers: { ...signed, ...(text !== null && { "Content-Type": "application/json" }), ...headers }, body: text });
+}

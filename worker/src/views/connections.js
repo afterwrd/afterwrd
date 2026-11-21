@@ -1,5 +1,5 @@
 // Adding and introducing friends (connect.js): Add a friend, confirming a friend link, and introductions.
-import { host } from "../peers.js";
+import { host } from "../sites.js";
 import { escape } from "../util.js";
 import { asset, FAVICON, ownerHeader } from "./nav.js";
 

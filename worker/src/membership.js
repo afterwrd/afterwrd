@@ -40,7 +40,7 @@ import { notifyLater } from "./push.js";
 import { parsePoll, questionFor, readPoll } from "./polls.js";
 import { receiveGroupNote } from "./notify.js";
 import { messagePage } from "./views/pages.js";
-import { callSite, KEY_RE, ownerName, PROTOCOL, siteOrigin } from "./peers.js";
+import { callSite, KEY_RE, ownerName, PROTOCOL, siteOrigin } from "./sites.js";
 import { checkPhotos, removeUnusedFiles } from "./posts.js";
 import { signedFile } from "./share.js";
 import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";

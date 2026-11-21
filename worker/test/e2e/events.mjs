@@ -244,7 +244,7 @@ annEvent = await eventIn(ann);
 check("Ann sees Bob's going", /Going\s+Bob Example/.test(annEvent?.answered ?? ""), JSON.stringify(annEvent));
 
 // A friend whose site can't take signed invitations refuses it: Ann sees why.
-sql(stateA, "INSERT INTO connections (id, origin, name, key_hash, created_at, connected_at, approved_at) VALUES (999, 'https://old.example', 'Old Friend', 'x', 1, 1, 1)");
+sql(stateA, "INSERT INTO connections (id, origin, name, created_at, connected_at, approved_at) VALUES (999, 'https://old.example', 'Old Friend', 1, 1, 1)");
 sql(stateA, `INSERT INTO item_guests (item, connection_id, person, added_at, delivery) VALUES ('${key}', 999, '${"o".repeat(43)}', 1, 'refused')`);
 await ann.goto(`${A}/posts/${key}`);
 check("an invitation a site didn't take says so on Ann's guest list", (await text(ann, ".guests")).includes("Their site didn't take the invitation: it may need updating"));

@@ -8,7 +8,7 @@
 //   node groups.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -113,7 +113,7 @@ const cat = await owner(C, "Cat Example");
 
 // The group's Worker serves its members' sites and nothing else; people's sites don't serve groups.
 check("a group's Worker has no pages, sign-in or friends", (await fetch(`${G}/`)).status === 404
-  && (await fetch(`${G}/_auth/setup?code=${CODE}`)).status === 404 && (await call(G, "/_peer/feed", "x".repeat(43))).status === 404);
+  && (await fetch(`${G}/_auth/setup?code=${CODE}`)).status === 404 && (await fetch(`${G}/_p/items`, { headers: { "Afterwrd-From": A } })).status === 404);
 check("…and says it's a group", (await (await fetch(`${G}/`)).text()).includes("This is an afterwrd group"));
 check("a person's site doesn't answer as a group", (await call(A, "/_group/ping")).status !== 200);
 
@@ -145,7 +145,7 @@ check("Bob pastes the link into Groups on his own site (the box comes first ther
 check("Bob waits to be let in", (await text(bob)).includes("Waiting for Ann Example to let you in"), await text(bob));
 const bobKey = sql(stateB, "SELECT their_key FROM groups")[0]?.their_key;
 check("Bob's key can't read the group yet", (await call(G, "/_group/posts", bobKey)).status === 403);
-check("…nor anything on Ann's site", (await call(A, "/_peer/feed", bobKey)).status === 401 && (await call(A, "/_group/posts", bobKey)).status !== 200);
+check("…nor anything on Ann's site", (await call(A, "/_p/items", bobKey)).status === 401 && (await call(A, "/_group/posts", bobKey)).status !== 200);
 check("Cat opens the link instead: it says to paste it into Groups on her site, with the address box folded away, which still works",
   await join(cat, C, link, { typed: true }) && cat.joinPage.includes("paste it into Groups") && cat.joinFolded);
 const catKey = sql(stateC, "SELECT their_key FROM groups")[0]?.their_key;
@@ -320,7 +320,7 @@ const groupKeyForBob = sql(stateG, `SELECT their_key FROM group_members WHERE or
 const noted = n(stateB, "group_inbox");
 await call(B, "/_member/notify", groupKeyForBob, { type: "Create", object: { type: "Note", inReplyTo: `${G}/groups/1/posts/${annPost}`, content: "psst", attributedTo: { name: "x" } } });
 check("the group can't send notes about posts Bob isn't part of", n(stateB, "group_inbox") === noted);
-check("…nor read anything of Bob's", (await call(B, "/_peer/feed", groupKeyForBob)).status === 401);
+check("…nor read anything of Bob's", (await call(B, "/_p/items", groupKeyForBob)).status === 401);
 check("…nor pretend to be mid-join", (await call(B, `/_member/hello?from=${encodeURIComponent(G)}&group=1`, groupKeyForBob)).status === 401);
 check("group actions need the owner's session", (await fetch(`${A}/_groups/${annGroup}/delete`, { method: "POST", redirect: "manual", headers: { Origin: A } })).status === 401);
 const exported = await ann.evaluate(() => fetch("/_admin/export/rows?table=groups").then((r) => r.text()));
@@ -472,12 +472,15 @@ await ask(bob, C);
 check("Bob asks Cat: his side is done, hers waits for her", n(stateB, `connections WHERE origin = '${C}' AND approved_at IS NOT NULL`) === 1
   && n(stateC, `connections WHERE origin = '${B}' AND approved_at IS NULL AND via_kind = 'group' AND via_name = 'Book club (2026)'`) === 1);
 check("…and his page says he's asked", (await friendship(bob, C)) === "Asked", await friendship(bob, C));
-const probe = await call(C, "/_connect/ask", null, { origin: B, key: "k".repeat(43), via: { group: G, id: remoteGroup } });
+// Asking without signing, for a site: as anyone could.
+const askAs = (from, via) => fetch(`${C}/_connect/ask`, { method: "POST", headers: { "Afterwrd-From": from, "Content-Type": "application/json" },
+  body: JSON.stringify({ via }) });
+const probe = await askAs(B, { group: G, id: remoteGroup });
 check("asking for a site you can't prove is yours says nothing about it (Bob's already asking)", probe.status === 403
   && (await probe.json()).error.startsWith("Without a friend link"));
-check("a site that isn't in the group can't ask", (await call(C, "/_connect/ask", null,
-  { origin: "http://localhost:8795", key: "k".repeat(43), via: { group: G, id: remoteGroup } })).status === 403);
-check("…nor can one that wasn't introduced", (await call(C, "/_connect/ask", null, { origin: A, key: "k".repeat(43), via: { introduction: true } })).status === 403);
+check("a site that isn't in the group can't ask", (await askAs("http://localhost:8795", { group: G, id: remoteGroup })).status === 403);
+check("…nor can one that wasn't introduced", (await askAs(A, { introduction: true })).status === 403);
+check("…nor can a site in the group sign as another", (await siteCall(stateA, B, `${C}/_connect/ask`, { via: { group: G, id: remoteGroup } })).status === 403);
 check("…and nothing was kept for them", n(stateC, "connections") === 1);
 await cat.goto(`${C}/`);
 check("Cat's Home says Bob is asking, from Book club", (await text(cat, "form.notice.asking")).includes("in Book club (2026) with you"), await text(cat, "form.notice.asking"));
@@ -508,10 +511,10 @@ await cat.type("textarea[name=note]", "You both run book clubs");
 await Promise.all([cat.waitForNavigation({ timeout: 30_000 }), cat.click("#introduce")]);
 check("both are told", n(stateA, `introductions WHERE origin = '${B}' AND name = 'Bob Example' AND note = 'You both run book clubs'`) === 1
   && n(stateB, `introductions WHERE origin = '${A}' AND name = 'Ann Example'`) === 1, await text(cat, "body"));
-const catKeyAtAnn = sql(stateC, `SELECT their_key FROM connections WHERE origin = '${A}'`)[0].their_key;
-check("introducing again changes nothing", (await call(A, "/_peer/introduce", catKeyAtAnn, { origin: B, name: "Someone else" })).status === 200
+check("introducing again changes nothing", (await siteCall(stateC, C, `${A}/_p/introduce`, { origin: B, name: "Someone else" })).status === 200
   && n(stateA, `introductions WHERE name = 'Bob Example'`) === 1);
-check("only friends can introduce", (await call(A, "/_peer/introduce", "x".repeat(43), { origin: C, name: "Cat" })).status === 401);
+check("only friends can introduce", (await siteCall(stateB, B, `${A}/_p/introduce`, { origin: C, name: "Cat" })).status === 401
+  && (await fetch(`${A}/_p/introduce`, { method: "POST", headers: { "Afterwrd-From": C, "Content-Type": "application/json" }, body: "{}" })).status === 401);
 await ann.goto(`${A}/`);
 check("Ann's Home mentions it", (await text(ann, ".notice.introduction")).includes("Cat Example introduced you to localhost:8788, who they call Bob Example"), await text(ann, ".notice.introduction"));
 await ann.goto(`${A}/friend`);

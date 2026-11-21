@@ -202,7 +202,7 @@ async function updateData(request, env, url, owner) {
       AND script IS NOT NULL AND script != ''`).first())?.n ?? 0,
     // Friends who could check this site: only those whose sites are on Cloudflare (hosting.js).
     friends: (await env.DB.prepare(`SELECT id, name, origin FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL
-      AND their_key IS NOT NULL ORDER BY name COLLATE NOCASE LIMIT 200`).all()).results
+      ORDER BY name COLLATE NOCASE LIMIT 200`).all()).results
       .filter((f) => onCloudflare(f.origin, env)).map(({ id, name }) => ({ id, name })),
     // The versions this site has run (migrate.js), newest first, and a newer one's database update that failed.
     history: (await env.DB.prepare("SELECT version, from_version, at FROM updates ORDER BY id DESC LIMIT 5").all()).results,

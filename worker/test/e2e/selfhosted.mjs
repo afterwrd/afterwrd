@@ -5,7 +5,7 @@
 // have hers check his. Ann starts a group from an address and a setup code, as a command on her server gives them.
 //   node selfhosted.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
-import { count as n, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
 
 const [, , stateA, stateB, , stateG] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -94,8 +94,8 @@ const gone = {
   "GET /_check/x": (await fetch(`${A}/_check/${"x".repeat(43)}`)).status,
   "POST /_admin/checks/new": (await post(ann, "/_admin/checks/new", {})).status,
   "POST /_admin/checks/myself": await status(ann, "/_admin/checks/myself", "POST"),
-  "POST /_peer/check-token": (await fetch(`${A}/_peer/check-token`, { method: "POST", body: "{}" })).status,
-  "POST /_peer/check-request": (await fetch(`${A}/_peer/check-request`, { method: "POST", body: "{}" })).status,
+  "POST /_p/check-token": (await fetch(`${A}/_p/check-token`, { method: "POST", body: "{}" })).status,
+  "POST /_p/check-request": (await fetch(`${A}/_p/check-request`, { method: "POST", body: "{}" })).status,
   "POST /_groups/create/check": (await post(ann, "/_groups/create/check", { name: "x" })).status,
 };
 const open = Object.entries(gone).filter(([, s]) => s !== 404);
@@ -118,19 +118,16 @@ const pasted = await post(bob, "/_admin/checks/new", { site: "walkers.example.co
 check("…as is one for any address not on Cloudflare", pasted.status === 400 && /isn't on Cloudflare/.test(pasted.error ?? ""), JSON.stringify(pasted));
 
 // Checks only run between sites on Cloudflare, so a check call from Ann's site can only be made up: Bob's site gives it
-// nothing, even with Ann's real key.
-const annKey = sql(stateA, `SELECT their_key FROM connections WHERE origin = '${B}'`)[0]?.their_key;
-const fromAnn = async (path, body) => (await fetch(`${B}${path}`, { method: "POST", redirect: "manual",
-  headers: { Authorization: `Bearer ${annKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) })).status;
+// nothing, even signed by Ann's site.
+const fromAnn = async (path, body = null) => (await siteCall(stateA, A, `${B}${path}`, body)).status;
 const madeUp = {
-  "check-token": await fromAnn("/_peer/check-token", { type: "CheckToken" }),
-  "checked": await fromAnn("/_peer/checked", { type: "Checked", site: A, version: "0.0.1" }),
-  "check-request": await fromAnn("/_peer/check-request", { type: "CheckRequest" }),
+  "check-token": await fromAnn("/_p/check-token", { type: "CheckToken" }),
+  "checked": await fromAnn("/_p/checked", { type: "Checked", site: A, version: "0.0.1" }),
+  "check-request": await fromAnn("/_p/check-request", { type: "CheckRequest" }),
 };
-check("Bob's site refuses check calls from Ann's self-hosted site", Boolean(annKey) && Object.values(madeUp).every((s) => s === 404),
-  JSON.stringify(madeUp));
+check("Bob's site refuses check calls from Ann's self-hosted site", Object.values(madeUp).every((s) => s === 404), JSON.stringify(madeUp));
 check("…and notes no attempt to check it", sql(stateB, "SELECT COUNT(*) AS n FROM settings WHERE key = 'check_attempts'")[0].n === 0);
-check("…while Ann's key still works for everything else", (await fetch(`${B}/_peer/feed`, { headers: { Authorization: `Bearer ${annKey}` } })).status === 200);
+check("…while Ann's site's signed calls work for everything else", (await fromAnn("/_p/items?since=0")) === 200);
 
 // --- a group, made on the server, claimed here ------------------------------------------------------------------
 await ann.goto(`${A}/groups/new`);

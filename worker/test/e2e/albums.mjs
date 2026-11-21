@@ -2,7 +2,7 @@
 //   node albums.mjs <fixtures dir>
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, siteSql, setUpSigning } from "./helpers.mjs";
+import { siteSql, setUpSigning } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -41,7 +41,7 @@ const tiles = () => owner.$$eval(".justified a.tile", (l) => l.length);
 await owner.goto(`${BASE}/posts`);
 check("Posts invites the owner to add a picture and cover", (await owner.$eval("main", (m) => m.textContent)).includes("Add a profile picture"));
 
-// A new album, shared as a post.
+// A new album. (Adding photos makes no post: friends see them in the album. Only signed posts are on Home.)
 await owner.goto(`${BASE}/photos`);
 await Promise.all([owner.waitForNavigation(), owner.click('main a[href="/_admin/photos/add"]')]);
 check("new album is the default, with name and description", (await owner.$eval("select[name=album]", (s) => s.value)) === "new"
@@ -49,19 +49,15 @@ check("new album is the default, with name and description", (await owner.$eval(
 await owner.type("input[name=name]", "Summer");
 await owner.type(".new-album textarea", "Days out");
 await (await owner.$("#add input[type=file]")).uploadFile(`${fixtures}/photo1.jpg`, `${fixtures}/big.jpg`);
-await owner.type("#add textarea[name=text]", "Our summer");
 await Promise.all([owner.waitForNavigation({ timeout: 60_000 }), owner.click("#add button.post")]);
 const albumPath = new URL(owner.url()).pathname;
+check("there's no choice to share them as a post", !(await owner.$("#add input[name=share]")) && !(await owner.$("#add textarea[name=text]")));
 check("lands on the new album with both photos", /^\/photos\/album\/\d+$/.test(albumPath) && (await tiles()) === 2
   && (await owner.$eval("h1", (h) => h.textContent)) === "Summer" && (await owner.$eval(".album-head", (h) => h.textContent)).includes("Days out"), albumPath);
 await owner.goto(`${BASE}/posts`);
-const first = await owner.$eval("main article.card", (a) => ({ what: a.querySelector(".what").textContent.trim(), text: a.querySelector(".text")?.textContent,
-  photos: a.querySelectorAll(".collage .tile").length }));
-check("shared as a post, saying where they went", first.what.endsWith("Added 2 photos to Summer.") && first.text === "Our summer" && first.photos === 2, JSON.stringify(first));
-await owner.type("main article.card:first-of-type .say textarea", "Lovely");
-await Promise.all([settled(owner), owner.click("main article.card:first-of-type .say button")]);
+check("…and no post", (await owner.$$eval("main article.card", (l) => l.length)) === 0 && siteSql(null, "SELECT COUNT(*) AS n FROM posts")[0].n === 0);
 
-// More photos into the same album, not shared.
+// More photos into the same album.
 await owner.goto(BASE + albumPath);
 await Promise.all([owner.waitForNavigation(), owner.click('.album-tools a[href^="/_admin/photos/add?album="]')]);
 check("Add photos from an album picks that album", (await owner.$eval("select[name=album]", (s) => s.options[s.selectedIndex].text)) === "Summer"
@@ -104,21 +100,16 @@ await asker.close();
 await owner.bringToFront(); // a tab left in the background stops answering in headless Chrome
 
 await (await owner.$("#add input[type=file]")).uploadFile(`${fixtures}/big-secret.jpg`);
-await owner.click("#add input[name=share]");
 await Promise.all([owner.waitForNavigation({ timeout: 60_000 }), owner.click("#add button.post")]);
 check("album now has three", (await tiles()) === 3);
-await owner.goto(`${BASE}/posts`);
-check("…and no new post", (await owner.$$eval("main article.card", (l) => l.length)) === 1);
 
-// Rename: the post and its comment stay together.
+// Rename.
 await owner.goto(BASE + albumPath);
 await owner.click(".edit-album summary");
 await owner.$eval(".edit-album input[name=name]", (i) => { i.value = ""; });
 await owner.type(".edit-album input[name=name]", "Summer 2026");
 await Promise.all([owner.waitForNavigation(), owner.click(".edit-album button")]);
 check("album renamed", (await owner.$eval("h1", (h) => h.textContent)) === "Summer 2026");
-await owner.goto(`${BASE}/posts`);
-check("its post keeps its comment after the rename", (await owner.$$eval("main article.card:first-of-type .comment .said", (l) => l.map((c) => c.textContent))).join() === "Lovely");
 
 // Profile picture and cover from existing photos.
 await owner.goto(BASE + albumPath);
@@ -166,10 +157,8 @@ await owner.goto(BASE + albumPath);
 await Promise.all([owner.waitForNavigation(), owner.click(".album-tools button.danger")]);
 await owner.goto(`${BASE}/photos`);
 const albumsLeft = await owner.$$eval(".albums a.album strong", (l) => l.map((s) => s.textContent));
-check("deleting the album keeps photos that are in a post, under Posted on afterwrd", !albumsLeft.includes("Summer 2026")
-  && albumsLeft.includes("Posted on afterwrd"), albumsLeft.join());
-await owner.goto(`${BASE}/posts`);
-check("the post still has its photos", (await owner.$$eval("main article.card", (l) => l.at(-1).querySelectorAll(".collage .tile").length)) === 2);
+check("deleting the album deletes it and its photos", !albumsLeft.includes("Summer 2026")
+  && siteSql(null, "SELECT COUNT(*) AS n FROM media WHERE album_id NOT IN (SELECT id FROM albums)")[0].n === 0, albumsLeft.join());
 
 // Phone.
 await owner.setViewport({ width: 375, height: 800, isMobile: true });

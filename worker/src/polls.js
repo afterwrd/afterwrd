@@ -1,6 +1,7 @@
-// Polls: a post that asks a question (its words) with 2 to 10 options. Used by both kinds of site: a person's own posts
-// (posts.js keeps them, friends answer through /_peer/vote, peers.js) and groups (groups.js keeps them, members answer
-// through /_group/polls/<m>/vote). Wherever a poll is kept, it decides who sees what:
+// Polls: a post that asks a question (its words) with 2 to 10 options. A person's own polls are signed now (itemkinds.js
+// uses readPoll and choicesMask here); groups keep theirs as before (groups.js keeps them, members answer through
+// /_group/polls/<m>/vote), until groups are signed too (docs/signed-conversations.md, step 6), and the owner's polls
+// from before signing are shown as they were (sitePolls). Wherever a group's poll is kept, it decides who sees what:
 //   - everyone who can see the post sees how many chose each option, and which they chose themselves;
 //   - only whoever asked sees who chose what (their own site shows it; a group tells only the writer's site).
 // Answers notify no one. A poll closes when its writer closes it, or by itself at the time they picked.
@@ -10,9 +11,8 @@
 //                      endTime?, closed?, votersCount, "afterwrd:chosen": [the asker's options] }
 // anyOf when more than one may be chosen. An older site ignores it, and shows the post's words alone.
 import { actorId, iso, seconds } from "../public/static/activity.js";
-import { siteOrigin } from "./peers.js";
+import { siteOrigin } from "./sites.js";
 import { now } from "./util.js";
-import { ALLOWED_SQL, answerAllowance, TOO_MANY_ANSWERS, wasAllowed } from "./limits.js";
 
 export const MAX_OPTIONS = 10;
 export const MAX_OPTION = 100;
@@ -144,9 +144,9 @@ export function parsePoll(o, env, { names = false } = {}) {
   };
 }
 
-// --- the owner's own polls (in their posts here) -------------------------------------------------------------------------
+// --- the owner's polls from before signing ------------------------------------------------------------------------------
 
-/** The polls in some of the owner's posts (posts ids), as `viewer` ('site', the owner; or a friend's site) sees them. */
+/** The polls in some of the owner's posts from before signing (posts ids), as `viewer` ('site', the owner) sees them. */
 export async function sitePolls(db, ids, viewer) {
   if (!ids.length) return new Map();
   // By the range of post numbers, then only those asked for: SQLite reads just the polls in that range (usually
@@ -160,38 +160,4 @@ export async function sitePolls(db, ids, viewer) {
   ]);
   return new Map(polls.results.filter((row) => wanted.has(row.post_id)).map((row) => [row.post_id,
     tally(row, votes.results.filter((v) => v.post_id === row.post_id), { viewer, names: viewer === "site" })]));
-}
-
-/**
- * Someone answers a poll in the owner's posts: the owner here (`voter` 'site') or a friend's site, within their
- * allowance of answers (limits.js; the owner has none). `list`: the options they chose (none takes their answer back).
- * Post ids are never used twice, so an answer meant for a post deleted just now can't land on another. Returns null
- * if that went, or the reason it didn't (TOO_MANY_ANSWERS, if that's why).
- */
-export async function answerHere(db, postId, voter, name, list) {
-  const row = await db.prepare("SELECT * FROM polls WHERE post_id = ?").bind(postId).first();
-  if (!row) return "That post doesn't have a poll.";
-  if (!isOpen(row)) return "That poll has closed.";
-  const mask = choicesMask(list, row);
-  if (mask === null) return row.multiple ? "Those aren't options in this poll." : "Pick one of the options.";
-  const at = now();
-  // A friend's answer counts towards their allowance; the owner's own doesn't (its SQL holds: "1").
-  const allowance = voter === "site" ? null : answerAllowance(db, voter, at);
-  const allowed = allowance ? ALLOWED_SQL("?6") : "1";
-  // D1 wants exactly as many values as a statement uses: the token only when it's asked about.
-  const binds = [postId, at, voter, name, mask, ...(allowance ? [allowance.token] : [])];
-  const tooMany = async () => (allowance && !(await wasAllowed(db, allowance.token)) ? TOO_MANY_ANSWERS : null);
-  if (!mask) {
-    // Taking an answer back, too, only while it's open: an answer still there afterwards means it had closed.
-    await db.batch([...(allowance?.statements ?? []),
-      db.prepare(`DELETE FROM poll_votes WHERE post_id = ?1 AND voter = ?3 AND ${OPEN_SQL("polls")} AND ${allowed}`)
-        .bind(...(allowance ? binds : binds.slice(0, 3)))]);
-    const left = await db.prepare("SELECT 1 FROM poll_votes WHERE post_id = ? AND voter = ?").bind(postId, voter).first();
-    return left ? (await tooMany()) ?? "That poll has closed." : null;
-  }
-  const results = await db.batch([...(allowance?.statements ?? []), db.prepare(`INSERT INTO poll_votes (post_id, voter, name, choices, voted_at)
-    SELECT ?1, ?3, ?4, ?5, ?2 WHERE ${OPEN_SQL("polls")} AND ${allowed}
-    ON CONFLICT (post_id, voter) DO UPDATE SET name = excluded.name, choices = excluded.choices, voted_at = excluded.voted_at
-    RETURNING post_id`).bind(...binds)]);
-  return results.at(-1).results.length ? null : (await tooMany()) ?? "That poll has closed.";
 }

@@ -291,7 +291,7 @@ check("…and isn't counted as failing", !s.failed?.includes("99.0.5") && !s.tri
 const holding = await owner.goto(`${BASE}/`);
 check("this (older) version says the site is being updated, and writes nothing", holding.status() === 503
   && (await text("body")).includes("This site is being updated"));
-const peerAnswer = await fetch(`${BASE}/_peer/feed`, { headers: { Authorization: `Bearer ${"x".repeat(43)}` } });
+const peerAnswer = await fetch(`${BASE}/_p/items`, { headers: { "Afterwrd-From": "http://localhost:8788" } });
 check("…to other sites too", peerAnswer.status === 503 && (await peerAnswer.json()).error?.includes("being updated"));
 sql("DELETE FROM d1_migrations WHERE name = '9999_from_a_newer_version'");
 await owner.goto(`${BASE}/`);

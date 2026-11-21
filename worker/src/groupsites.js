@@ -19,7 +19,7 @@ import { tokenFor } from "./cloudflare.js";
 import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, uploadAssets, workerSettings } from "./deploy.js";
 import { claimGroup, forgetGroup } from "./membership.js";
 import { cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
-import { ownerName, siteOrigin } from "./peers.js";
+import { ownerName, siteOrigin } from "./sites.js";
 import { json, now, randomToken } from "./util.js";
 import { selfHosted } from "./hosting.js";
 

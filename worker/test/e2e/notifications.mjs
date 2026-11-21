@@ -1,5 +1,5 @@
 // Notifications on the owner's own devices (src/push.js), and Add to home screen. Ann (A, 8787) and Sam (B, 8788) are
-// friends; Sam's site sends Ann's the notes it would about his events. Run here too: a stand-in push service (8795)
+// friends; Sam makes signed events and posts on his site, whose notes reach Ann's (src/notes.js). Run here too: a stand-in push service (8795)
 // that decrypts what it's sent, as a phone would. Turning notifications on (only from the owner's own pages, only to a
 // push service), the Home notice, Your devices; a notification for an invitation, a change and calling off, with or
 // without the details, and none for posts, comments, an event Ann said no to, or one taken back; trying a push service
@@ -9,7 +9,7 @@
 import { createDecipheriv, createECDH, createHash, createPublicKey, hkdfSync, randomBytes, verify } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const [, , stateA, stateB] = process.argv.slice(2);
@@ -58,29 +58,45 @@ const mainText = (page) => page.$eval("main", (m) => m.textContent);
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const key = () => randomBytes(32).toString("base64url");
 
-// Friends, as a finished Connect leaves them: each site holds the key for calling the other.
-function befriend(stateX, originX, nameX, stateY, originY, nameY) {
-  const [xy, yx] = [key(), key()]; // x calls y with xy, y calls x with yx
-  const row = (origin, name, theirs, ours) => `INSERT INTO connections (origin, name, their_key, key_hash, created_at, connected_at, approved_at, reached_at)
-    VALUES ('${origin}', '${name}', '${theirs}', '${hash(ours)}', 1, 1, 1, 1)`;
-  sql(stateX, row(originY, nameY, xy, yx));
-  sql(stateY, row(originX, nameX, yx, xy));
-  return { xy, yx };
+/** `inviter` makes a friend link, `friend` pastes it into their own site and confirms, `inviter` approves. */
+async function befriend(inviter, site, friend, friendSite) {
+  await inviter.goto(`${site}/_admin/connections`);
+  await inviter.click("#make");
+  await inviter.waitForSelector("#link:not([hidden])");
+  const link = await inviter.$eval("#link-url", (i) => i.value);
+  await friend.goto(`${friendSite}/_admin/connections`);
+  await friend.type("#paste input[name=link]", link);
+  await Promise.all([friend.waitForNavigation(), friend.click("#paste button:not([type=button])")]);
+  await Promise.all([friend.waitForNavigation({ timeout: 30_000 }), friend.click("#go")]);
+  await inviter.goto(`${site}/`);
+  await Promise.all([inviter.waitForNavigation(), inviter.click('.notice.asking button[formaction*="/approve"]')]);
+}
+const ahead = (days) => new Date(Date.now() + days * 86400_000).toISOString().slice(0, 10);
+/** Sam makes an event on his site, inviting Ann (signed in his browser, sent by his site). Returns its id. */
+async function samInvites(title, days, place = "The park") {
+  await sam.goto(`${B}/events`);
+  await sam.$eval("#make", (d) => { d.open = true; });
+  await sam.$eval("#make input[name=title]", (i, v) => { i.value = v; }, title);
+  await sam.$eval("#make input[name=start_date]", (i, v) => { i.value = v; }, ahead(days));
+  await sam.$eval("#make input[name=start_time]", (i) => { i.value = "13:00"; });
+  await sam.$eval("#make input[name=place]", (i, v) => { i.value = v; }, place);
+  await sam.$$eval("#make .guest-options label", (labels) => labels.find((l) => l.textContent.trim() === "Ann Example")?.querySelector("input").click());
+  await Promise.all([sam.waitForNavigation({ timeout: 30_000 }), sam.click("#make button.primary")]);
+  return new URL(sam.url()).pathname.split("/").pop();
+}
+/** Sam changes where his event is (a signed change). */
+async function samMoves(id, place) {
+  await sam.goto(`${B}/posts/${id}/event`);
+  await sam.$eval("input[name=place]", (i, v) => { i.value = v; }, place);
+  await Promise.all([sam.waitForNavigation({ timeout: 30_000 }), sam.click(".event-form button.primary")]);
 }
 
 const ann = await owner(A, "Ann Example");
 const sam = await owner(B, "Sam Taylor");
-const { yx: samKey } = befriend(stateA, A, "Ann Example", stateB, B, "Sam Taylor"); // the key Sam's site calls Ann's with
+await befriend(sam, B, ann, A);
 const [samHere] = sql(stateA, `SELECT id FROM connections WHERE origin = '${B}'`);
-// What Sam's site sends Ann's about his events (events.js), and anything else it might.
-const fromSam = (path, body) => fetch(`${A}${path}`, { method: "POST", redirect: "manual",
-  headers: { Authorization: `Bearer ${samKey}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
-const postKey = (i) => `post-${1_800_000_000 + i}-${String(i).padStart(8, "0")}`;
-const sams = (event, k, change) => fromSam("/_peer/notify", { "@context": "https://www.w3.org/ns/activitystreams",
-  type: change ? "Update" : "Invite", "afterwrd:change": change, actor: `${B}/`,
-  object: { type: "Note", id: `${B}/posts/${k}`, content: "", "afterwrd:event": event } });
-const event = (name, days, place = "The park") => ({ type: "Event", name, location: { type: "Place", name: place },
-  startTime: new Date(Date.now() + days * 86400_000).toISOString(), "afterwrd:timeZone": "Europe/London" });
+// A signed call from Sam's site to Ann's, as it makes them.
+const fromSam = (path, body) => siteCall(stateB, B, `${A}${path}`, body);
 
 // --- the messages that were here are gone --------------------------------------------------------------------------------
 
@@ -90,7 +106,7 @@ check("…and Messages isn't there", (await ann.goto(`${A}/messages`)).status() 
 await ann.goto(`${A}/friend/${samHere.id}/posts`);
 check("a friend's page has no Message button", (await ann.$(`a[href="/friend/${samHere.id}/message"]`)) === null);
 const oldMessage = await fromSam("/_peer/message", { type: "Create", object: { type: "Note", id: `${B}/messages/${"a".repeat(16)}`, content: "Hi" } });
-check("a message from an older friend's site gets 404, which it takes as final", oldMessage.status === 404, String(oldMessage.status));
+check("there's nowhere for a friend's site to send a message", ![200, 202].includes(oldMessage.status), String(oldMessage.status));
 check("…and the site's own chat calls are gone too", [404, 405].includes((await call(ann, "/_messages/1/send", { text: "Hi" })).status));
 check("the tables went with them", n(stateA, "sqlite_master WHERE name IN ('chats', 'messages', 'group_chat')") === 0);
 
@@ -166,9 +182,8 @@ check("…until Ann says that was her", !(await mainText(ann)).includes("were tu
 
 // --- what notifies, and what doesn't ---------------------------------------------------------------------------------------
 
-const picnic = postKey(1);
-r = await sams(event("Picnic", 10), picnic);
-check("Sam invites Ann to his picnic", r.status === 202, String(r.status));
+const picnic = await samInvites("Picnic", 10);
+check("Sam invites Ann to his picnic", n(stateB, `item_guests WHERE item = '${picnic}'`) === 1);
 check("…which notifies Ann's device", await waitFor(() => toPhone().length === 1), String(toPhone().length));
 let shown = toPhone()[0] && decrypt(toPhone()[0].body);
 check("…encrypted for that device, saying who from, and what and when", shown?.title === "Sam Taylor" && shown.body.startsWith("Invited you: Picnic · ")
@@ -178,22 +193,23 @@ check("…signed by Ann's site, urgent, and kept a day at most", signedBySite(to
   && Number(toPhone()[0].headers.ttl) <= 86400 && toPhone()[0].headers["content-encoding"] === "aes128gcm");
 
 // Nothing for posts or comments.
-await fromSam("/_peer/notify", { type: "Create", object: { type: "Note", id: `${B}/posts/${postKey(2)}`, content: "A new post" } });
-sql(stateA, `INSERT INTO comments_elsewhere (connection_id, site, target, remote_id, text, created_at) VALUES (${samHere.id}, '${B}', '${postKey(2)}', 1, 'Lovely', 1)`);
-await fromSam("/_peer/notify", { type: "Create", object: { type: "Note", inReplyTo: `${B}/posts/${postKey(2)}`, content: "Thanks!",
-  attributedTo: { type: "Person", name: "Sam Taylor" } } });
+await sam.goto(`${B}/posts`);
+await sam.type("#composer textarea", "A new post");
+await Promise.all([sam.waitForNavigation({ timeout: 60_000 }), sam.click("#composer button.post")]);
+await waitFor(() => n(stateA, "notices WHERE kind = 'post'") === 1);
 await sleep(3000);
-check("a friend's new post, or a comment, doesn't notify", toPhone().length === 1 && n(stateA, "inbox WHERE kind IN ('post', 'comment')") === 2,
-  `${toPhone().length} pushes, ${n(stateA, "inbox WHERE kind IN ('post', 'comment')")} notes`);
+check("a friend's new post doesn't notify", toPhone().length === 1 && n(stateA, "notices WHERE kind = 'post'") === 1,
+  `${toPhone().length} pushes, ${n(stateA, "notices WHERE kind = 'post'")} notices`);
 
 // A change, then the lock screen without the details.
-r = await sams(event("Picnic", 10, "The other park"), picnic, "changed");
-check("Sam changing the picnic notifies Ann", r.status === 202 && await waitFor(() => toPhone().length === 2));
+await samMoves(picnic, "The other park");
+check("Sam changing the picnic notifies Ann", await waitFor(() => toPhone().length === 2));
 shown = decrypt(toPhone()[1].body);
 check("…saying it's changed, with the same tag (so it takes the invitation's place)", shown.body.startsWith("Changed: Picnic") && shown.body.includes("The other park")
   && shown.tag === `event-${samHere.id}-${picnic}`, JSON.stringify(shown));
 r = await call(ann, "/_push/devices/preview", { endpoint: device.endpoint, preview: false });
-await sams(event("Picnic", 10, "The other park"), picnic, "cancelled");
+await sam.goto(`${B}/posts/${picnic}`);
+await Promise.all([settled(sam), sam.click('.event form[data-sign="event-cancel"] button')]);
 check("with the preview off, the lock screen says only who it's from, and what kind of thing", await waitFor(() => toPhone().length === 3)
   && decrypt(toPhone()[2].body).title === "Sam Taylor" && decrypt(toPhone()[2].body).body === "Called off an event you were invited to"
   && !JSON.stringify(decrypt(toPhone()[2].body)).includes("Picnic"), r.text);
@@ -201,17 +217,19 @@ check("every notification is the same size, whatever it says", new Set(toPhone()
 await call(ann, "/_push/devices/preview", { endpoint: device.endpoint, preview: true });
 
 // An event Ann said no to, and one taken back: nothing.
-const quiz = postKey(3);
-await sams(event("Quiz", 12), quiz);
+const quiz = await samInvites("Quiz", 12);
 await waitFor(() => toPhone().length === 4);
-sql(stateA, `UPDATE events_elsewhere SET answer = 'no' WHERE post_key = '${quiz}'`);
-await sams(event("Quiz", 13), quiz, "changed");
-await fromSam("/_peer/notify", { type: "Undo", actor: `${B}/`, object: { type: "Invite", object: `${B}/posts/${quiz}` } });
+await ann.goto(`${A}/events`);
+await Promise.all([ann.waitForNavigation(), ann.click('.invitation button[value="no"]')]);
+await samMoves(quiz, "The pub");
+await sam.goto(`${B}/posts/${quiz}`);
+await sam.$eval(".guests", (d) => { d.open = true; });
+await Promise.all([settled(sam), sam.$$eval(".guest-list li", (lis) => lis.find((li) => li.textContent.includes("Ann Example")).querySelector("button").click())]);
 await sleep(3000);
-check("a change to an event Ann said no to doesn't notify, nor does an invitation taken back", toPhone().length === 4 && n(stateA, `events_elsewhere WHERE post_key = '${quiz}'`) === 0,
-  String(toPhone().length));
-// A forged invitation (to someone else's post) is refused, and tells no one.
-r = await fromSam("/_peer/notify", { type: "Invite", object: { type: "Note", id: `https://elsewhere.example/posts/${postKey(4)}`, "afterwrd:event": event("Fake", 5) } });
+check("a change to an event Ann said no to doesn't notify, nor does an invitation taken back", toPhone().length === 4
+  && await waitFor(() => n(stateA, `copies WHERE id = '${quiz}'`) === 0), String(toPhone().length));
+// A made-up note is refused, and tells no one.
+r = await fromSam("/_p/notes", { v: 2, kind: "item", item: { id: "x".repeat(43), sent: { record: "x" }, taken: 1, content: { type: "event" } } });
 await sleep(2000);
 check("a forged invitation is refused, and notifies nothing", r.status === 400 && toPhone().length === 4, String(r.status));
 
@@ -219,7 +237,7 @@ check("a forged invitation is refused, and notifies nothing", r.status === 400 &
 
 await call(ann, "/_push/devices", { ...device, endpoint: `${PUSH}/push/flaky`, name: "Flaky phone" });
 await call(ann, "/_push/devices", { ...device, endpoint: `${PUSH}/push/gone`, name: "Old phone" });
-await sams(event("Walk", 14), postKey(5));
+await samInvites("Walk", 14);
 check("a push service that says \"try later\" is asked again, and gets it", await waitFor(() => pushes.some((p) => p.path === "/push/flaky")) && flaky === 2,
   `${flaky} tries`);
 check("…while one that says the device is gone has it forgotten", await waitFor(() => n(stateA, "push_devices WHERE endpoint LIKE '%/push/gone'") === 0)
@@ -235,28 +253,31 @@ check("…and only to a push service", r.status === 400, r.text);
 
 // --- mentions (mentions.js) ---------------------------------------------------------------------------------------------------
 
-// A mention buzzes the phone, titled with the friend as Ann knows them (never a name the note chose), a few at most from
-// one friend, and a later one about the same post takes its place.
-const mentionNote = (k, who, words) => fromSam("/_peer/notify", { type: "Create", object: { type: "Note", "afterwrd:mention": true,
-  inReplyTo: `${B}/posts/${k}`, content: words, attributedTo: { type: "Person", name: who } } });
+// A mention buzzes the phone, titled with the friend as Ann knows them, a few at most from one friend.
+/** Sam posts, mentioning Ann (picked from the @ list, so it's signed into the post). */
+async function samMentions(words) {
+  await sam.goto(`${B}/posts`);
+  await sam.type("#composer textarea", `${words} @Ann`);
+  await sam.waitForSelector("#mention-list:not([hidden]) li", { timeout: 5000 });
+  await sam.keyboard.press("Enter");
+  await Promise.all([sam.waitForNavigation({ timeout: 60_000 }), sam.click("#composer button.post")]);
+}
 const base = toPhone().length;
-r = await mentionNote(postKey(6), "Bank Security", "Urgent: confirm your details");
-check("a mention notifies Ann", r.status === 202 && await waitFor(() => toPhone().length === base + 1), String(r.status));
+await samMentions("Coming to the walk,");
+check("a mention notifies Ann", await waitFor(() => toPhone().length === base + 1));
 shown = decrypt(toPhone()[base].body);
-check("…titled with the friend's name as Ann knows it, whatever the note says", shown.title === "Sam Taylor"
-  && shown.body.startsWith("Bank Security mentioned you: Urgent") && shown.tag === `mention-${samHere.id}-${postKey(6)}`, JSON.stringify(shown));
+check("…titled with the friend's name as Ann knows it", shown.title === "Sam Taylor" && shown.body.startsWith("Mentioned you: Coming to the walk")
+  && shown.tag.startsWith(`mention-${samHere.id}-`), JSON.stringify(shown));
 await call(ann, "/_push/devices/preview", { endpoint: device.endpoint, preview: false });
-await mentionNote(postKey(6), "Bank Security", "Urgent again");
-check("…and with the preview off, nothing the note chose", await waitFor(() => toPhone().length === base + 2)
-  && decrypt(toPhone()[base + 1].body).title === "Sam Taylor" && decrypt(toPhone()[base + 1].body).body === "Mentioned you in a comment",
+await samMentions("Still coming?");
+check("…and with the preview off, nothing it said", await waitFor(() => toPhone().length === base + 2)
+  && decrypt(toPhone()[base + 1].body).title === "Sam Taylor" && decrypt(toPhone()[base + 1].body).body === "Mentioned you in a post",
   JSON.stringify(decrypt(toPhone()[base + 1].body)));
 await call(ann, "/_push/devices/preview", { endpoint: device.endpoint, preview: true });
-for (let i = 0; i < 6; i++) await mentionNote(postKey(7), "Sam Taylor", `ping ${i}`);
+for (let i = 0; i < 4; i++) await samMentions(`ping ${i}`);
 await sleep(4000);
 check("…five in ten minutes at most from one friend: the rest wait quietly on Notifications", toPhone().length === base + 5
-  && n(stateA, "inbox WHERE kind = 'mention'") === 8, `${toPhone().length - base} pushes`);
-r = await fromSam("/_peer/notify", { type: "Create", object: { type: "Note", "afterwrd:mention": true, inReplyTo: `${A}/posts/${postKey(8)}`, content: "x" } });
-check("…and a mention note about someone else's post is refused", r.status === 400, String(r.status));
+  && n(stateA, "notices WHERE kind = 'mention'") === 6, `${toPhone().length - base} pushes`);
 
 // --- turning them off --------------------------------------------------------------------------------------------------------
 

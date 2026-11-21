@@ -1,5 +1,5 @@
-// The Add photos page (src/photos.js): photos into a new or existing album, optionally shared as a post, or one
-// photo as the profile picture or cover.
+// The Add photos page (src/photos.js): photos into a new or existing album, or one photo as the profile picture or
+// cover.
 import { call, picker, uploadPhotos } from "./upload.js";
 
 const form = /** @type {HTMLFormElement} */ (document.getElementById("add"));
@@ -34,7 +34,7 @@ form.addEventListener("submit", async (event) => {
     status.textContent = "Saving…";
     const { href } = await call("/_admin/photos", {
       album: albums?.value, name: albumName?.value, description: /** @type {HTMLTextAreaElement | null} */ (form.querySelector("textarea[name=description]"))?.value,
-      text: form.text.value, share: form.share.checked, role, photos,
+      role, photos,
     });
     location.href = href;
   } catch (err) {

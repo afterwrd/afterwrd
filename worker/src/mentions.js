@@ -3,7 +3,7 @@
 // names in that list are shown as mentions, so words typed by hand ("@Ann") mention nobody. Between sites, a mention is
 // an ActivityStreams Mention tag ({ type: "Mention", href: "<their site>/", name: "@Ann Example" }), and @here is
 // "afterwrd:here": true. Whoever holds the post decides who's told: only people who can see it.
-import { siteOrigin } from "./peers.js";
+import { siteOrigin } from "./sites.js";
 import { says } from "../public/static/records.js";
 
 export { says };

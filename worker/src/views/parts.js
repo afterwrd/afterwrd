@@ -1,7 +1,5 @@
 // Pieces several signed-in pages share: post and comment cards, comment threads, the V menus and edit boxes, polls,
 // pictures and pagers. Views only draw: they read nothing and change nothing.
-import { MAX_COMMENT } from "../archive/comments.js";
-import { MAX_POST_TEXT } from "../edits.js";
 import { aspect, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
 
 import { MAX_OPTION } from "../polls.js";
@@ -114,11 +112,11 @@ export function editBox(id, home, action, text, back, max, { required = true, po
 }
 
 /**
- * The comments written here on a post or photo, then a box to add one. Forms work without JavaScript; with it, they
- * work in place (ui.js), redrawing the post they're in, or, with `region` (a photo's page), just the comments.
+ * The comments written here on a post or photo before signing, as they were: read-only, until migration turns them
+ * into signed records (docs/signed-conversations.md, step 10). Nothing if there are none.
  */
 export function thread(ctx, key, comments, { region = false } = {}) {
-  const back = ctx.url.pathname + ctx.url.search;
+  if (!comments?.length) return "";
   return html`<section class="thread" id="t-${key}" aria-label="Comments"${region && raw(' data-region=""')}>
   ${comments.map((c) => html`<div class="comment" id="c${c.id}"${c.origin && c.origin !== "site" && html` data-who="${c.origin}" data-name="${c.name}"`}>
     ${c.author_is_owner ? ownerFace(ctx)
@@ -127,18 +125,9 @@ export function thread(ctx, key, comments, { region = false } = {}) {
     <div class="bubble"><strong>${c.name}</strong>${c.origin !== "site" && notFriend(ctx, c.origin)}<span class="said">${linkify(c.text, said(c))}</span></div>
     <div class="under">
       <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
-      ${moreMenu([c.author_is_owner && c.editable && menuEdit(`edit-c${c.id}`),
-        menuDelete(`/_comments/${c.id}/delete`, "Delete this comment?", { back, inplace: "refresh" })])}
     </div>
     ${edited(c)}
-    ${c.author_is_owner && c.editable && editBox(`edit-c${c.id}`, `c${c.id}`, `/_comments/${c.id}/edit`, c.text, back, MAX_COMMENT)}
   </div>`)}
-  <form class="say" method="post" action="/_comments" data-inplace data-me="${ctx.user.name}">
-    <input type="hidden" name="target" value="${key}">
-    <input type="hidden" name="back" value="${back}">
-    <textarea name="text" data-draft="comment:${key}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
-    <button>Post</button>
-  </form>
 </section>`;
 }
 
@@ -157,8 +146,9 @@ export function ownerFace(ctx) {
  * several, ticks and Save). `action` takes the answer, with `hidden` fields; `closeAction`, for whoever asked, closes
  * it. Who chose what shows only where the poll says (to whoever asked), folded away.
  */
-export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = null, whoNote = "Only you can see this.", whoLink = null,
+export function pollBlock(ctx, poll, { id, action = null, hidden = {}, closeAction = null, whoNote = "Only you can see this.", whoLink = null,
   sign = "", closeSign = "" }) {
+  // No `action`: read-only (a poll from before signing), shown as it was.
   // `sign` and `closeSign` (afterwrd 2: views/items.js): a signed poll's forms' data-sign-* attributes (ui/sign.js).
   const back = ctx.url.pathname + ctx.url.search;
   const share = (o) => (poll.voters ? Math.round((o.count / poll.voters) * 100) : 0);
@@ -172,7 +162,7 @@ export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = nu
   const fields = html`<input type="hidden" name="back" value="${back}">
     ${Object.entries(hidden).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}`;
   let options;
-  if (!poll.open) {
+  if (!poll.open || !action) {
     options = poll.options.map((o) => html`<div class="poll-option${o.chosen ? " chosen" : ""}" style="--share: ${share(o)}%">${inside(o)}</div>`);
   } else if (poll.multiple) {
     options = html`<form method="post" action="${action}" class="poll-form" data-inplace${raw(sign)}>${fields}
@@ -201,26 +191,22 @@ export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = nu
 }
 
 export function postCard(ctx, p) {
-  // Posts written here look like friends' posts: who, when, and what they did if it's more than writing. `thread` is
-  // undefined where comments weren't loaded (no link, no box), null where the post takes none (Facebook's, for now).
+  // Posts written here before signing look like friends' posts (who, when, and what they did if it's more than writing),
+  // read-only and the owner's alone until migration (docs/signed-conversations.md, step 10). `thread` is undefined where
+  // comments weren't loaded (no link), null where the post has none (Facebook's).
   if (p.source === "afterwrd") {
     const did = p.title && p.title !== "Posted on afterwrd." ? p.title : "";
     const back = ctx.url.pathname + ctx.url.search;
     return html`<article class="card social own" id="p-${p.key}" data-region="/posts/${p.key}">
   <header>
     ${ownerFace(ctx)}
-    <span class="what"><strong>You</strong>${did && html`<span class="meta">${did}</span>`}</span>
+    <span class="what"><strong>You</strong><span class="meta">${did ? `${did} ` : ""}Only you can see this for now.</span></span>
     ${p.thread !== undefined ? html`<a class="when" href="/posts/${p.key}" title="${fmtDatetime(p.created_at)}"><time>${fmtAgo(p.created_at)}</time></a>`
       : html`<time title="${fmtDatetime(p.created_at)}">${fmtAgo(p.created_at)}</time>`}
-    ${p.thread !== undefined && moreMenu([p.editable && menuEdit(`edit-p-${p.key}`),
-      menuDelete(`/_admin/posts/${p.id}/delete`, p.event ? "Delete this event and its comments? If it's still to come, everyone invited who hasn't said no will be told it's off. This can’t be undone."
-        : "Delete this post, its photos and its comments? This can’t be undone.", { inplace: "remove" })])}
   </header>
   ${p.text && html`<div class="text">${linkify(p.text, said(p))}</div>`}
   ${edited(p)}
-  ${p.editable && p.thread !== undefined && editBox(`edit-p-${p.key}`, `p-${p.key}`, `/_admin/posts/${p.id}/edit`, p.text, back, MAX_POST_TEXT,
-    { required: Boolean(p.poll) || !p.media?.length })}
-  ${p.poll && pollBlock(ctx, p.poll, { id: `poll-${p.id}`, action: `/_admin/posts/${p.id}/vote`, closeAction: `/_admin/posts/${p.id}/close` })}
+  ${p.poll && pollBlock(ctx, p.poll, { id: `poll-${p.id}` })}
   ${p.event && ownEventBlock(ctx, p, { full: ctx.url.pathname === `/posts/${p.key}` })}
   ${p.event && ctx.url.pathname === `/posts/${p.key}` && guestsBlock(ctx, p)}
   ${collage(p.media, { back: `${back}#p-${p.key}` })}

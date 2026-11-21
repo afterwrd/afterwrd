@@ -1,24 +1,23 @@
 // The site's pages for the owner: their posts and photos (made on afterwrd, and from their Facebook download, in the
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
-import { friendEvents, friendItem, friendItems, friendThread, pullFriends, pullItems, pullNew } from "../friendcopies.js";
+import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { ownHost } from "../items.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, namesFor, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { groupPostId, postId as postAddress } from "../../public/static/activity.js";
-import { eventsFor, invitable, keepFriendEvents, oldEventsGone } from "../events.js";
+import { eventsFor, oldEventsGone } from "../events.js";
 import { datesOf, FINISHED_SQL, finishedAt, icsFile, monthSpan, readDay, readMonth, readWeek, weekSpan } from "../calendar.js";
 import { connectedToken } from "../cloudflare.js";
-import { commentable, findTarget, latestComments, loadThreads, newCount, photoKey } from "./comments.js";
+import { findTarget, hasOldThread, latestComments, loadThreads, newCount, photoKey } from "./comments.js";
 import { sitePolls } from "../polls.js";
-import { editablePosts, postVersions } from "../edits.js";
-import { connectionById, loadFeed, markAllMine, markMine, noteAnswer, rememberPicture } from "../feed.js";
+import { postVersions } from "../edits.js";
 import * as friend from "../friends.js";
 import { MAX_GROUP_PHOTOS, maxMembers } from "../groups.js";
 import { whereAmI } from "../groupsites.js";
 import * as groups from "../membership.js";
-import { ownerName } from "../peers.js";
+import { ownerName } from "../sites.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
 import { identitySummary } from "../keys.js";
@@ -88,7 +87,6 @@ const ROUTES = [
   [/^\/posts\/([A-Za-z0-9_-]{43})\/event$/, null, itemEventEdit, views.itemEventEditPage],
   [/^\/posts\/([A-Za-z0-9_-]{43})\/event\.ics$/, null, itemEventFile, null],
   [/^\/friend\/(\d+)\/posts\/([A-Za-z0-9_-]{43})\/event\.ics$/, null, friendItemEventFile, null],
-  [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event$/, null, ownEventEdit, views.ownEventEditPage],
   [/^\/posts\/(post-\d+-[0-9a-f]{8})\/event\.ics$/, null, ownEventFile, null],
   [/^\/comments$/, "comments", comments, views.commentsPage],
   [/^\/likes$/, "likes", likes, views.likesPage],
@@ -104,7 +102,6 @@ const ROUTES = [
   [/^\/friend\/(\d+)$/, null, friendHome, null],
   [/^\/friend\/(\d+)\/posts$/, null, friendPosts, views.friendPostsPage],
   [/^\/friend\/(\d+)\/posts\/(post-\d+-[0-9a-f]{8})$/, null, friendPost, views.friendPostPage],
-  [/^\/friend\/(\d+)\/posts\/(post-\d+-[0-9a-f]{8})\/event\.ics$/, null, friendEventFile, null],
   [/^\/friend\/(\d+)\/photos$/, null, friendPhotos, views.friendPhotosPage],
   [/^\/friend\/(\d+)\/photos\/album\/(\d+|other|videos)$/, null, friendAlbum, views.friendAlbumPage],
   [/^\/friend\/(\d+)\/photos\/([0-9a-f]{64})$/, null, friendPhoto, views.friendPhotoPage],
@@ -278,29 +275,30 @@ async function withMedia(db, rows, column) {
 
 /**
  * Posts with their photos, tags and (unless `threads` is false) the comments written on them here. `thread` is
- * undefined without threads, null for a post that takes no comments (Facebook's, for now), else its comments.
+ * undefined without threads, null for a post with no comments (Facebook's), else its comments. Posts written here
+ * before signing come with their polls, events, comments and earlier words, read-only (docs/signed-conversations.md,
+ * step 4e).
  */
 async function loadPosts(db, rows, { threads = true } = {}) {
   if (!rows.length) return rows;
   const ids = rows.map((p) => p.id);
   const own = rows.filter((p) => p.source === "afterwrd");
   // All at once: none needs another's answer.
-  const [posts, tags, comments, polls, earlier, editable, events] = await Promise.all([
+  const [posts, tags, comments, polls, earlier, events] = await Promise.all([
     withMedia(db, rows, "post_id"),
     all(db, `SELECT t.post_id, p.id, p.name FROM facebook_post_tags t JOIN facebook_people p ON p.id = t.person_id
       WHERE t.post_id IN (${marks(ids)})`, ids),
     threads ? loadThreads(db, own.map((p) => p.key)) : null,
     // Polls in posts written here, with who chose what: this is the owner's own site.
     sitePolls(db, own.map((p) => p.id), "site"),
-    // Edits (edits.js): what posts written here said before, and which can still be changed.
+    // Edits (edits.js): what posts written here said before.
     postVersions(db, own.filter((p) => p.edited_at).map((p) => p.id)),
-    editablePosts(db, own.map((p) => p.id)),
     // The owner's events (events.js), with everyone invited and their answers: this is the host's own site.
     eventsFor(db, own.map((p) => p.id)),
   ]);
   return posts.map((p) => ({
     ...p, tags: tags.filter((t) => t.post_id === p.id), thread: comments ? comments.get(p.key) ?? null : undefined,
-    poll: polls.get(p.id) ?? null, earlier: earlier.get(p.id) ?? [], editable: editable.has(p.id), event: events.get(p.id) ?? null,
+    poll: polls.get(p.id) ?? null, earlier: earlier.get(p.id) ?? [], editable: false, event: events.get(p.id) ?? null,
   }));
 }
 
@@ -603,13 +601,7 @@ async function person(ctx, params, id) {
 async function post(ctx, params, key) {
   const [row] = await all(ctx.db, `${POST_SQL} WHERE p.key = ?`, [key]);
   if (!row) return null;
-  // Friends who could be invited are looked up alongside, in case it's an event.
-  const [[p], friends] = await Promise.all([loadPosts(ctx.db, [row]), invitable(ctx.db)]);
-  if (p.event) {
-    // Friends who could still be invited.
-    const asked = new Set([...p.event.going, ...p.event.maybe, ...p.event.cantGo, ...p.event.waiting].map((g) => g.id));
-    p.invitable = friends.filter((f) => !asked.has(f.id)).map(({ id, name }) => ({ id, name }));
-  }
+  const [p] = await loadPosts(ctx.db, [row]);
   return { post: p };
 }
 
@@ -715,14 +707,6 @@ async function friendItemEventFile(ctx, params, connectionId, id) {
   return eventFile(item.event, { uid: `${item.connection.origin}/items/${id}`, url: page, about: `${item.connection.name}'s event: ${page}` });
 }
 
-/** Changing the owner's own event. */
-async function ownEventEdit(ctx, params, key) {
-  const found = await findTarget(ctx.db, key);
-  if (found?.post?.source !== "afterwrd") return null;
-  const event = (await eventsFor(ctx.db, [found.post.id])).get(found.post.id);
-  return event ? { post: { id: found.post.id, key, text: found.post.text, event } } : null;
-}
-
 /** The owner's own event as a calendar file. */
 async function ownEventFile(ctx, params, key) {
   const found = await findTarget(ctx.db, key);
@@ -764,13 +748,14 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
-  const [own, friendOwn, ownOld, friendsFeed, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
+  const [own, friendOwn, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
     friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
-    // …and their polls and events, still made the old way until step 4d (docs/signed-conversations.md).
+    // …and their posts from before signing: theirs alone, read-only, until migration (docs/signed-conversations.md).
     all(db, `${POST_SQL} WHERE p.source = 'afterwrd' ORDER BY p.created_at DESC LIMIT 30`).then((rows) => loadPosts(db, rows)),
-    loadFeed(db, ctx.url.origin, ctx.env),
+    // Friends: whose site has gone quiet or said no (friendcopies.js gone) shows on Friends instead of Home.
+    all(db, "SELECT * FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
     onThisDay(ctx, 2),
     newDevices(db, ctx.user),
     newPushDevices(db),
@@ -797,11 +782,11 @@ async function home(ctx, params) {
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
-    return { own, friendOwn, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
       newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange };
   }
   return {
-    own, friendOwn, ownOld, feed: friendsFeed, onThisDay: onThisDayPosts, friends: friendsFeed.connections,
+    own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
@@ -832,7 +817,7 @@ async function onThisDay(ctx, limit) {
 /** A photo's comments ({key, thread}), if it takes them: only a picture posted on afterwrd, for now. */
 async function photoThread(db, m) {
   const key = photoKey(m);
-  if (!key || !commentable(await findTarget(db, key))) return { key: null, thread: null };
+  if (!key || !hasOldThread(await findTarget(db, key))) return { key: null, thread: null };
   return { key, thread: (await loadThreads(db, [key])).get(key) };
 }
 
@@ -842,12 +827,9 @@ async function photoByHash(ctx, params, hash) {
   return m ? Response.redirect(`${ctx.url.origin}/photos/${m.id}${ctx.url.hash}`, 302) : null;
 }
 
-// --- a connected friend's posts and photos, read from their site (friends.js) ---------------------------------------
+// --- a friend's shared Facebook archive and albums, read from their site (friends.js) ---------------------------------
 
-/**
- * Only the owner reads friends' sites from here. `load` gets the connection (with the key to call their site) and
- * returns the page's data; the page is given the friend without it.
- */
+/** Only the owner reads friends' sites from here. `load` gets the connection and returns the page's data. */
 async function fromFriend(ctx, id, load) {
   /** @type {(Row<"connections"> & Record<string, any>) | null} the row, and what the page adds to it (facebook, avatar…) */
   const connection = await connectionById(ctx.db, id);
@@ -862,11 +844,11 @@ async function fromFriend(ctx, id, load) {
     connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection).run();
     if (data instanceof Response) return data; // somewhere else to go (a photo in a signed post: friendPhoto)
-    return { ...data, friend: withoutKeys(connection) };
+    return { ...data, friend: connection };
   } catch (error) {
     connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection, error).run();
-    throw new Problem(views.friendProblem, { friend: withoutKeys(connection), message: error.message });
+    throw new Problem(views.friendProblem, { friend: connection, message: error.message });
   }
 }
 
@@ -889,7 +871,7 @@ async function friendsIndex(ctx) {
   const same = (a, b) => a.localeCompare(b, "en", { sensitivity: "accent" }) === 0;
   const linked = new Map(links.results.map((l) => [l.connection_id, l]));
   const taken = links.results.filter((l) => l.person_name);
-  const friends = connections.results.map(withoutKeys).map((c) => {
+  const friends = connections.results.map((c) => {
     const link = linked.get(c.id);
     if (link?.person_name) return { ...c, person: people.results.find((p) => same(p.name, link.person_name)) ?? { name: link.person_name } };
     if (link) return c; // they said the suggestion wasn't them
@@ -921,52 +903,31 @@ async function friendHome(ctx, params, id) {
 
 async function friendPosts(ctx, params, id) {
   return fromFriend(ctx, id, async (c) => {
-    const { posts, paging, avatar, cover } = await friend.friendPosts(c, pageNumber(params), ctx.env);
+    const { posts, paging, avatar, cover } = await friend.friendPosts(ctx.env, ctx.url.origin, c, pageNumber(params));
     Object.assign(c, { avatar, cover });
-    const [, marked] = await Promise.all([
-      avatar ? rememberPicture(ctx.db, c, avatar)?.run() : null,
-      markAllMine(ctx.db, posts.map((p) => ({ connectionId: c.id, target: p.key, comments: p.comments })), ctx.url.origin),
-      keepFriendEvents(ctx.db, c, posts),
-    ]);
-    posts.forEach((p, i) => { p.comments = marked[i]; });
-    // afterwrd 2: their signed posts, kept here (friendcopies.js), on the first page, asked for afresh first.
+    if (avatar) await rememberPicture(ctx.db, c, avatar)?.run();
+    // Their signed posts, kept here (friendcopies.js), on the first page, asked for afresh first.
     if (pageNumber(params) === 1) await pullItems(ctx.env, ctx.url.origin, c).catch(() => null);
     const items = pageNumber(params) === 1 ? await friendItems(ctx.db, { connection: c.id }) : [];
     return { posts, paging, items };
   });
 }
 
-/** One of a friend's posts (an event they invited the owner to, say), with its comments. */
+/** One of a friend's Facebook posts, if they share them. */
 async function friendPost(ctx, params, id, key) {
   return fromFriend(ctx, id, async (c) => {
-    const p = await friend.friendPost(c, key, ctx.env);
-    if (!p) {
-      // Gone, or no longer shown to the owner (an invitation taken back): so is the owner's copy of it.
-      await ctx.db.prepare("DELETE FROM events_elsewhere WHERE connection_id = ? AND post_key = ?").bind(c.id, key).run();
-      throw new Error("That post isn't there any more.");
-    }
-    [p.comments] = await Promise.all([markMine(ctx.db, c.id, p.key, p.comments, ctx.url.origin), keepFriendEvents(ctx.db, c, [p])]);
+    const p = await friend.friendPost(ctx.env, ctx.url.origin, c, key);
+    if (!p) throw new Error("That post isn't there any more.");
     return { post: p };
   });
 }
 
-/** A friend's event as a calendar file, from the owner's own copy of it. */
-async function friendEventFile(ctx, params, id, key) {
-  const e = await first(ctx.db, `SELECT e.*, c.name AS friend, c.origin FROM events_elsewhere e JOIN connections c ON c.id = e.connection_id
-    AND c.approved_at IS NOT NULL WHERE e.connection_id = ? AND e.post_key = ?`, [Number(id), key]);
-  if (!e) return null;
-  const page = `${ctx.url.origin}/friend/${id}/posts/${key}`;
-  return new Response(icsFile(e, { uid: postAddress(e.origin, key), url: page, about: `${e.friend}'s event: ${page}` }), {
-    headers: { "Content-Type": "text/calendar; charset=utf-8", "Content-Disposition": 'attachment; filename="event.ics"',
-      "Cache-Control": "private, no-store" } });
-}
-
 async function friendPhotos(ctx, params, id) {
-  return fromFriend(ctx, id, async (c) => ({ albums: await friend.friendAlbums(c) }));
+  return fromFriend(ctx, id, async (c) => ({ albums: await friend.friendAlbums(ctx.env, ctx.url.origin, c) }));
 }
 
 async function friendAlbum(ctx, params, id, key) {
-  return fromFriend(ctx, id, async (c) => ({ album: await friend.friendAlbum(c, key, pageNumber(params)) }));
+  return fromFriend(ctx, id, async (c) => ({ album: await friend.friendAlbum(ctx.env, ctx.url.origin, c, key, pageNumber(params)) }));
 }
 
 /**
@@ -976,13 +937,12 @@ async function friendAlbum(ctx, params, id, key) {
  */
 async function friendPhoto(ctx, params, id, hash) {
   return fromFriend(ctx, id, async (c) => {
-    const m = await friend.friendPhoto(c, hash);
+    const m = await friend.friendPhoto(ctx.env, ctx.url.origin, c, hash);
     // afterwrd 2: a photo in their signed post opens on its own page there, with its signed comments (friendcopies.js).
     if (m.inItem) {
       const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : m.album ? `/friend/${c.id}/photos/album/${m.album.key}` : `/friend/${c.id}/photos`;
       return Response.redirect(`${ctx.url.origin}/friend/${c.id}/posts/${m.inItem.post}/photos/${m.inItem.index}?${new URLSearchParams({ in: "post", back })}`, 302);
     }
-    m.comments = await markMine(ctx.db, c.id, `photo-${m.hash}`, m.comments, ctx.url.origin);
     const photos = m.post?.photos ?? [];
     const at = params.get("in") === "post" ? photos.findIndex((p) => p.hash === m.hash) : -1;
     if (at < 0) return { photo: { ...m, inPost: null } };
@@ -1037,17 +997,13 @@ async function eventsIndex(ctx, params) {
   const at = now();
   await oldEventsGone(db).run();
   const IN_SPAN = `${FINISHED_SQL} >= ?1 AND e.starts_at < ?2`;
-  const [hosted, friends, plans, joined, invites] = await db.batch([
+  const [hosted, plans, joined] = await db.batch([
+    // The owner's events from before signing, theirs alone, read-only.
     db.prepare(`SELECT e.*, p.key FROM events e JOIN posts p ON p.id = e.post_id WHERE ${IN_SPAN}`).bind(from, to),
-    db.prepare(`SELECT e.*, c.name AS friend FROM events_elsewhere e JOIN connections c ON c.id = e.connection_id
-      AND c.approved_at IS NOT NULL WHERE ${IN_SPAN} AND e.answer IS NOT 'no'`).bind(from, to),
     db.prepare(`SELECT e.* FROM events_elsewhere e WHERE e.group_id IS NOT NULL AND ${IN_SPAN}`).bind(from, to),
     db.prepare("SELECT * FROM groups WHERE joined_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
-    // Invitations still to answer, for events still to come and not called off.
-    db.prepare(`SELECT e.*, c.id AS connection, c.name AS friend FROM events_elsewhere e JOIN connections c ON c.id = e.connection_id
-      AND c.approved_at IS NOT NULL WHERE e.answer IS NULL AND e.cancelled_at IS NULL AND ${FINISHED_SQL} >= ?1 ORDER BY e.starts_at LIMIT 50`).bind(at),
   ]);
-  // afterwrd 2: the owner's signed events, and friends' they're invited to (kept as copies), with their answers.
+  // The owner's signed events, and friends' they're invited to (kept as copies), with their answers.
   const [ownSigned, friendSigned] = await Promise.all([
     db.prepare("SELECT id, content FROM items WHERE audience = 'invited'").all(),
     friendEvents(db),
@@ -1055,8 +1011,6 @@ async function eventsIndex(ctx, params) {
   const inSpan = (e) => finishedAt(e) >= from && e.starts_at < to;
   const items = [
     ...hosted.results.map((e) => calendarItem(e, { kind: "own", href: `/posts/${e.key}`, who: "Your event" })),
-    ...friends.results.map((e) => calendarItem(e, { kind: "friend", href: `/friend/${e.connection_id}/posts/${e.post_key}`,
-      who: `${e.friend}'s event`, answer: e.answer })),
     ...ownSigned.results.map((r) => ({ id: String(r.id), e: JSON.parse(String(r.content)).event })).filter(({ e }) => e && inSpan(e))
       .map(({ id, e }) => calendarItem({ ...e, cancelled_at: e.cancelled ? e.cancelled_at ?? 1 : null }, { kind: "own", href: `/posts/${id}`, who: "Your event" })),
     ...friendSigned.filter((c) => c.event.answer !== "no" && inSpan(c.event))
@@ -1090,9 +1044,8 @@ async function eventsIndex(ctx, params) {
   return {
     ...calendarShown(shown), items, unreachable, notAsked: Math.max(0, joined.results.length - GROUPS_ASKED),
     invitations: [
-      ...invites.results.map((e) => calendarItem(e, { connection: e.connection, key: e.post_key, who: e.friend,
-        href: `/friend/${e.connection}/posts/${e.post_key}` })),
-      // Signed invitations, answered here as anywhere else: signed, and passed on by this site (friendcopies.js).
+      // Invitations still to answer, for events still to come and not called off: answered here as anywhere else,
+      // signed, and passed on by this site (friendcopies.js).
       ...friendSigned.filter((c) => !c.event.answer && !c.event.cancelled_at && finishedAt(c.event) >= at && c.list)
         .map((c) => calendarItem(c.event, { connection: c.connection.id, key: c.id, who: c.connection.name, href: `/friend/${c.connection.id}/posts/${c.id}`,
           relay: `/_admin/friend/${c.connection.id}/items/${c.id}/records`, list: c.list, version: c.version })),

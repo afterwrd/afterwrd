@@ -158,7 +158,7 @@ const fromElsewhere = await sendInPlace("/posts", "https://elsewhere.example");
 check("…and never for a form sent from another site", fromElsewhere.status === 403 && !fromElsewhere.headers.get("afterwrd-redrawn"));
 
 // --- every signed-in action refuses another site, from one check in index.js: so a new one can't forget -------------
-for (const path of ["/_comments", "/_feed/comments", "/_push/on", "/_groups/1/comments", "/_admin/devices/seen", "/_admin/update/auto-later",
+for (const path of ["/_admin/items", "/_admin/events/read", "/_push/on", "/_groups/1/comments", "/_admin/devices/seen", "/_admin/update/auto-later",
   "/_cloudflare/finish", "/_cloudflare/auto-finish", "/_cloudflare/checks-finish", "/_a-handler-not-written-yet"]) {
   const res = await fetch(BASE + path, { method: "POST", redirect: "manual", body: "text=hi",
     headers: { Origin: "https://elsewhere.example", Cookie: `__Host-session=${ownerCookie}`, "Content-Type": "application/x-www-form-urlencoded" } });

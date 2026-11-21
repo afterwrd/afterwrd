@@ -1,12 +1,12 @@
 // The owner's composer on Home and Posts: text and up to 20 photos (prepared and uploaded by upload.js), and perhaps a
-// poll (the text is its question; src/polls.js), then the post is saved (src/posts.js). In a group, the form says where
-// it goes and how many photos it takes (src/groups.js).
+// poll (the text is its question; src/polls.js), then the post is signed here and saved (src/items.js). In a group, the
+// form says where it goes and how many photos it takes (src/groups.js), and the post isn't signed yet.
 import { call, picker, uploadPhotos } from "./upload.js";
 
 const form = /** @type {HTMLFormElement} */ (document.getElementById("composer"));
 const MAX_PHOTOS = Number(form.dataset.max) || 20;
 const MAX_OPTIONS = 10;
-const ACTION = form.dataset.action || "/_admin/posts";
+const ACTION = form.dataset.action || null; // a group's; none for the owner's own signed posts
 const input = /** @type {HTMLInputElement} */ (form.querySelector("input[type=file]"));
 const status = /** @type {HTMLElement} */ (form.querySelector(".status"));
 const error = /** @type {HTMLElement} */ (form.querySelector(".error"));
@@ -90,9 +90,9 @@ form.addEventListener("submit", async (event) => {
     status.textContent = "Posting…";
     // Who it mentions, as picked (ui/mentions.js): the site keeps those whose @name is still in the words.
     const mentions = /** @type {HTMLInputElement | null} */ (form.querySelector("input[name=mentions]"))?.value ?? null;
-    if (ACTION === "/_admin/posts") {
-      // afterwrd 2: the owner's own post (and any poll in it) is a record signed here, with this browser's key
-      // (src/items.js). (Groups follow in a later step.)
+    if (!ACTION) {
+      // The owner's own post (and any poll in it) is a record signed here, with this browser's key (src/items.js).
+      // (Groups follow in a later step.)
       const [{ makeRecord, pickedMentions }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
       const key = await savedKey();
       if (!key?.person || key.expires < Date.now() / 1000) throw new Error(CANT_SIGN);

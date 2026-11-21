@@ -4,7 +4,6 @@
 import { dateKey, datesOf, dayName, eventDay, eventDays, eventFormValues, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
 import { asset, icon } from "./nav.js";
 import { html, raw } from "./html.js";
-import { friendBase } from "./friends.js";
 import { groupBase, groupHead, mayDelete } from "./groups.js";
 import { page } from "./layout.js";
 
@@ -84,11 +83,9 @@ export function guestPicker(friends, { none = "" } = {}) {
 </script>`;
 }
 
-/** On the owner's own event's page: who's invited, taking an invitation back, and inviting more. */
+/** On the owner's own event's page, for an event from before signing: who was invited, and their answers, as they were. */
 export function guestsBlock(ctx, p) {
   const e = p.event;
-  const back = ctx.url.pathname + ctx.url.search;
-  const over = finishedAt(e) < Date.now() / 1000;
   const answers = { going: "Going", maybe: "Maybe", no: "Can't go" };
   // What became of an invitation not yet answered: their site may be too old to take it, or not answering.
   const waiting = (g) => (g.delivery === "refused" ? "Their site didn't take the invitation: it may need updating"
@@ -99,16 +96,7 @@ export function guestsBlock(ctx, p) {
   <summary>Who's invited (${guests.length})</summary>
   ${guests.length ? html`<ul class="guest-list">${guests.map(([g, answer]) => html`<li>
     <span class="name">${g.name}</span> <span class="meta">${answer ? answers[answer] : waiting(g)}</span>
-    <form method="post" action="/_admin/events/${p.id}/uninvite" data-inplace
-      data-confirm="Take back ${g.name}'s invitation? They won't see this event any more, and they aren't told." data-confirm-ok="Take it back">
-      <input type="hidden" name="back" value="${back}"><input type="hidden" name="guest" value="${g.id}">
-      <button class="chip">Take back</button></form>
-  </li>`)}</ul>` : html`<p class="meta">Nobody yet.</p>`}
-  ${!e.cancelled_at && !over && html`<form method="post" action="/_admin/events/${p.id}/invite" class="stack invite-more">
-    <input type="hidden" name="back" value="${back}">
-    ${guestPicker(p.invitable ?? [], { none: guests.length ? "You've invited all your friends." : "You have no friends on afterwrd to invite yet." })}
-    ${p.invitable?.length > 0 && html`<div class="actions-row"><button class="chip primary">Invite them</button></div>`}
-  </form>`}
+  </li>`)}</ul>` : html`<p class="meta">Nobody.</p>`}
 </details>`;
 }
 
@@ -182,18 +170,10 @@ function repeatingBlock(ctx, g, p, { full = false }) {
 /** The day one date of an event is on, where it's held: { year, month, day }. */
 const eventDayParts = (e) => { const [year, month, day] = eventDays(e)[0].split("-").map(Number); return { year, month, day }; };
 
-/** A friend's event, in their post (see eventBlock): only those they invited see it. */
-export function friendEventBlock(ctx, c, p, { full = false } = {}) {
-  const base = `${friendBase(c)}/posts/${p.key}`;
-  return eventBlock(ctx, p.event, { href: base, full, answer: { action: "/_feed/answer", hidden: { connection: c.id, target: p.key } },
-    ics: `${base}/event.ics`, note: `${c.name}'s event. Only the people ${c.name} invited can see it.` });
-}
-
-/** The owner's own event, in their post (see eventBlock). */
+/** The owner's own event from before signing, in their post (see eventBlock): read-only, and theirs alone for now. */
 export function ownEventBlock(ctx, p, { full = false } = {}) {
-  return eventBlock(ctx, p.event, { href: `/posts/${p.key}`, full, ics: `/posts/${p.key}/event.ics`, edit: `/posts/${p.key}/event`,
-    cancel: `/_admin/events/${p.id}/cancel`, cancelNote: "Call this event off? Everyone invited who hasn't said no will be told.",
-    note: "Your event. Only the people you invite can see it." });
+  return eventBlock(ctx, p.event, { href: `/posts/${p.key}`, full, ics: `/posts/${p.key}/event.ics`,
+    note: "Your event, from before signing. Only you can see it for now, and it can't be changed." });
 }
 
 /**
@@ -378,14 +358,14 @@ function calendarList(ctx, items, { month, day }) {
 
 /** An invitation still to answer, with the three answers right there. */
 function invitationCard(ctx, e) {
-  // A signed invitation (afterwrd 2: views/items.js): its answer is signed here, and passed on by this site.
-  const signed = e.relay ? raw(` data-sign="answer" data-sign-item="${e.key}" data-sign-host="${e.list.host}" data-sign-seen-n="${e.list.seen.n}"`
-    + ` data-sign-seen-h="${e.list.seen.h}" data-sign-prev="${e.list.mine ?? ""}" data-sign-version="${e.version}"`) : "";
+  // Its answer is signed here (views/items.js), and passed on by this site.
+  const signed = raw(` data-sign="answer" data-sign-item="${e.key}" data-sign-host="${e.list.host}" data-sign-seen-n="${e.list.seen.n}"`
+    + ` data-sign-seen-h="${e.list.seen.h}" data-sign-prev="${e.list.mine ?? ""}" data-sign-version="${e.version}"`);
   return html`<li class="card invitation" id="inv-${e.connection}-${e.key}" data-region="">
   <a class="what" href="${e.href}">${dateTile(e)}<span><strong>${e.title}</strong>
     <span class="meta">${eventWhen(e, ctx.zone)}${e.place && ` · ${e.place}`}</span>
     <span class="meta">${e.who} invited you</span></span></a>
-  <form method="post" action="${e.relay ?? "/_feed/answer"}" class="answers" aria-label="Are you going to ${e.title}?"${signed}>
+  <form method="post" action="${e.relay}" class="answers" aria-label="Are you going to ${e.title}?"${signed}>
     <input type="hidden" name="back" value="/events"><input type="hidden" name="connection" value="${e.connection}">
     <input type="hidden" name="target" value="${e.key}">
     ${ANSWER_LABELS.map(([value, label]) => html`<button class="chip" name="answer" value="${value}">${label}</button>`)}
@@ -491,19 +471,6 @@ ${outdated ? html`<p class="notice">This group's site needs updating before it c
 </details>
 ${calendarSwitch(base, view)}
 ${shownView}`}`);
-}
-
-/** Changing the owner's own event. */
-export function ownEventEditPage(ctx, { post }) {
-  return page(ctx, "Change the event", html`
-<p class="crumbs"><a href="/events">Events</a> /</p>
-<section class="card">
-  <h2>Change the event</h2>
-  <p class="meta">If you change its name, time or place, everyone invited who hasn't said no is told. Its times are in
-  ${post.event.time_zone.replace(/_/g, " ")} time.</p>
-  ${eventForm({ action: `/_admin/events/${post.id}/edit`, back: `/posts/${post.key}`, values: eventFormValues(post.event),
-    text: post.text ?? "", submit: "Save" })}
-</section>`);
 }
 
 /** Changing an event the owner here added. */

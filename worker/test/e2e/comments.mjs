@@ -77,8 +77,8 @@ check("imported posts have no comment box", (await owner.$$("article.card")).len
 const [imported] = sql("SELECT id, hash, thumb_hash, width, height, size FROM media WHERE source = 'facebook' AND kind = 'photo' AND thumb_hash IS NOT NULL ORDER BY id LIMIT 1");
 await owner.goto(`${BASE}/photos/${imported.id}`);
 check("an imported photo has no comment box", Boolean(await owner.$(".info")) && !(await owner.$(".info .say")));
-check("…and comments on it are refused", (await owner.evaluate((target) => fetch("/_comments", { method: "POST", redirect: "manual",
-  body: new URLSearchParams({ target, text: "x", back: "/posts" }) }).then((r) => r.status), `photo-${imported.hash}`)) === 403);
+check("…and there's no way to comment unsigned any more", ![200, 302, 303].includes(await owner.evaluate((target) => fetch("/_comments", { method: "POST", redirect: "manual",
+  body: new URLSearchParams({ target, text: "x", back: "/posts" }) }).then((r) => r.status), `photo-${imported.hash}`)));
 
 // Two posts written here, signed in the page with this browser's key as the composer signs them (afterwrd 2): words,
 // then a picture that's also in the import (its file is already stored).

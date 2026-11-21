@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
 import { signCall } from "../../src/signedcalls.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -78,9 +78,8 @@ async function homeUntil(page, site, ok, ms = 20_000) {
   }
   return cards;
 }
-// A copy made out of date here, as a change on the friend's site that sends no note would be within minutes: so Home
-// asks their site while it waits, as it does with no copy it can show.
-const copiesOld = (state) => sql(state, "UPDATE connections SET copy_until = 0");
+// A friend's site as if it had never been asked: so Home asks it while it waits (friendcopies.js pullNew).
+const copiesOld = (state) => sql(state, "UPDATE connections SET items_checked_at = NULL");
 
 const ann = await owner(A, "Ann Example");
 const bob = await owner(B, "Bob Example");
@@ -120,8 +119,13 @@ check("confirming connects and opens Bob's Home", new URL(bob.url()).pathname ==
 
 // Nothing is shared until Ann approves: a passed-on link gets someone no further than a request.
 check("Bob's Home says Ann hasn't approved yet", (await bob.$eval("main", (m) => m.textContent)).includes("Waiting for Ann Example to approve"));
-const keyBobHolds = sql(stateB, "SELECT their_key FROM connections")[0].their_key;
-check("Bob's key can't read Ann's site yet", (await fetch(`${A}/_peer/feed`, { headers: { Authorization: `Bearer ${keyBobHolds}` } })).status === 403);
+check("each site knows the other by identity, with no passwords handed over",
+  sql(stateA, "SELECT identity FROM connections")[0].identity === sql(stateB, "SELECT person FROM own_identity")[0].person
+  && sql(stateB, "SELECT identity FROM connections")[0].identity === sql(stateA, "SELECT person FROM own_identity")[0].person
+  && !sql(stateA, "SELECT sql FROM sqlite_master WHERE name = 'connections'")[0].sql.includes("key"));
+check("…and each knows the other by their signed name", sql(stateA, "SELECT name FROM connections")[0].name === "Bob Example"
+  && sql(stateB, "SELECT name FROM connections")[0].name === "Ann Example");
+check("Bob's site, signing its calls, can't read Ann's site yet", (await siteCall(stateB, B, `${A}/_p/items?since=0`)).status === 403);
 await ann.goto(`${A}/`);
 check("Ann's Friends shows 1 request", (await ann.$eval('header.site a[href="/friend"] .count', (c) => c.firstChild.textContent).catch(() => "")) === "1");
 check("Ann's Home doesn't show Bob yet", !(await ann.$("article.from-friend")));
@@ -146,7 +150,7 @@ check("A friend's page says how long it waited on the database and their site, a
   /db;dur=\d+;desc="Database: [1-9]\d* quer\w+ in [1-9]\d* rounds?"/.test(timing) && /sql;dur=[\d.]+;desc="Running them: [1-9]\d* rows read"/.test(timing)
   && /sites;dur=\d+;desc="Other sites: [1-9]\d* call/.test(timing)
   && /calls;desc="Calls out: [1-9]\d* of 50; to objects: \d+"/.test(timing) && /total;dur=\d+/.test(timing), timing);
-const others = await Promise.all([fetch(`${A}/_auth/login`), fetch(`${A}/_peer/feed`, { headers: { Authorization: `Bearer ${keyBobHolds}` } })]);
+const others = await Promise.all([fetch(`${A}/_auth/login`), siteCall(stateB, B, `${A}/_p/items?since=0`)]);
 check("…but not signed out, nor in answer to a friend's site", others[1].status === 200 && others.every((r) => !r.headers.has("server-timing")));
 // Site files by their fingerprint are kept for good; by any other address they're checked each time (static.js, nav.js).
 const css = await ann.$eval('link[rel=stylesheet][href^="/static/style.css"]', (l) => l.getAttribute("href"));
@@ -326,52 +330,47 @@ check("Ann's comment deleted on Bob's site, its words gone, a marker left", (awa
   && (await bob.$eval("article.card .comment.gone", (c) => c.textContent).catch(() => "")).includes("deleted")
   && !sql(stateB, `SELECT entries FROM list_pages WHERE list = '${bobPostId}'`)[0].entries.includes(wasContent));
 
-// What a connection can and can't reach.
-const keyForB = sql(stateA, "SELECT their_key FROM connections")[0].their_key;
-const peer = (path, key, body) => fetch(B + path, { method: body ? "POST" : "GET", redirect: "manual",
-  headers: { ...(key && { Authorization: `Bearer ${key}` }), "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
-check("no key, no feed", (await peer("/_peer/feed")).status === 401);
-check("no key, no notes", (await peer("/_peer/notify", null, { type: "Create", object: { type: "Note", id: `${A}/posts/post-1-deadbeef` } })).status === 401);
-check("a note about another site's post is refused", (await peer("/_peer/notify", keyForB,
-  { type: "Create", object: { type: "Note", id: `${C}/posts/post-1-deadbeef` } })).status === 400);
-const notesOnBob = () => sql(stateB, "SELECT COUNT(*) AS n FROM inbox")[0].n;
-const notesBefore = notesOnBob();
-await peer("/_peer/notify", keyForB, { type: "Create", object: { type: "Note", inReplyTo: `${A}/posts/post-1-deadbeef`, content: "spam" } });
-check("a note about a comment Bob had no part in isn't kept", notesOnBob() === notesBefore);
-check("wrong key, no feed", (await peer("/_peer/feed", "x".repeat(43))).status === 401);
-const bobsImportedPost = sql(stateB, "SELECT key, created_at FROM posts WHERE source = 'facebook' LIMIT 1")[0];
-check("can't comment on a post that isn't there", (await peer("/_peer/comments", keyForB, { type: "Note", inReplyTo: `${B}/posts/post-${bobsImportedPost.created_at}-00000000`, content: "x" })).status === 404);
-check("…or on one from his Facebook download (no comments on those, for now)", (await peer("/_peer/comments", keyForB,
-  { type: "Note", inReplyTo: `${B}/posts/${bobsImportedPost.key}`, content: "x" })).status === 403);
-// With his Facebook photos not shared, a photo from them can't be seen or commented on, even by fingerprint.
+// What a friend's site can and can't reach: only signed calls, and only what's shared.
+const fromAnn = (path, body = null, options = {}) => siteCall(stateA, A, B + path, body, options);
+check("an unsigned call gets nothing", (await fetch(`${B}/_p/items`)).status === 401
+  && (await fetch(`${B}/_p/items`, { headers: { "Afterwrd-From": A } })).status === 401
+  && (await fetch(`${B}/_p/posts`, { headers: { "Afterwrd-From": A } })).status === 401);
+check("…nor does one sent again after 5 minutes", (await fromAnn("/_p/items", null, { at: Math.floor(Date.now() / 1000) - 400 })).status === 401);
+check("…nor one signed by Ann's site but claiming to be from another", (await fromAnn("/_p/items", null, { headers: { "Afterwrd-From": C } })).status === 401);
+check("the old routes between friends are gone", ![200, 202].includes((await fetch(`${B}/_peer/feed`, { redirect: "manual" })).status)
+  && ![200, 202].includes((await fromAnn("/_peer/comments", { type: "Note", content: "x" })).status));
+// A post Bob wrote before posts were signed is his alone, until it's turned into a signed post (step 10).
+const oldKey = `post-${Math.floor(Date.now() / 1000) - 86400}-0badc0de`;
+sql(stateB, `INSERT INTO posts (key, source, created_at, text, audience) VALUES ('${oldKey}', 'afterwrd', ${Math.floor(Date.now() / 1000) - 86400}, 'Written before signing', 'friends')`);
+check("friends can't see a post written before signing", (await fromAnn(`/_p/posts/${oldKey}`)).status === 404
+  && !JSON.stringify(await (await fromAnn("/_p/posts")).json()).includes("Written before signing"));
+await bob.goto(`${B}/posts/${oldKey}`);
+check("…which Bob sees, read-only, saying only he can see it", (await bob.$eval("main", (m) => m.textContent)).includes("Only you can see this for now")
+  && !(await bob.$(`article#p-${oldKey} form`)) && !(await bob.$(`article#p-${oldKey} details.more`)));
+sql(stateB, `DELETE FROM posts WHERE key = '${oldKey}'`);
+// With his Facebook photos not shared, a photo from them can't be seen, even by fingerprint.
 const sharedBefore = sql(stateB, "SELECT value FROM settings WHERE key = 'sections'")[0]?.value ?? "[]";
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '[]')`);
 const unshared = sql(stateB, `SELECT hash FROM media WHERE hash IS NOT NULL AND source = 'facebook'
   AND hash NOT IN (SELECT hash FROM media WHERE source = 'afterwrd' AND hash IS NOT NULL) LIMIT 1`)[0]?.hash;
-check("a photo Bob hasn't shared can't be fetched by its fingerprint", Boolean(unshared) && (await peer(`/_peer/photos/${unshared}`, keyForB)).status === 404, unshared);
-check("…or commented on", (await peer("/_peer/comments", keyForB, { type: "Note", inReplyTo: `${B}/photos/sha256/${unshared}`, content: "x" })).status === 404);
+check("a photo Bob hasn't shared can't be fetched by its fingerprint", Boolean(unshared) && (await fromAnn(`/_p/photos/${unshared}`)).status === 404, unshared);
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '${sharedBefore.replace(/'/g, "''")}')`);
-check("…but can once his photos are shared", (await peer(`/_peer/photos/${unshared}`, keyForB)).status === 200);
-check("signed posts need a signed call from a friend's site", (await fetch(`${B}/_p/items`)).status === 403
-  && (await fetch(`${B}/_p/items`, { headers: { "Afterwrd-From": A } })).status === 401);
+check("…but can once his photos are shared", (await fromAnn(`/_p/photos/${unshared}`)).status === 200);
 check("a used Connect link is refused", (await (await browser.createBrowserContext()).newPage().then(async (p) => (await p.goto(link)).status())) === 404);
-check("Feed actions need the owner's session", (await fetch(`${A}/_feed/comments`, { method: "POST", redirect: "manual", headers: { Origin: A } })).status === 401);
-check("another site can't post Ann's comments", (await fetch(`${A}/_feed/comments`, { method: "POST", redirect: "manual",
-  headers: { Origin: "https://evil.example", Cookie: `__Host-session=${(await ann.cookies()).find((c) => c.name === "__Host-session").value}` } })).status === 403);
 
-// Bob, connected to Ann, can't pass himself off as Ann to a third site using the key Ann gave him.
+// Bob, connected to Ann, can't pass himself off as Ann to a third site.
 const cara = await owner(C, "Cara Example");
 await cara.goto(`${C}/_admin/connections`);
 await cara.click("#make");
 await cara.waitForSelector("#link:not([hidden])");
 const caraToken = (await cara.$eval("#link-url", (i) => i.value)).split("/_connect/")[1];
-const keyBobHoldsForAnn = sql(stateB, "SELECT their_key FROM connections")[0].their_key;
-const forged = await fetch(`${C}/_connect/${caraToken}/accept`, { method: "POST", headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ origin: A, key: keyBobHoldsForAnn }) });
+// His site signs the call, but says it's from Ann's: Cara's site finds Ann's identity at Ann's address, and it isn't his.
+const forged = await siteCall(stateB, A, `${C}/_connect/${caraToken}/accept`, {});
 check("a connected site can't impersonate another to a third", forged.status === 400 && sql(stateC, "SELECT COUNT(*) AS n FROM connections")[0].n === 0,
   `${forged.status} ${(await forged.text()).slice(0, 80)}`);
 check("…and the link is still usable by the real friend", (await (await browser.createBrowserContext()).newPage().then(async (p) => (await p.goto(`${C}/_connect/${caraToken}`)).status())) === 200);
-check("hello refuses a finished connection's key", (await fetch(`${A}/_peer/hello?from=${encodeURIComponent(C)}`, { headers: { Authorization: `Bearer ${keyBobHoldsForAnn}` } })).status === 401);
+const unsigned = await fetch(`${C}/_connect/${caraToken}/accept`, { method: "POST", headers: { "Content-Type": "application/json", "Afterwrd-From": B }, body: "{}" });
+check("…nor can anyone ask without signing", unsigned.status === 400 && sql(stateC, "SELECT COUNT(*) AS n FROM connections")[0].n === 0);
 
 // Ann reads Bob's posts and photos without leaving her own site.
 const bobId = sql(stateA, "SELECT id FROM connections")[0].id;
@@ -415,8 +414,8 @@ await ann.waitForFunction(() => document.getElementById("ask-result").textConten
 await bob.goto(`${B}/`);
 await Promise.all([settled(bob), bob.click(".check-request form button")]);
 check("\"Not now\" puts a request away", (await bob.$(".check-request")) === null && sql(stateB, "SELECT COUNT(*) AS n FROM check_requests")[0].n === 0);
-check("only a friend's site can ask for a check", (await fetch(`${B}/_peer/check-request`, { method: "POST",
-  headers: { Authorization: `Bearer ${"x".repeat(43)}`, "Content-Type": "application/json" }, body: JSON.stringify({ type: "CheckRequest" }) })).status === 401);
+check("only a friend's site can ask for a check", (await fetch(`${B}/_p/check-request`, { method: "POST",
+  headers: { "Afterwrd-From": A, "Content-Type": "application/json" }, body: JSON.stringify({ type: "CheckRequest" }) })).status === 401);
 await ann.goto(`${A}/`);
 await Promise.all([ann.waitForNavigation(), ann.click("article.from-friend header .what a")]);
 check("Bob's name on Home opens his page on Ann's site", ann.url() === `${A}/friend/${bobId}/posts`, ann.url());
@@ -510,9 +509,6 @@ check("a name that isn't in the download isn't linked", await (async () => {
 await ann.screenshot({ path: `${OUT}/friends.png`, fullPage: true });
 
 // Friends read each other from their own sites; the old ways of coming in to the other's site are gone.
-const keyAnnHoldsForBob = sql(stateA, "SELECT their_key FROM connections")[0].their_key;
-check("no one-time passes to visit any more", (await fetch(`${B}/_peer/ticket`, { method: "POST", headers: { "Content-Type": "application/json",
-  Authorization: `Bearer ${keyAnnHoldsForBob}` }, body: "{}" })).status === 404);
 check("no friend sign-in any more", (await fetch(`${B}/_auth/friend?ticket=${"x".repeat(43)}`)).status === 404);
 check("the sign-in page offers only passkeys", !(await (await fetch(`${B}/_auth/login`)).text()).includes("Connected friend"));
 await ann.goto(`${A}/_admin/connections`);
@@ -583,8 +579,8 @@ check("photos are in the zip, matching their fingerprint", createHash("sha256").
 check("photo addresses lead to the photo", (await (await fetch(photo.id, { redirect: "manual",
   headers: { Cookie: `__Host-session=${(await bob.cookies()).find((c) => c.name === "__Host-session").value}` } })).headers.get("location") ?? "").match(/\/photos\/\d+$/));
 const everything = annZip.list.filter((f) => f.endsWith(".json")).map((f) => annZip.read(f.split("/").pop()).toString()).join("");
-const annKeys = sql(stateA, "SELECT their_key, key_hash FROM connections")[0];
-check("no keys in the download", !everything.includes(annKeys.their_key) && !everything.includes(annKeys.key_hash) && !everything.includes("key_hash"));
+const annHostingKey = sql(stateA, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value;
+check("no keys in the download", !everything.includes(annHostingKey) && !everything.includes("hosting_key"));
 check("Ann's connections list Bob by address", annZip.json("connections.json").orderedItems[0]?.id === `${B}/`);
 
 // Bob changes a new post's words; Ann's Home shows it Edited, with what it said before, once her site asks his again
@@ -692,7 +688,7 @@ await ann.screenshot({ path: `${OUT}/connections.png` });
 await Promise.all([ann.waitForNavigation(), ann.click("button[data-disconnect]")]);
 check("Remove friend removes it on both sites", sql(stateA, "SELECT COUNT(*) AS n FROM connections")[0].n === 0
   && sql(stateB, "SELECT COUNT(*) AS n FROM connections")[0].n === 0);
-check("the old key stops working", (await peer("/_peer/feed", keyForB)).status === 401);
+check("Ann's site's signed calls get nothing from Bob's now", (await fromAnn("/_p/items?since=0")).status === 401);
 check("…and so do Bob's photo links for Ann, at once", (await fetch(signed)).status === 403);
 check("Ann keeps her copies of what she said after disconnecting (her signed records, with Bob's receipts)", sql(stateA, "SELECT COUNT(*) AS n FROM sent WHERE receipt IS NOT NULL")[0].n > 0);
 check("disconnecting forgets who they were on Facebook", sql(stateA, "SELECT COUNT(*) AS n FROM friend_links")[0].n === 0);
@@ -773,23 +769,23 @@ check("Show brings it in", (await feedCards(ann)).some((c) => c.who === "Cara Ex
 check("…and friends' new posts don't count as notifications", !(await ann.$('header.site a[href="/activity"] .count')));
 
 // More friends than one page may ask: 45 more connections, to sites that don't exist, ahead of Cara in line.
-sql(stateA, `INSERT INTO connections (id, origin, name, their_key, key_hash, created_at, connected_at, approved_at) VALUES
-  ${Array.from({ length: 45 }, (_, i) => `(${-(i + 1)}, 'https://friend${i + 1}.invalid', 'Made-up friend ${i + 1}', '${"k".repeat(43)}',
-  'hash-${i + 1}', strftime('%s','now'), strftime('%s','now'), strftime('%s','now'))`).join(",")}`);
+sql(stateA, `INSERT INTO connections (id, origin, name, created_at, connected_at, approved_at) VALUES
+  ${Array.from({ length: 45 }, (_, i) => `(${-(i + 1)}, 'https://friend${i + 1}.invalid', 'Made-up friend ${i + 1}',
+  strftime('%s','now'), strftime('%s','now'), strftime('%s','now'))`).join(",")}`);
 const caraPostsBefore = sql(stateC, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'post'")[0].n;
 await compose(ann, A, "Ann to all 46 friends");
 check("a post reaches a friend 46th in line (the outbox sends in batches)",
   await waitFor(() => sql(stateC, "SELECT COUNT(*) AS n FROM notices WHERE kind = 'post'")[0].n === caraPostsBefore + 1, 20_000));
 await ann.goto(`${A}/`);
-check("Home still shows Cara's posts, from the copy her note had fetched", (await feedCards(ann)).some((c) => c.who === "Cara Example"));
+check("Home still shows Cara's posts, from the copy her note kept", (await feedCards(ann)).some((c) => c.who === "Cara Example"));
+// Home waits for at most 10 sites it has never asked, for a few seconds; the rest are asked after it's gone.
+check("…asking every friend's site in the background, in the calls a page may make", await waitFor(() =>
+  sql(stateA, "SELECT COUNT(*) AS n FROM connections WHERE id < 0 AND items_checked_at IS NOT NULL AND missing_since IS NOT NULL")[0].n === 45, 20_000));
+await ann.goto(`${A}/`);
 const notices = await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent));
 const reachNotices = notices.filter((n) => /Couldn't (reach|load)/.test(n));
-// The notice counts the sites Home asked while it waited: no more than one page may (40), less any with a copy.
-check("Home asks at most 40 sites while it waits, and sums up those it couldn't reach in one line",
-  reachNotices.length === 1 && /Couldn't reach (\d+) friends' sites/.test(reachNotices[0]) && Number(/(\d+) friends/.exec(reachNotices[0])[1]) <= 40,
+check("…and Home sums up those it couldn't reach in one line", reachNotices.length === 1 && /Couldn't reach 45 friends' sites/.test(reachNotices[0]),
   notices.join(" | "));
-check("…and asks the rest in the background, for next time", await waitFor(() =>
-  sql(stateA, "SELECT COUNT(*) AS n FROM connections WHERE id < 0 AND feed_checked_at IS NOT NULL")[0].n === 45, 20_000));
 check("a site nobody has checked doesn't nag about it on Home", (await ann.$("form.checked-notice")) === null);
 check("the friends column shows a dozen, then a link to the rest", (await ann.$$(".mini-friends li")).length === 12
   && (await ann.$eval('aside.side a[href="/friend"]', (a) => a.textContent).catch(() => "")) === "All 46 friends");
@@ -797,17 +793,17 @@ sql(stateA, "DELETE FROM connections WHERE id < 0");
 }
 
 // Friends whose sites stop answering. Gail's hasn't for two days (and was asked just now); Ned's only just stopped.
-sql(stateA, `INSERT INTO connections (id, origin, name, their_key, key_hash, created_at, connected_at, approved_at, reached_at,
-  missing_since, feed_checked_at) VALUES
-  (9001, 'https://gail.invalid', 'Gone Gail', '${"k".repeat(43)}', 'hash-gail', 1700000000, 1700000000, 1700000000, 1760000000,
+sql(stateA, `INSERT INTO connections (id, origin, name, created_at, connected_at, approved_at, reached_at,
+  missing_since, items_checked_at) VALUES
+  (9001, 'https://gail.invalid', 'Gone Gail', 1700000000, 1700000000, 1700000000, 1760000000,
     strftime('%s','now') - 172800, strftime('%s','now')),
-  (9002, 'https://ned.invalid', 'New Ned', '${"k".repeat(43)}', 'hash-ned', 1700000000, 1700000000, 1700000000, NULL, NULL, NULL)`);
-const gailAsked = sql(stateA, "SELECT feed_checked_at AS t FROM connections WHERE id = 9001")[0].t;
+  (9002, 'https://ned.invalid', 'New Ned', 1700000000, 1700000000, 1700000000, NULL, NULL, NULL)`);
+const gailAsked = sql(stateA, "SELECT items_checked_at AS t FROM connections WHERE id = 9001")[0].t;
 await ann.goto(`${A}/`);
 const homeNotices = (await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent))).join(" | ");
-check("Home mentions a friend's site that's just stopped answering", homeNotices.includes("Couldn't load New Ned's posts"), homeNotices);
+check("Home mentions a friend's site that's just stopped answering", homeNotices.includes("Couldn't reach New Ned's site"), homeNotices);
 check("…but not one that's been quiet for a day", !homeNotices.includes("Gail"), homeNotices);
-check("…which is asked at most once an hour", sql(stateA, "SELECT feed_checked_at AS t FROM connections WHERE id = 9001")[0].t === gailAsked);
+check("…which is asked at most once an hour", sql(stateA, "SELECT items_checked_at AS t FROM connections WHERE id = 9001")[0].t === gailAsked);
 check("Ned's site is noted as not answering", sql(stateA, "SELECT missing_since FROM connections WHERE id = 9002")[0].missing_since > 0);
 await ann.goto(`${A}/friend`);
 const gailCard = await ann.$$eval(".friend-list li", (l) => l.find((li) => li.textContent.includes("Gone Gail"))?.querySelector(".silent")?.textContent ?? "");
@@ -828,7 +824,7 @@ await ann.goto(`${A}/`);
 check("Home says nothing about a friend who's removed you",
   !(await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent).join(" "))).includes("Cara"));
 check("…and remembers their site said no", sql(stateA, `SELECT said_no FROM connections WHERE id = ${caraId}`)[0].said_no === 1);
-check("…and forgets the copy of her posts at once", sql(stateA, `SELECT COUNT(*) AS n FROM friend_posts WHERE connection_id = ${caraId}`)[0].n === 0);
+check("…and forgets the copy of her posts at once", sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE connection_id = ${caraId}`)[0].n === 0);
 await ann.goto(`${A}/friend/${caraId}/posts`);
 const caraNotice = await ann.$eval("p.notice", (p) => p.textContent).catch(() => "");
 check("her page says she may have removed you", caraNotice.includes("Cara Example may have removed you as a friend"), caraNotice);

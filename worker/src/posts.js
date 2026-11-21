@@ -1,26 +1,10 @@
-// The owner's new posts, written with the composer on Posts (public/static/compose.js, which uploads the photos
-// through the import's file endpoints first):
-//   POST /_admin/posts                {text, photos: [{hash, thumb_hash, width, height, size}], poll?: {options, multiple,
-//                                     closes_at}}: a poll asks the post's words (polls.js)
-//   POST /_admin/posts/<id>/delete    a form on the post itself
-//   POST /_admin/posts/<id>/edit      text, back: new words, for 15 minutes and until someone else comments (edits.js)
-//   POST /_admin/posts/<id>/vote      choice (one, or several if the poll takes more), back: the owner answers their poll
-//   POST /_admin/posts/<id>/close     back: the owner closes their poll
-// They're kept in `posts`, with their photos in `media` and albums in `albums` (photos.js), beside Facebook's, as
-// source 'afterwrd'. Each post's address (posts.key) is made when it's written and never changes.
-import { newPostKey } from "../public/static/activity.js";
+// Photos the owner adds on afterwrd: the helpers shared by signed posts (items.js) and albums (photos.js). Posts written
+// on afterwrd before signing stay in `posts` (source 'afterwrd'), the owner's alone and read-only, until migration
+// turns them into signed items (docs/signed-conversations.md, step 10).
 import { photoKey } from "./archive/comments.js";
 import { HASH_RE, mediaStore } from "./media.js";
-import { html, json, now, Refusal } from "./util.js";
-import { notifyMentions, notifyNewPost } from "./notify.js";
-import { cleanMentions, keptMentions } from "./mentions.js";
-import { safeNext } from "./auth.js";
-import { answerHere, readPoll } from "./polls.js";
-import { editPost, MAX_POST_TEXT, versionsGone } from "./edits.js";
-import { messagePage } from "./views/pages.js";
-import { eventGone } from "./events.js";
+import { now } from "./util.js";
 
-const MAX_TEXT = MAX_POST_TEXT;
 const MAX_PHOTOS = 20;
 const MAX_SIDE = 20_000;
 
@@ -38,20 +22,11 @@ export function roleAlbum(db, role) {
  * Statements adding photos (in order) to an album: `albumId`, or else the one for `role`; and to the post whose
  * address is `postKey`, if given.
  */
-export function addPhotos(db, photos, { albumId = null, role = null, postKey = null }) {
+export function addPhotos(db, photos, { albumId = null, role = null }) {
   return photos.map((f) => db.prepare(`INSERT INTO media (source, path, kind, created_at, width, height, album_id,
-      post_id, hash, thumb_hash, size, type)
-    VALUES ('afterwrd', ?, 'photo', ?, ?, ?, COALESCE(?, (SELECT id FROM albums WHERE role = ?)),
-      (SELECT id FROM posts WHERE key = ?), ?, ?, ?, 'image/jpeg')`)
-    .bind(`afterwrd/${f.hash}.jpg`, now(), f.width, f.height, albumId, role, postKey, f.hash, f.thumb_hash, f.size));
-}
-
-/** A new post's row: its address, made now. Returns [statement, key]. */
-export function newPost(db, { text = null, title = null, mentions = null }) {
-  const at = now();
-  const key = newPostKey(at);
-  return [db.prepare("INSERT INTO posts (key, source, created_at, title, text, mentions) VALUES (?, 'afterwrd', ?, ?, ?, ?)")
-    .bind(key, at, title, text, mentions), key];
+      hash, thumb_hash, size, type)
+    VALUES ('afterwrd', ?, 'photo', ?, ?, ?, COALESCE(?, (SELECT id FROM albums WHERE role = ?)), ?, ?, ?, 'image/jpeg')`)
+    .bind(`afterwrd/${f.hash}.jpg`, now(), f.width, f.height, albumId, role, f.hash, f.thumb_hash, f.size));
 }
 
 /**
@@ -90,113 +65,4 @@ export async function removeUnusedFiles(env, files) {
   const unused = files.filter((h) => !used.some((u) => u.hash === h));
   await Promise.all([...new Set(unused.map((h) => h[0]))].map((shard) =>
     mediaStore(env, shard).remove(unused.filter((h) => h[0] === shard))));
-}
-
-export async function handlePosts(request, env, url) {
-  if (request.method !== "POST") return new Response("Not found", { status: 404 });
-  if (url.pathname === "/_admin/posts") {
-    try {
-      await createPost(env, url.origin, await request.json().catch(() => ({})));
-      return json({ ok: true });
-    } catch (error) {
-      if (error instanceof Refusal) return json({ error: error.message }, error.status);
-      throw error;
-    }
-  }
-  const del = /^\/_admin\/posts\/(\d+)\/delete$/.exec(url.pathname);
-  if (del) {
-    await deletePost(env, url.origin, Number(del[1]));
-    return Response.redirect(`${url.origin}/posts`, 303);
-  }
-  const poll = /^\/_admin\/posts\/(\d+)\/(vote|close|edit)$/.exec(url.pathname);
-  if (poll) {
-    const form = await request.formData().catch(() => new FormData());
-    const back = new URL(safeNext(String(form.get("back") ?? "/"), url), url.origin);
-    try {
-      if (poll[2] === "edit") {
-        const { key } = await editPost(env, Number(poll[1]), String(form.get("text") ?? ""));
-        back.hash = `p-${key}`;
-        return Response.redirect(back.href, 303);
-      }
-      if (poll[2] === "vote") await answerPoll(env, Number(poll[1]), form.getAll("choice").map(String));
-      else await closePoll(env, Number(poll[1]));
-    } catch (error) {
-      if (error instanceof Refusal) {
-        return html(messagePage(error.message, { href: back.pathname + back.search, label: "Go back" }), error.status);
-      }
-      throw error;
-    }
-    back.hash = `poll-${poll[1]}`;
-    return Response.redirect(back.href, 303);
-  }
-  return new Response("Not found", { status: 404 });
-}
-
-// --- actions (see util.js Refusal) -----------------------------------------------------------------------------------
-
-/**
- * A new post: {text, photos: [{hash, thumb_hash, width, height, size}], poll, mentions}, the photos already uploaded;
- * with a poll (polls.js readPoll), the text is its question. Friends are told, and those it mentions (mentions.js).
- */
-export async function createPost(env, origin, body) {
-  const db = env.DB;
-  const text = typeof body.text === "string" ? body.text.replace(/\r\n?/g, "\n").trim() : "";
-  const photos = Array.isArray(body.photos) ? body.photos : [];
-  if (text.length > MAX_TEXT) throw new Refusal(`Posts can be up to ${MAX_TEXT} characters.`);
-  const { poll, error } = readPoll(body.poll);
-  if (error) throw new Refusal(error);
-  if (poll && !text) throw new Refusal("Write the question your poll asks.");
-  if (!text && !photos.length) throw new Refusal("Write something or add a photo.");
-  const problem = await checkPhotos(env, photos);
-  if (problem) throw new Refusal(problem);
-  // One transaction: the post, its photos (in "Posted on afterwrd") and its poll.
-  const mentions = cleanMentions(body.mentions, text, env);
-  const [post, key] = newPost(db, { text: text || null, mentions: keptMentions(mentions) });
-  await db.batch([
-    post,
-    ...(photos.length ? [roleAlbum(db, "posts"), ...addPhotos(db, photos, { role: "posts", postKey: key })] : []),
-    ...(poll ? [db.prepare(`INSERT INTO polls (post_id, options, multiple, closes_at) VALUES ((SELECT id FROM posts WHERE key = ?), ?, ?, ?)`)
-      .bind(key, JSON.stringify(poll.options), poll.multiple, poll.closes_at)] : []),
-  ]);
-  await notifyNewPost(env, origin, key);
-  const owner = await db.prepare("SELECT name FROM users LIMIT 1").first();
-  await notifyMentions(env, origin, key, { name: String(owner?.name ?? ""), text, mentions });
-}
-
-/**
- * Deletes a post made here and the comments on it. Its photos go too (files included, unless something else uses
- * them), apart from any that are also in an album of the owner's, which stay there. An event goes with its post, and
- * if it was still to come, those invited are told it's off. Nothing if it isn't one.
- */
-export async function deletePost(env, origin, postId) {
-  const db = env.DB;
-  const post = await db.prepare("SELECT * FROM posts WHERE id = ? AND source = 'afterwrd'").bind(postId).first();
-  if (!post) return;
-  const event = await eventGone(env, origin, post);
-  const IN_POSTS = "album_id IN (SELECT id FROM albums WHERE role = 'posts')";
-  const { results: going } = await db.prepare(`SELECT * FROM media WHERE post_id = ? AND ${IN_POSTS}`).bind(post.id).all();
-  await db.batch([
-    db.prepare("DELETE FROM comments WHERE target = ?").bind(post.key),
-    db.prepare(`DELETE FROM media WHERE post_id = ? AND ${IN_POSTS}`).bind(post.id),
-    db.prepare("UPDATE media SET post_id = NULL WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM polls WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM poll_votes WHERE post_id = ?").bind(post.id),
-    ...event,
-    db.prepare("DELETE FROM posts WHERE id = ?").bind(post.id),
-    ...photoCommentsGone(db, going),
-    ...versionsGone(db),
-  ]);
-  await removeUnusedFiles(env, going.flatMap((f) => [f.hash, f.thumb_hash]));
-}
-
-/** The owner answers the poll in their post `postId`: `choices`, the options' numbers. */
-export async function answerPoll(env, postId, choices) {
-  const owner = await env.DB.prepare("SELECT name FROM users LIMIT 1").first();
-  const trouble = await answerHere(env.DB, postId, "site", owner?.name ?? "You", choices);
-  if (trouble) throw new Refusal(trouble);
-}
-
-/** The owner closes the poll in their post `postId`: its answers stay, and no more are taken. */
-export async function closePoll(env, postId) {
-  await env.DB.prepare("UPDATE polls SET closed_at = ? WHERE post_id = ? AND closed_at IS NULL").bind(now(), postId).run();
 }

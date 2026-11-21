@@ -1,21 +1,19 @@
-// A connected friend's posts and photos, read from their site (friends.js, feed.js), and Friends. Views only draw:
-// they read nothing and change nothing.
+// A friend's page (their signed posts, and the Facebook archive and albums they share: friendcopies.js, friends.js), and
+// Friends. Views only draw: they read nothing and change nothing.
 import { friendItemCard } from "./items.js";
 import { verdict } from "../checks.js";
 import { resultHtml } from "./checks.js";
-import { MAX_COMMENT } from "../archive/comments.js";
 import { aspect, dateRange, fmtAgo, fmtDate, fmtDatetime, linkify, number, safeUrl, summary } from "./format.js";
 
 import { icon, initial } from "./nav.js";
-import { gone } from "../feed.js";
-import { host } from "../peers.js";
+import { gone } from "../friendcopies.js";
+import { host } from "../sites.js";
 import { now } from "../util.js";
 import { html, raw } from "./html.js";
-import { friendEventBlock } from "./events.js";
 import { layout, page } from "./layout.js";
-import { editBox, edited, feed, has, menuDelete, menuEdit, moreMenu, ownerFace, pager, pollBlock, said } from "./parts.js";
+import { feed, has, pager } from "./parts.js";
 
-// --- a connected friend's posts and photos, read from their site (friends.js) ----------------------------------
+// --- a friend's shared Facebook archive and albums, read from their site (friends.js) ----------------------------
 
 export const friendBase = (c) => `/friend/${c.id}`;
 
@@ -29,34 +27,6 @@ export function remoteMedia(m, { full = false } = {}) {
     alt="${m.description || ""}" ${m.width && html`width="${m.width}" height="${m.height}"`}>`;
 }
 
-/** Comments on a friend's post or photo; yours are sent to their site (feed.js), which keeps them. */
-function remoteThread(ctx, c, target, comments, { region = false } = {}) {
-  if (!comments) return ""; // from their Facebook download: no comments
-  const back = ctx.url.pathname + ctx.url.search;
-  return html`<section class="thread" id="t-${target}" aria-label="Comments"${region && raw(' data-region=""')}>
-  ${comments.map((r) => html`<div class="comment" id="r${c.id}-${r.id}"${!r.mine && r.from && html` data-who="${r.from}" data-name="${r.name}"`}>
-    ${r.mine ? ownerFace(ctx) : r.from ? faceFor(ctx, r.from, r.name, r.id) : friendFace(ctx, c)}
-    <div class="bubble"><strong>${r.mine ? ctx.user.name : r.name}</strong>${!r.mine && notFriend(ctx, r.from)}<span class="said">${linkify(r.text, said(r))}</span></div>
-    <div class="under">
-      <time title="${fmtDatetime(r.created_at)}">${fmtAgo(r.created_at)}</time>
-      ${r.mine && moreMenu([r.editable && menuEdit(`edit-r${c.id}-${r.id}`),
-        menuDelete(`/_feed/comments/${c.id}/${r.id}/delete`, "Delete this comment?", { back, inplace: "refresh" })])}
-    </div>
-    ${edited(r)}
-    ${r.mine && r.editable && editBox(`edit-r${c.id}-${r.id}`, `r${c.id}-${r.id}`, `/_feed/comments/${c.id}/${r.id}/edit`, r.text, back, MAX_COMMENT)}
-  </div>`)}
-  <form class="say" method="post" action="/_feed/comments" data-inplace data-me="${ctx.user.name}"
-    data-owner-who="${c.origin}" data-owner-name="${c.name}">
-    <input type="hidden" name="connection" value="${c.id}">
-    <input type="hidden" name="target" value="${target}">
-    <input type="hidden" name="back" value="${back}">
-    <textarea name="text" data-draft="comment:${c.id}:${target}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
-    <button>Post</button>
-  </form>
-</section>`;
-}
-
-/** A post from a friend's site, on Home or on their posts page. */
 /** A friend's profile picture, or the first letter of their name. */
 export const friendFace = (ctx, c) => faceFor(ctx, c.origin, c.name, c.id, c.avatar?.thumbSrc);
 
@@ -75,24 +45,22 @@ export function faceFor(ctx, origin, name, n, fresh = null) {
     : html`<span class="who who-${n % 6}" aria-hidden="true">${initial(name)}</span>`;
 }
 
-/** `back`: where ✕ on one of its photos comes back to (this page and the post on it, unless said otherwise). */
-export function remoteCard(ctx, c, p, { thread = true, back = `${ctx.url.pathname}${ctx.url.search}#f${c.id}-${p.key}` } = {}) {
+/**
+ * A post from a friend's Facebook archive, on their posts page. `back`: where ✕ on one of its photos comes back to
+ * (this page and the post on it, unless said otherwise).
+ */
+export function remoteCard(ctx, c, p, { back = `${ctx.url.pathname}${ctx.url.search}#f${c.id}-${p.key}` } = {}) {
   const n = p.photos.length;
   const stay = `?${new URLSearchParams({ in: "post", back })}`;
-  const what = p.title && p.title !== "Posted on afterwrd." ? summary(p.title, c.name) : "";
-  // An event's card comes back from its own page (only sites new enough for events have one).
-  return html`<article class="card social from-friend" id="f${c.id}-${p.key}" data-region="${friendBase(c)}/posts${p.event ? `/${p.key}` : ""}"
-  data-who="${c.origin}" data-name="${c.name}">
+  const what = p.title ? summary(p.title, c.name) : "";
+  return html`<article class="card social from-friend" id="f${c.id}-${p.key}" data-who="${c.origin}" data-name="${c.name}">
   <header>
     ${friendFace(ctx, c)}
     <span class="what"><a href="${friendBase(c)}/posts"><strong>${c.name}</strong></a>
       ${what && html`<span class="meta">${what}</span>`}</span>
     <time title="${fmtDatetime(p.created_at)}">${fmtAgo(p.created_at)}</time>
   </header>
-  ${p.text && html`<div class="text">${linkify(p.text, said(p))}</div>`}
-  ${edited(p)}
-  ${p.poll && pollBlock(ctx, p.poll, { id: `poll-f${c.id}-${p.key}`, action: "/_feed/vote", hidden: { connection: c.id, target: p.key } })}
-  ${p.event && friendEventBlock(ctx, c, p, { full: ctx.url.pathname === `${friendBase(c)}/posts/${p.key}` })}
+  ${p.text && html`<div class="text">${linkify(p.text)}</div>`}
   ${n > 0 && html`<div class="collage collage-${Math.min(n, 4)}">
     ${p.photos.slice(0, 4).map((m, i) => html`
       <a href="${friendBase(c)}/photos/${m.hash}${stay}" class="tile" ${n === 1 && m.kind === "photo" && html`style="--bg-img: url('${m.thumbSrc}')"`}>
@@ -104,7 +72,6 @@ export function remoteCard(ctx, c, p, { thread = true, back = `${ctx.url.pathnam
     html`<p class="link"><a href="${p.link_url}" target="_blank" rel="noopener noreferrer">${p.link_url}</a></p>`}
   ${p.place && html`<p class="meta">📍 ${p.place}</p>`}
   ${p.tags?.length > 0 && html`<p class="meta">With ${p.tags.join(", ")}</p>`}
-  ${thread && remoteThread(ctx, c, p.key, p.comments)}
 </article>`;
 }
 
@@ -354,15 +321,15 @@ ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cove
 </nav>`;
 }
 
-/** One of a friend's posts, on its own: an event they invited the owner to, say. */
+/** One of a friend's Facebook posts, on its own. */
 export function friendPostPage(ctx, { friend: c, post: p }) {
-  return page(ctx, p.event?.title ?? c.name, html`
+  return page(ctx, c.name, html`
 ${friendHead(ctx, c, "posts")}
 <div class="feed">${remoteCard(ctx, c, p)}</div>`);
 }
 
 export function friendPostsPage(ctx, { friend: c, posts, paging, items = [] }) {
-  // Their signed posts (afterwrd 2: views/items.js) among the others, newest first.
+  // Their signed posts (views/items.js) among their Facebook posts, if they share those, newest first.
   const cards = [...posts.map((p) => ({ at: p.created_at, card: remoteCard(ctx, c, p) })), ...items.map((i) => ({ at: i.created_at, card: friendItemCard(ctx, i) }))]
     .sort((a, b) => b.at - a.at);
   return page(ctx, c.name, html`
@@ -420,9 +387,7 @@ export function friendPhotoPage(ctx, { friend: c, photo: m }) {
     <time class="when">${fmtDatetime(m.created_at)}</time>
     <p class="meta"><a href="${friendBase(c)}/posts">${c.name}</a></p>
     ${m.description && !(m.post && m.post.text === m.description) && html`<div class="caption">${linkify(m.description)}</div>`}
-    <h2>Comments</h2>
-    ${remoteThread(ctx, c, `photo-${m.hash}`, m.comments, { region: true })}
-    ${m.post && html`<h2>Posted with</h2>${remoteCard(ctx, c, m.post, { thread: false, back: m.inPost?.back ?? `${friendBase(c)}/posts#f${c.id}-${m.post.key}` })}`}
+    ${m.post && html`<h2>Posted with</h2>${remoteCard(ctx, c, m.post, { back: m.inPost?.back ?? `${friendBase(c)}/posts#f${c.id}-${m.post.key}` })}`}
   </aside>
 </main>
 <script>

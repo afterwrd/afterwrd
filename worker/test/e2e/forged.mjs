@@ -1,7 +1,8 @@
-// What a hostile friend's site might send, through the real parsing code.
-// The real friends.js and feed.js, bundled by run.sh (with a stand-in for Cloudflare's runtime) into $OUT/bundle.mjs.
+// What a hostile friend's or group's site might send, through the real parsing code, bundled by run.sh (with a stand-in
+// for Cloudflare's runtime) into $OUT/bundle.mjs. (Friends' signed posts and comments are checked against their
+// signatures and lists: lists.mjs, and between real sites in feed.mjs.)
 import { pathToFileURL } from "node:url";
-const { cleanMentions, linkify, noteMentions, callSite, cleanFeed, icsFile, loadRelease, markMine, markMineInGroup, parseEvent, parseGroupPage, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+const { cleanMentions, linkify, noteMentions, callSite, parseEdits, icsFile, loadRelease, markMineInGroup, parseEvent, parseGroupPage, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 const B = "https://bob.example";
 const A = "https://ann.example";
 const hash = "a".repeat(64);
@@ -13,23 +14,6 @@ check("a proper signed link is accepted", parseMedia(media(`${B}/files/${hash}?e
 check("a link with styling tacked on is refused", parseMedia(media(`${B}/files/${hash}?exp=1'); position:fixed; inset:0; background:url('https://evil.example/x.png`), B) === null);
 check("a link with anything after the signature is refused", parseMedia(media(`${B}/files/${hash}?exp=1800000000&sig=${"x".repeat(43)}&x=')`), B) === null);
 check("a link to another site is refused", parseMedia(media(`https://evil.example/files/${hash}?exp=1&sig=${"x".repeat(43)}`), B) === null);
-
-const note = (replies) => ({ "@context": [], attributedTo: { name: "Bob" }, orderedItems: [{ type: "Note", id: `${B}/posts/post-1700000000-0b918c1b`,
-  published: "2026-11-03T10:00:00Z", content: "Hi", replies: { items: replies } }] });
-const reply = (n, author, content) => ({ type: "Note", id: `${B}/posts/post-1700000000-0b918c1b#c${n}`, attributedTo: author,
-  published: "2026-11-03T10:01:00Z", content });
-const feed = cleanFeed(note([reply(1, { type: "Person", id: "https://[", name: "Broken" }, "x"),
-  reply(2, { type: "Person", id: `${A}/`, name: "Ann" }, "words Ann never wrote"),
-  reply(3, { type: "Person", id: `${A}/`, name: "Ann" }, "forged text on Ann's real comment"),
-  reply(4, { type: "Person", name: "Bob's visitor" }, "hello")]), B);
-check("a malformed site address on a comment doesn't break the Feed", feed.posts[0].comments.find((c) => c.id === 1)?.from === null);
-
-// Ann's site sent comment 3 (and remembers what it said); comment 2 claims to be Ann's but she never sent it.
-const db = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [{ connection_id: 1, target: "post-1700000000-0b918c1b", remote_id: 3, text: "What Ann actually wrote" }] }) }) }) };
-const shown = await markMine(db, 1, "post-1700000000-0b918c1b", feed.posts[0].comments, A);
-check("a comment falsely claiming to be Ann's is left out", !shown.some((c) => c.id === 2));
-check("Ann's real comment shows the words her site kept", shown.find((c) => c.id === 3)?.text === "What Ann actually wrote" && shown.find((c) => c.id === 3).mine);
-check("other people's comments still show, not as Ann's", shown.find((c) => c.id === 4)?.mine === false);
 
 // Mentions (mentions.js): only names the words really say, to real sites, ten at most, and cheap to turn down.
 const env = { ALLOW_LOCAL_SITES: "1" };
@@ -48,10 +32,11 @@ check("a note with thousands of tags and long words is turned down quickly", per
 check("highlighting escapes names, and only highlights those listed", String(linkify("<b>@Bob & co</b> @Ann", [{ name: "Bob & co" }]))
   === "&lt;b&gt;<strong class=\"mention\">@Bob &amp; co</strong>&lt;/b&gt; @Ann");
 
-// Edits (edits.js): what a site says a post or comment said before is checked like everything else.
-const editedReply = (extra) => ({ ...reply(5, { type: "Person", name: "Cat" }, "now"), ...extra });
+// Edits (friends.js parseEdits, for groups' posts and comments): what a site says something said before is checked like
+// everything else.
+const written = Date.parse("2026-11-03T10:01:00Z") / 1000;
 const earlier = (n, at) => Array.from({ length: n }, (_, i) => ({ type: "Note", content: `was ${i}`, "afterwrd:replaced": at }));
-const edits = (extra) => cleanFeed(note([editedReply(extra)]), B).posts[0].comments[0];
+const edits = (extra) => parseEdits({ type: "Note", content: "now", ...extra }, written, 2000);
 check("an edited comment shows its earlier words", edits({ updated: "2026-11-03T10:05:00Z", "afterwrd:earlier": earlier(1, "2026-11-03T10:05:00Z") })
   .earlier?.[0]?.text === "was 0");
 check("at most 20 earlier versions are kept", edits({ updated: "2026-11-03T10:05:00Z", "afterwrd:earlier": earlier(500, "2026-11-03T10:04:00Z") }).earlier.length === 20);
@@ -61,10 +46,6 @@ check("an 'edit' before the comment was written isn't believed", edits({ updated
   .edited_at === null);
 check("overlong earlier words are dropped", edits({ updated: "2026-11-03T10:05:00Z",
   "afterwrd:earlier": [{ type: "Note", content: "x".repeat(2001), "afterwrd:replaced": "2026-11-03T10:04:00Z" }] }).earlier.length === 0);
-// Ann's own comment: her site's record of her words and edits, never what Bob's site claims she said before.
-const claimed = { ...feed.posts[0].comments.find((c) => c.id === 3), edited_at: 1762164300, earlier: [{ text: "words Ann never wrote", replaced_at: 1762164200 }] };
-const mineShown = (await markMine(db, 1, "post-1700000000-0b918c1b", [claimed], A))[0];
-check("Ann's own comment shows her own record of its edits, not Bob's site's", mineShown?.mine && !mineShown.edited_at && mineShown.earlier.length === 0);
 
 // A group's site (Bob's, group 7) as seen from Ann's: what it sends about the group, its posts and their comments.
 const group = { type: "Group", id: `${B}/groups/7`, name: "Walkers", attributedTo: { type: "Person", id: `${B}/`, name: "Bob" }, "afterwrd:members": 3 };
