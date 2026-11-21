@@ -9,7 +9,9 @@
 //   host, item              where it lives: the host's person id, and the item (none for the record that makes one)
 //   seen {n, h}             the point in the item's list the writer last saw (number and running fingerprint)
 //   prev                    the fingerprint of the writer's own previous record on this item, or null
-//   about                   for edit, delete, remove: the record it acts on
+//   about                   for edit, delete, remove, approve, role: the record it acts on (for a group's members, a
+//                           member's join)
+//   role_at {n, h}          for an admin's action in a group's members list: the point in it at which they held the role
 //   version                 for vote and answer: the fingerprint of the item's version they answer
 //   mentions                person ids it mentions
 //   audience                for item and change: who it's for, {kind: "invited", fp} (an event's guests: audienceOf),
@@ -21,11 +23,14 @@
 import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url, signAs, utf8 } from "./signed.js";
 
 // `end`: a poll's owner ending its voting (comments carry on); `close` closes a whole item.
-export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove", "end"]);
+// A group's members list (step 6b: src/members.js): `join` (by the member; content {name}, as they call themselves),
+// `approve` and `remove` (by an admin), `role` (by the owner: content {role: "admin" | "member"}), `leave` (by the member).
+export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove", "end",
+  "join", "approve", "leave", "role"]);
 /** Kinds that carry content (and so a body). */
-export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote", "answer"]);
+export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote", "answer", "role", "join"]);
 /** Kinds that act on another record (about). */
-export const ABOUT = new Set(["edit", "delete", "remove"]);
+export const ABOUT = new Set(["edit", "delete", "remove", "approve", "role"]);
 /** Kinds that answer a version of the item. */
 export const VERSIONED = new Set(["vote", "answer"]);
 export const SALT_BYTES = 16;
@@ -73,6 +78,7 @@ export function parseRecord(bytes) {
   if (WITH_CONTENT.has(r.kind) !== ID_RE.test(r.body ?? "")) return null;
   if (ABOUT.has(r.kind) !== ID_RE.test(r.about ?? "")) return null;
   if (VERSIONED.has(r.kind) !== ID_RE.test(r.version ?? "")) return null;
+  if (r.role_at !== undefined && (!r.role_at || !point(r.role_at))) return null;
   if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
   if (r.audience !== undefined && (!["item", "change"].includes(r.kind) || r.audience?.kind !== "invited" || !ID_RE.test(r.audience.fp ?? ""))) return null;
   return r;

@@ -38,6 +38,9 @@ import { EDIT_SECONDS, mineVersions, mineVersionsGone } from "./edits.js";
 import { cleanName, cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT } from "./groups.js";
 import { handleGroupSites } from "./groupsites.js";
 import { handleGroupIdentity } from "./groupidentity.js";
+import { callFriend } from "./calls.js";
+import { joinPoint, joinSigned, membersPoint, relayGroupRecord, signedGroup, waitingPoint } from "./groupjoin.js";
+import { ownOrigin } from "./keys.js";
 import { notifyLater } from "./push.js";
 import { parsePoll, questionFor, readPoll } from "./polls.js";
 import { receiveGroupNote } from "./notify.js";
@@ -140,6 +143,9 @@ export function parseGroupMembers(data, site, n, env) {
     members: items.map((m) => ({
       ...person(m, env), role: ROLES.includes(m?.["afterwrd:role"]) ? m["afterwrd:role"] : "member",
       id: Number.isSafeInteger(m?.["afterwrd:member"]) ? m["afterwrd:member"] : null, waiting: m?.["afterwrd:waiting"] === true,
+      // Who they are, and their join (step 6b): what a signed decision about them names.
+      person: /^[A-Za-z0-9_-]{43}$/.test(m?.["afterwrd:person"] ?? "") ? m["afterwrd:person"] : null,
+      join: /^[A-Za-z0-9_-]{43}$/.test(m?.["afterwrd:join"] ?? "") ? m["afterwrd:join"] : null,
     })).filter((m) => m.name),
   };
 }
@@ -204,7 +210,13 @@ export async function markMine(db, group, posts, ownOrigin) {
 
 // --- loading a group for its pages -----------------------------------------------------------------------------------------
 
-const call = (group, path, body) => callSite(group.origin, path, { key: group.their_key, body });
+/**
+ * A call to a group's site: signed by this site (calls.js), for a group with an identity (afterwrd 2, step 6); with the
+ * key it gave this site, for one from before.
+ */
+const call = async (env, group, path, body) => (group.identity
+  ? callFriend(env, await ownOrigin(env.DB), String(group.origin), path, { ...(body !== undefined && { body }), timeout: 25_000 })
+  : callSite(group.origin, path, { key: group.their_key, body }));
 
 /** Keeps a group's name, owner and our role up to date, from what it just said. */
 async function refresh(db, group, info) {
@@ -276,7 +288,7 @@ export async function keepPlans(db, group, posts, gone = [], answered = null) {
 
 /** A page of a group's posts, read from its site, with the owner's own marked. */
 export async function loadGroup(env, site, group, page) {
-  const data = parseGroupPage(await call(group, `/_group/posts?page=${page}`), group.origin, group.remote_id, env);
+  const data = parseGroupPage(await call(env, group, `/_group/posts?page=${page}`), group.origin, group.remote_id, env);
   await refresh(env.DB, group, data.group);
   const posts = await markMine(env.DB, group, data.posts, site);
   await keepPlans(env.DB, group, posts);
@@ -291,7 +303,7 @@ export async function loadEvents(env, site, group, { past: withPast = true } = {
   let upcoming;
   let past;
   try {
-    [upcoming, past] = await Promise.all([call(group, "/_group/events"), withPast ? call(group, "/_group/events?when=past") : null]);
+    [upcoming, past] = await Promise.all([call(env, group, "/_group/events"), withPast ? call(env, group, "/_group/events?when=past") : null]);
   } catch (error) {
     if (error.message === "Not found.") return { outdated: true, group: null, upcoming: [], past: [] };
     throw error;
@@ -312,7 +324,7 @@ export async function loadEvents(env, site, group, { past: withPast = true } = {
 export async function loadGroupPost(env, site, group, id) {
   let note;
   try {
-    note = await call(group, `/_group/posts/${Number(id)}`);
+    note = await call(env, group, `/_group/posts/${Number(id)}`);
   } catch (error) {
     if (!/isn't there any more/.test(error.message)) throw error;
     await keepPlans(env.DB, group, [], [Number(id)]);
@@ -329,7 +341,7 @@ export async function loadGroupPost(env, site, group, id) {
 
 /** Who's in a group, as it says; for an admin, everyone, with requests to join. */
 export async function loadMembers(env, group) {
-  const data = parseGroupMembers(await call(group, isAdmin(group) ? "/_group/admin/members" : "/_group/members"),
+  const data = parseGroupMembers(await call(env, group, isAdmin(group) ? "/_group/admin/members" : "/_group/members"),
     group.origin, group.remote_id, env);
   await refresh(env.DB, group, data.group);
   return data;
@@ -359,7 +371,12 @@ export async function linkInfo(env, url, link) {
   if (!Number.isSafeInteger(id) || id <= 0) throw unexpected();
   const joined = await env.DB.prepare("SELECT id FROM groups WHERE origin = ? AND remote_id = ? AND joined_at IS NOT NULL")
     .bind(target.origin, id).first();
-  return { ...target, id, name: cleanName(info.name, "A group"), about: text(info.about, 2000), owner: cleanName(info.owner), joined: joined?.id ?? null };
+  // afterwrd 2 (step 6b): a group with an identity, and where its members list is up to, for the browser to sign a join by.
+  const person = typeof info.person === "string" && /^[A-Za-z0-9_-]{43}$/.test(info.person) ? info.person : null;
+  const members = person && info.members && Number.isSafeInteger(info.members.n) && /^[A-Za-z0-9_-]{43}$/.test(info.members.h ?? "")
+    ? { n: info.members.n, h: info.members.h } : null;
+  return { ...target, id, name: cleanName(info.name, "A group"), about: text(info.about, 2000), owner: cleanName(info.owner), joined: joined?.id ?? null,
+    person, members };
 }
 
 /**
@@ -444,14 +461,14 @@ export async function postToGroup(env, site, group, { text: words, photos, poll:
     preview: { type: "Image", url: fileUrl(site, f.thumb_hash), mediaType: "image/jpeg", "afterwrd:fetch": await signedFile(env, site, f.thumb_hash) },
   })));
   try {
-    const reply = await call(group, "/_group/posts", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words, attachment,
+    const reply = await call(env, group, "/_group/posts", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words, attachment,
       ...(poll && { "afterwrd:poll": questionFor(poll) }), ...mentionFields(given, words, env) });
     const prefix = groupPostId(group.origin, group.remote_id, "");
     const id = typeof reply.id === "string" && reply.id.startsWith(prefix) ? reply.id.slice(prefix.length) : "";
     if (!/^\d{1,15}$/.test(id)) throw unexpected();
     // A group's site from before polls keeps the post without one: take it back, and say why.
     if (poll && reply["afterwrd:poll"] !== true) {
-      await call(group, `/_group/posts/${Number(id)}/delete`, {}).catch(() => {});
+      await call(env, group, `/_group/posts/${Number(id)}/delete`, {}).catch(() => {});
       throw new Error("its site needs updating before it can take polls. Its owner can update it from their Update page");
     }
     await db.prepare(`INSERT INTO group_mine (group_id, site, remote_group, kind, post_id, remote_id, text, photos, poll, created_at)
@@ -484,7 +501,7 @@ export async function commentInGroup(env, group, postId, words, given = null) {
   const post = groupPostId(group.origin, group.remote_id, postId);
   let reply;
   try {
-    reply = await call(group, "/_group/comments", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words, inReplyTo: post,
+    reply = await call(env, group, "/_group/comments", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words, inReplyTo: post,
       ...mentionFields(given, words, env) });
   } catch (error) {
     throw new Refusal(`Couldn't send your comment: ${error.message}`);
@@ -519,14 +536,14 @@ export async function addEvent(env, site, group, { text: words, event }) {
   if (words.length > MAX_GROUP_TEXT) throw new Refusal(`Posts can be up to ${MAX_GROUP_TEXT} characters.`);
   let id;
   try {
-    const reply = await call(group, "/_group/posts", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words,
+    const reply = await call(env, group, "/_group/posts", { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words,
       "afterwrd:event": eventObject(event) });
     const prefix = groupPostId(group.origin, group.remote_id, "");
     id = typeof reply.id === "string" && reply.id.startsWith(prefix) ? reply.id.slice(prefix.length) : "";
     if (!/^\d{1,15}$/.test(id)) throw unexpected();
     // A group's site from before repeating events keeps it as a one-off: take it back, and say why.
     if (event.rrule && reply["afterwrd:rrule"] !== true) {
-      await call(group, `/_group/posts/${Number(id)}/delete`, {}).catch(() => {});
+      await call(env, group, `/_group/posts/${Number(id)}/delete`, {}).catch(() => {});
       throw new Error("its site needs updating before it can take events that repeat. Its owner can update it from their Update page");
     }
   } catch (error) {
@@ -547,7 +564,7 @@ export async function answerEvent(env, site, group, id, answer, date = "") {
   if (!ANSWERS.includes(answer)) throw new Refusal("Going, maybe, or can't go?");
   if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Refusal("That isn't one of its dates.");
   try {
-    await keepReply(env, site, group, await call(group, `/_group/events/${Number(id)}/answer`, { answer, date: date || undefined }), id, answer, date);
+    await keepReply(env, site, group, await call(env, group, `/_group/events/${Number(id)}/answer`, { answer, date: date || undefined }), id, answer, date);
   } catch (error) {
     throw new Refusal(`Couldn't send your answer: ${error.message}`);
   }
@@ -557,7 +574,7 @@ export async function answerEvent(env, site, group, id, answer, date = "") {
 export async function voteInGroup(env, group, id, choices) {
   const list = choices.slice(0, 20).map((c) => (/^\d{1,2}$/.test(c) ? Number(c) : -1));
   try {
-    await call(group, `/_group/polls/${Number(id)}/vote`, { "afterwrd:choices": list });
+    await call(env, group, `/_group/polls/${Number(id)}/vote`, { "afterwrd:choices": list });
   } catch (error) {
     throw new Refusal(`Couldn't send your answer: ${error.message}`);
   }
@@ -566,7 +583,7 @@ export async function voteInGroup(env, group, id, choices) {
 /** The owner closes a poll they asked in a group. */
 export async function closePollInGroup(env, group, id) {
   try {
-    await call(group, `/_group/polls/${Number(id)}/close`, {});
+    await call(env, group, `/_group/polls/${Number(id)}/close`, {});
   } catch (error) {
     throw new Refusal(`Couldn't close the poll: ${error.message}`);
   }
@@ -577,7 +594,7 @@ export async function editEvent(env, site, group, id, { text: words, event }) {
   if (words.length > MAX_GROUP_TEXT) throw new Refusal(`Posts can be up to ${MAX_GROUP_TEXT} characters.`);
   let reply;
   try {
-    reply = await call(group, `/_group/events/${Number(id)}/edit`, { "@context": CONTEXT, type: "Note", mediaType: "text/plain",
+    reply = await call(env, group, `/_group/events/${Number(id)}/edit`, { "@context": CONTEXT, type: "Note", mediaType: "text/plain",
       content: words, "afterwrd:event": eventObject(event) });
   } catch (error) {
     throw new Refusal(`Couldn't change the event: ${error.message}`);
@@ -595,7 +612,7 @@ export async function editEvent(env, site, group, id, { text: words, event }) {
 export async function cancelEvent(env, site, group, id, date = "") {
   if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Refusal("That isn't one of its dates.");
   try {
-    await keepReply(env, site, group, await call(group, `/_group/events/${Number(id)}/cancel`, { date: date || undefined }), id);
+    await keepReply(env, site, group, await call(env, group, `/_group/events/${Number(id)}/cancel`, { date: date || undefined }), id);
   } catch (error) {
     throw new Refusal(`Couldn't call it off: ${error.message}`);
   }
@@ -614,7 +631,7 @@ export async function editInGroup(env, group, kind, id, words) {
   if (words.length > max) throw new Refusal(`That can be up to ${max} characters.`);
   if (words === (mine.text ?? "")) return;
   try {
-    await call(group, `/_group/${kind}/${Number(id)}/edit`, { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words });
+    await call(env, group, `/_group/${kind}/${Number(id)}/edit`, { "@context": CONTEXT, type: "Note", mediaType: "text/plain", content: words });
   } catch (error) {
     // A group's site from before editing answers an unknown address with "Not found.".
     if (error.status === 404 && error.message === "Not found.") {
@@ -632,7 +649,7 @@ export async function editInGroup(env, group, kind, id, words) {
 /** Deletes a post or comment (`kind`: posts or comments): the owner's own, or, running the group, anyone's. */
 export async function deleteInGroup(env, group, kind, id) {
   try {
-    await call(group, `/_group/${kind}/${Number(id)}/delete`, {});
+    await call(env, group, `/_group/${kind}/${Number(id)}/delete`, {});
   } catch (error) {
     throw new Refusal(`Couldn't delete it: ${error.message}`);
   }
@@ -647,7 +664,7 @@ export async function deleteInGroup(env, group, kind, id) {
 /** Leaves a group (its owner can't: they delete it instead), and forgets it here. */
 export async function leaveGroup(env, group) {
   if (group.role === "owner") throw new Refusal("You own this group: delete it instead.");
-  await call(group, "/_group/leave", {}).catch(() => {});
+  await call(env, group, "/_group/leave", {}).catch(() => {});
   await forgetGroup(env.DB, group);
 }
 
@@ -659,10 +676,10 @@ export const forgetGroup = (db, group) => db.batch([
 ]);
 
 /** An admin's request to the group (its invite link, its name and about, deciding on members); returns its answer. */
-export async function admin(group, path, body = {}) {
+export async function admin(env, group, path, body = {}) {
   let reply;
   try {
-    reply = await call(group, `/_group/admin/${path}`, body);
+    reply = await call(env, group, `/_group/admin/${path}`, body);
   } catch (error) {
     throw new Refusal(error.message);
   }
@@ -677,9 +694,16 @@ export async function handleGroupActions(request, env, url) {
   const site = url.origin;
   const path = url.pathname.slice("/_groups".length);
   if (path.startsWith("/create/")) return handleGroupSites(request, env, url);
-  if (path === "/join") {
+  if (path === "/join" || path === "/join/point") {
     const body = await request.json().catch(() => ({}));
     try {
+      const info = await linkInfo(env, url, String(body.link ?? ""));
+      // A group with an identity (step 6b): the owner's browser signs their `join` (ui/groupsign.js).
+      if (path === "/join/point") return json(await joinPoint(env, info));
+      if (info.person && !info.joined) {
+        if (!body.sent) return json({ error: "Joining this group needs your browser to sign: reload the page, and try again." }, 400);
+        return json({ id: await joinSigned(env, info, body.sent) });
+      }
       return json({ id: await joinGroup(env, url, String(body.link ?? "")) });
     } catch (error) {
       return json({ error: error.message }, 400);
@@ -693,6 +717,31 @@ export async function handleGroupActions(request, env, url) {
   const action = match[2];
   if (action === "/delete") return handleGroupSites(request, env, url, group);
   if (action === "/identity/start" || action === "/identity/finish") return handleGroupIdentity(request, env, url, group, action);
+  // The group's signed members list (step 6b: groupjoin.js).
+  if ((action === "/point" || action === "/records") && group.identity) {
+    try {
+      if (action === "/point") {
+        let data;
+        try {
+          data = await call(env, group, isAdmin(group) ? "/_group/admin/members" : "/_group/members");
+        } catch (error) {
+          // Still waiting to be let in: from their own request's receipt.
+          if (/** @type {any} */ (error).status === 403) return json(await waitingPoint(env, group));
+          throw error;
+        }
+        return json(await membersPoint(env, group, data?.["afterwrd:list"]));
+      }
+      const body = await request.json().catch(() => ({}));
+      const record = await relayGroupRecord(env, group, body.sent, (path, b) => call(env, group, path, b));
+      if (record.kind === "leave") {
+        await forgetGroup(db, group);
+        return json({ ok: true, go: "/groups" });
+      }
+      return json({ ok: true });
+    } catch (error) {
+      return json({ error: error.message }, error instanceof Refusal ? error.status ?? 400 : 400);
+    }
+  }
   try {
     if (action === "/posts") {
       const body = await request.json().catch(() => ({}));
@@ -700,7 +749,7 @@ export async function handleGroupActions(request, env, url) {
         mentions: body.mentions });
       return json({ ok: true });
     }
-    if (action === "/link") return json({ link: (await admin(group, "link")).link });
+    if (action === "/link") return json({ link: (await admin(env, group, "link")).link });
   } catch (error) {
     if (error instanceof Refusal) return json({ error: error.message }, error.status);
     throw error;
@@ -752,15 +801,15 @@ export async function handleGroupActions(request, env, url) {
     } else if (action === "/here") {
       // Whether anyone in it may use @here, or only its owner and admins (mentions.js).
       back.pathname = members.pathname;
-      await admin(group, "here", { on: form.get("anyone") === "1" });
+      await admin(env, group, "here", { on: form.get("anyone") === "1" });
     } else if (action === "/about") {
       back.pathname = members.pathname;
-      await admin(group, "about", {
+      await admin(env, group, "about", {
         name: String(form.get("name") ?? "").slice(0, MAX_GROUP_NAME), about: String(form.get("about") ?? "").slice(0, MAX_GROUP_ABOUT),
       });
     } else if (decision) {
       back.pathname = members.pathname;
-      await admin(group, `members/${decision[1]}/${decision[2]}`);
+      await admin(env, group, `members/${decision[1]}/${decision[2]}`);
     } else {
       return new Response("Not found", { status: 404 });
     }
@@ -782,7 +831,9 @@ export async function handleMember(request, env, url, work) {
   const match = /^Bearer (\S+)$/.exec(request.headers.get("Authorization") ?? "");
   /** @type {Row<"groups"> | null} */
   const group = match && KEY_RE.test(match[1])
-    ? await db.prepare("SELECT * FROM groups WHERE key_hash = ? AND origin IS NOT NULL").bind(await sha256(match[1])).first() : null;
+    ? await db.prepare("SELECT * FROM groups WHERE key_hash = ? AND origin IS NOT NULL").bind(await sha256(match[1])).first()
+    // A group with an identity (step 6b) calls with signed calls instead.
+    : /** @type {any} */ (await signedGroup(request, env, url));
 
   // Mid-join, the group asks whether this key is ours. Only for a join still being made, and only to that very
   // site, about that very group: otherwise a group could show our key to another site and pass itself off as us.

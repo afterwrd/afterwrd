@@ -65,6 +65,8 @@ import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";
 import { editGroupComment, editGroupPost, groupCommentVersions, groupPostVersions, groupVersionsGone } from "./edits.js";
 import { hostingKey } from "./keys.js";
 import { setGroupIdentity } from "./groupidentity.js";
+import { callMember, groupSelf, signedMember, signedMembers, takeJoin, takeMemberRecord } from "./groupmembers.js";
+import { bodyBytes, siteCalling } from "./calls.js";
 
 export const MAX_MEMBERS = 40; // with the requests waiting, few enough that all can be told when the group closes
 /** The member cap: MAX_MEMBERS, or in a scale test (self-hosted, with TEST_SCALE) whatever TEST_MAX_MEMBERS says. */
@@ -262,16 +264,23 @@ async function groupEvents(env, site, group, member, past) {
   });
 }
 
-/** Who's in the group. For an admin (`all`), requests to join too, with the numbers to act on them by. */
-async function groupMembers(db, site, group, member, { all = false } = {}) {
-  const { results } = await db.prepare(`SELECT id, origin, name, role, created_at, approved_at FROM group_members
+/**
+ * Who's in the group. For an admin (`all`), requests to join too, with the numbers to act on them by. With an identity
+ * (step 6b), also the members list as signed (`afterwrd:list`), for the member's site to check and sign by, and each
+ * member's identity and join.
+ */
+async function groupMembers(env, site, group, member, { all = false } = {}) {
+  const db = env.DB;
+  const { results } = await db.prepare(`SELECT id, origin, name, role, created_at, approved_at, identity, join_fp FROM group_members
     WHERE group_id = ? ${all ? "" : "AND approved_at IS NOT NULL"} ORDER BY role = 'member', name COLLATE NOCASE`).bind(group.id).all();
   return tidy({
     "@context": CONTEXT, type: "Collection", context: await groupObject(db, site, group, member), totalItems: results.length,
     items: results.map((m) => ({
       type: "Person", id: actorId(m.origin), name: m.name, "afterwrd:role": m.role,
       "afterwrd:joinedAt": iso(m.approved_at), ...(all && { "afterwrd:member": m.id, "afterwrd:waiting": !m.approved_at }),
+      ...(m.identity && { "afterwrd:person": m.identity, "afterwrd:join": m.join_fp ?? undefined }),
     })),
+    ...(member.identity && { "afterwrd:list": await signedMembers(env) }),
   });
 }
 
@@ -658,7 +667,8 @@ async function cancelEvent(env, site, group, member, id, date) {
 // --- running the group ------------------------------------------------------------------------------------------------
 
 /** Tells a member's site it's no longer in the group, if it can be reached. */
-const tellRemoved = (member) => callSite(member.origin, "/_member/removed", { key: member.their_key, body: {} }).catch(() => {});
+const tellRemoved = (env, member) => (member.identity ? callMember(env, member, "/_member/removed", {})
+  : callSite(member.origin, "/_member/removed", { key: member.their_key, body: {} })).catch(() => {});
 
 /** An admin's decision about someone; returns an error message, or null. */
 async function decide(env, group, admin, id, action) {
@@ -681,7 +691,7 @@ async function decide(env, group, admin, id, action) {
     return null;
   }
   // Decline a request, or remove someone. What they posted stays, as on Facebook; an admin can delete it.
-  await tellRemoved(member);
+  await tellRemoved(env, member);
   await db.batch([db.prepare("DELETE FROM group_members WHERE id = ?").bind(member.id), ...forgetAnswers(db, member.origin)]);
   return null;
 }
@@ -796,8 +806,32 @@ export async function handleJoinLink(request, env, url) {
   }
   const owner = await ownerOf(db);
   if (request.method === "GET" && !action) return html(groupLinkPage(group.name, owner?.name ?? "Someone"));
-  if (request.method === "GET" && action === "/info") return json({ id: group.id, name: group.name, about: group.about, owner: owner?.name });
+  // afterwrd 2 (step 6b): a group with an identity says which, and where its members list is up to, for the joiner's
+  // browser to sign its `join` (members.js).
+  if (request.method === "GET" && action === "/info") {
+    const self = await groupSelf(env);
+    const list = self && (await db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(self.list).first());
+    return json({ id: group.id, name: group.name, about: group.about, owner: owner?.name,
+      ...(self && { person: self.person, members: list && Number(list.n) > 0 ? { n: Number(list.n), h: String(list.head) } : null }) });
+  }
   if (request.method !== "POST" || action !== "/accept") return new Response("Not found", { status: 404 });
+
+  // With an identity: the joiner's own signed `join`, in a call signed by their site.
+  if (await groupSelf(env)) {
+    const bytes = await bodyBytes(request);
+    let signed = {};
+    try { signed = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
+    if (!signed?.sent) return json({ error: "This group needs your site to be on the same version of afterwrd. Update it, then try again." }, 400);
+    const counted = await db.prepare("UPDATE group_links SET requests = requests + 1 WHERE token_hash = ? AND requests < ?")
+      .bind(group.token_hash, LINK_REQUESTS).run();
+    if (!counted.meta.changes) return json({ error: "This invite link has been used too many times. Ask for a new one." }, 429);
+    const caller = await siteCalling(request, env, url, bytes);
+    if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
+    if (await db.prepare("SELECT 1 FROM group_members WHERE origin = ? AND approved_at IS NOT NULL").bind(caller.from).first()) {
+      return json({ error: "You're already in this group." }, 409);
+    }
+    return takeJoin(env, group, caller, signed, { maxWaiting: MAX_WAITING });
+  }
 
   const body = await request.json().catch(() => ({}));
   const origin = siteOrigin(body.origin, env);
@@ -847,13 +881,18 @@ export async function handleGroupApi(request, env, url) {
     const round = await closingRound(request, env);
     if (round) return round;
   }
-  const member = await memberFrom(request, env);
+  const member = (await memberFrom(request, env)) ?? (await signedMember(request, env, url));
   const group = member && await theGroup(db);
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
   if (route === "POST /_group/leave") {
     if (member.role === "owner") return json({ error: "You own this group: delete it instead." }, 400);
     await db.batch([db.prepare("DELETE FROM group_members WHERE id = ?").bind(member.id), ...forgetAnswers(db, member.origin)]);
     return json({ ok: true });
+  }
+  // Someone still waiting (step 6b) may take back their request: a signed `leave` (members.js only lets them do that).
+  if (!member.approved_at && member.identity && route === "POST /_group/records") {
+    return takeMemberRecord(env, group, member, await request.json().catch(() => ({})),
+      { maxMembers: maxMembers(env), tell: (m) => tellRemoved(env, m), forget: forgetAnswers });
   }
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
   if (route === "POST /_group/identity") return setGroupIdentity(request, env, url, member);
@@ -864,7 +903,12 @@ export async function handleGroupApi(request, env, url) {
     const page = Math.min(10_000, Math.max(1, Number.parseInt(url.searchParams.get("page"), 10) || 1));
     return json(await groupPage(env, site, group, member, page));
   }
-  if (route === "GET /_group/members") return json(await groupMembers(db, site, group, member));
+  if (route === "GET /_group/members") return json(await groupMembers(env, site, group, member));
+  // afterwrd 2 (step 6b): a member's signed decision about someone, or their leaving (groupmembers.js).
+  if (route === "POST /_group/records" && member.identity) {
+    return takeMemberRecord(env, group, member, await request.json().catch(() => ({})),
+      { maxMembers: maxMembers(env), tell: (m) => tellRemoved(env, m), forget: forgetAnswers });
+  }
   if (one?.[1] === "GET" && one[2] === "posts" && !one[4]) {
     const post = await groupPost(env, site, group, member, one[3]);
     return post ? json(post) : json({ error: "That post isn't there any more." }, 404);
@@ -953,7 +997,7 @@ export async function handleGroupApi(request, env, url) {
   // Running the group.
   if (!url.pathname.startsWith("/_group/admin/")) return json({ error: "Not found." }, 404);
   if (!isAdmin(member)) return json({ error: "Only the group's admins can do that." }, 403);
-  if (route === "GET /_group/admin/members") return json(await groupMembers(db, site, group, member, { all: true }));
+  if (route === "GET /_group/admin/members") return json(await groupMembers(env, site, group, member, { all: true }));
   const decision = /^POST \/_group\/admin\/members\/(\d{1,15})\/(approve|decline|remove|admin|member)$/.exec(route);
   if (decision) {
     const trouble = await decide(env, group, member, decision[1], decision[2]);

@@ -23,6 +23,8 @@ export const CHECKPOINT = 500;
 export const MAX_ENTRIES = 2000;
 export const PER_AUTHOR = 20;
 export const EDIT_SECONDS = 15 * 60;
+/** Kinds only a group's members list holds (members.js). */
+export const MEMBERS_ONLY = new Set(["join", "approve", "leave", "role"]);
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /** The running fingerprint after an entry. */
@@ -66,6 +68,8 @@ export class Rules {
    * Why `record` (checked: checkRecord's answer) can't come next, taken at `taken`; null if it can. `checkpointed`:
    * points before this one can't be checked (a reader that started from a checkpoint), so `seen` and `prev` naming
    * something before it are let through.
+   * @param {{ record: any, fp: string, byHost?: boolean, content?: any }} got @param {number} taken
+   * @param {{ checkpointed?: number }} [options] @returns {string | null}
    */
   refuse({ record, fp, byHost }, taken, { checkpointed = 0 } = {}) {
     const n = this.n + 1;
@@ -77,6 +81,7 @@ export class Rules {
       return null;
     }
     if (record.item !== this.list) return "That belongs to something else.";
+    if (MEMBERS_ONLY.has(record.kind)) return "That belongs in a group's members list.";
     if (this.closed && record.kind !== "remove") return "This is closed.";
     // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
     // Not the item's owner's changes (inviting people to an event one by one, say, mustn't run out); their words and
@@ -85,18 +90,8 @@ export class Rules {
       && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) {
       return "That's as many as anyone can add here.";
     }
-    // seen: a real point in this list, before this entry.
-    const seen = record.seen;
-    if (!seen || seen.n >= n || (seen.n >= checkpointed && this.heads.get(seen.n) !== seen.h)) return "That says it saw something this list never was.";
-    // prev: the writer's own newest record here (or one of theirs that's gone since, after it). Not for a host acting
-    // with its hosting key: that isn't a writer with records of its own.
-    const last = this.lastOf.get(record.author) ?? null;
-    if (!byHost && record.prev !== last) {
-      const gone = record.prev && this.byFp.get(record.prev);
-      const lastN = last ? this.byFp.get(last).n : 0;
-      const before = record.prev && !gone && checkpointed > 0;
-      if (!(gone && gone.author === null && gone.n > lastN) && !before) return "That's out of order.";
-    }
+    const out = this.order({ record, byHost }, n, checkpointed);
+    if (out) return out;
     if (ABOUT.has(record.kind)) {
       const target = this.byFp.get(record.about);
       if (!target && !checkpointed) return "That acts on something that isn't here.";
@@ -123,11 +118,32 @@ export class Rules {
   }
 
   /**
+   * Why a record isn't in order here as entry `n`; null if it is. `seen`: a real point in this list, before this entry
+   * (none only for a list's first entry, when there's no item before it: a group's members list). `prev`: the writer's
+   * own newest record here (or one of theirs that's gone since, after it); not for a host acting with its hosting key,
+   * which isn't a writer with records of its own.
+   */
+  order({ record, byHost }, n, checkpointed) {
+    const seen = record.seen;
+    if (seen === null ? n !== 1 : (!seen || seen.n >= n || (seen.n >= checkpointed && this.heads.get(seen.n) !== seen.h))) {
+      return "That says it saw something this list never was.";
+    }
+    const last = this.lastOf.get(record.author) ?? null;
+    if (!byHost && record.prev !== last) {
+      const gone = record.prev && this.byFp.get(record.prev);
+      const lastN = last ? this.byFp.get(last).n : 0;
+      const before = record.prev && !gone && checkpointed > 0;
+      if (!(gone && gone.author === null && gone.n > lastN) && !before) return "That's out of order.";
+    }
+    return null;
+  }
+
+  /**
    * Notes an entry as part of the list (after refuse said yes, or for a gone one, as the list shows it). `head`: its
    * running fingerprint when it's already known to be right (a host rebuilding from its own storage); otherwise it's
    * worked out.
    */
-  async add({ fp, taken, record = null, byHost = false, head: known = null }) {
+  async add({ fp, taken, record = null, byHost = false, head: known = null, content = undefined }) {
     const n = ++this.n;
     const head = known ?? (await headOf({ host: this.host, list: this.list, prev: this.heads.get(n - 1), n, fp, taken }));
     this.heads.set(n, head);
@@ -161,8 +177,8 @@ export class Rules {
  * "unexpected": an entry no honest host would have taken). Each entry's state is "ok", "deleted", "removed",
  * "left-out" (gone, with nothing signed saying why) or "failed" (its signature doesn't check: hidden).
  */
-export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups }) {
-  const rules = new Rules({ host, list, owner });
+export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules }) {
+  const rules = new Kind({ host, list, owner });
   if (from) rules.startAt(from.n, from.head);
   const shown = [];
   const checked = [];
@@ -177,7 +193,7 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
       const why = rules.refuse(got, e.taken, { checkpointed: from?.n ?? 0 });
       if (why) { problem = "unexpected"; break; }
     }
-    const head = await rules.add({ fp: e.fp, taken: e.taken, record: got?.record ?? null, byHost: got?.byHost ?? false });
+    const head = await rules.add({ fp: e.fp, taken: e.taken, record: got?.record ?? null, byHost: got?.byHost ?? false, content: got?.content });
     if (e.head !== head) { problem = "broken"; break; }
     checked.push(e);
     shown.push({ n: e.n, fp: e.fp, taken: e.taken, state: got ? "ok" : e.sent ? "failed" : "gone", record: got?.record ?? null, content: got?.content, by: got?.record.author ?? null });
@@ -193,5 +209,5 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
     s.state = by ? (by.record.kind === "delete" ? "deleted" : "removed") : "left-out";
     if (by?.record.kind === "remove") s.removedBy = by.record.author;
   }
-  return { entries: shown, upTo: end?.n ?? 0, head: end?.head ?? "", problem };
+  return { entries: shown, upTo: end?.n ?? 0, head: end?.head ?? "", problem, rules };
 }

@@ -84,6 +84,10 @@ export async function setGroupIdentity(request, env, url, member) {
     db.prepare("INSERT INTO own_identity (id, person, chain, created_at) SELECT 1, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM own_identity)")
       .bind(state.id, JSON.stringify(stored(chain)), now()),
     db.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(state.id, now()),
+    // Its members list (step 6b: members.js): its id is the group's own, and its owner the group's.
+    db.prepare("INSERT OR IGNORE INTO lists (id, owner, n, head, created_at) VALUES (?, ?, 0, '', ?)").bind(state.id, owner.id, now()),
+    // The owner is a member by the group's identity, and recognised by theirs.
+    db.prepare("UPDATE group_members SET identity = ? WHERE id = ?").bind(owner.id, member.id),
   ]);
   if (!made.meta.changes) return json({ error: "This group's identity is already set up." }, 409);
   return json({ ok: true, person: state.id });

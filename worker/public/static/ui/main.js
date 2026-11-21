@@ -10,6 +10,7 @@
 //   search.js    drop-downs you can type into
 //   mentions.js  @ in a post or comment box: picking someone to mention
 //   app.js       the home-screen app: the service worker, and Add to home screen
+//   groupsign.js a group's signed members list: joining, letting in, removing, admins, leaving
 import "./confirm.js";
 import "./look.js";
 import "./menus.js";
@@ -20,3 +21,4 @@ import "./search.js";
 import "./mentions.js";
 import "./app.js";
 import "./threads.js";
+import "./groupsign.js";

@@ -422,6 +422,19 @@ async function moveCheck(env, url, { request, proof }) {
 }
 
 /**
+ * This site's own address, as the owner's identity says it is now (what its signed calls name as `from`): one row.
+ * @param {D1Database} db
+ */
+export async function ownOrigin(db) {
+  const row = await db.prepare("SELECT chain, moving_to, moving_at FROM own_identity WHERE id = 1").first();
+  if (!row) throw Object.assign(new Error("Set up signing first, in Your devices."), { status: 0 });
+  const origins = JSON.parse(String(row.chain)).map((d) => decode(fromB64url(d.bytes))?.origin);
+  // A move not yet in effect: the address before it.
+  if (row.moving_to && Number(row.moving_at) > now()) return origins.filter((o) => o !== row.moving_to).at(-1);
+  return origins.at(-1);
+}
+
+/**
  * Where the owner is moving, or has moved, as this site keeps it: {to, at, done} (done: it's in effect, so this site
  * only says where they've gone); null if they aren't. Cheap: one row.
  * @param {D1Database} db @param {string} origin this site's address

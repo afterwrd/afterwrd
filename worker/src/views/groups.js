@@ -262,10 +262,11 @@ site's address, and what you post there is kept there. Its admins let people in,
 whenever you like, and joining shares nothing else of yours.</p>
 <p id="error" role="alert"></p>
 <div class="actions-row">
-  <button class="chip primary" id="go">Ask to join</button>
+  ${info.person ? html`<button class="chip primary" id="go" data-group-record="join" data-link="${link}">Ask to join</button>`
+    : html`<button class="chip primary" id="go">Ask to join</button>`}
   <a class="chip" href="/groups">Not now</a>
 </div>
-<script>
+${!info.person && html`<script>
   document.getElementById("go").addEventListener("click", async (e) => {
     const error = document.getElementById("error");
     e.target.disabled = true;
@@ -281,7 +282,7 @@ whenever you like, and joining shares nothing else of yours.</p>
       e.target.disabled = false;
     }
   });
-</script>`);
+</script>`}`);
 }
 
 export function groupHead(ctx, g, info, tab) {
@@ -448,8 +449,17 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
     if (m.role === "admin") return owner ? [["member", "Stop being admin"], ["remove", "Remove"]] : [];
     return [...(owner ? [["admin", "Make admin"]] : []), ["remove", "Remove"]];
   };
+  // A group with an identity (step 6b): each decision is a record signed in this browser (ui/groupsign.js).
+  const SIGNED = { approve: ["approve"], decline: ["remove"], remove: ["remove"], admin: ["role", "admin"], member: ["role", "member"] };
   const decide = (m) => {
     const list = choices(m);
+    if (g.identity && m.join) {
+      return list.length > 0 && html`<div class="actions-row">
+        ${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : ""}" data-group-record="${SIGNED[action][0]}"
+          data-group="${g.id}" data-about="${m.join}" ${SIGNED[action][1] ? raw(`data-role="${SIGNED[action][1]}"`) : ""}
+          ${action === "remove" && raw(`data-ask="Remove them from the group? What they posted stays." data-ask-ok="Remove"`)}>${label}</button>`)}
+      </div>`;
+    }
     return list.length > 0 && html`<form method="post" class="actions-row">
       ${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : ""}" formaction="/_groups/${g.id}/members/${m.id}/${action}"
         ${action === "remove" && raw(`data-confirm="Remove them from the group? What they posted stays." data-confirm-ok="Remove"`)}>${label}</button>`)}
@@ -507,7 +517,9 @@ ${owner ? html`<section class="card" id="delete">
   <div class="actions-row"><button class="chip" id="delete-go">Delete the group</button></div>
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
-</section>` : html`<form method="post" action="/_groups/${g.id}/leave" data-confirm="Leave this group? What you posted in it stays there." data-confirm-ok="Leave">
+</section>` : g.identity ? html`<div class="actions-row"><button class="chip" data-group-record="leave" data-group="${g.id}"
+  data-ask="Leave this group? What you posted in it stays there." data-ask-ok="Leave">Leave the group</button></div>`
+  : html`<form method="post" action="/_groups/${g.id}/leave" data-confirm="Leave this group? What you posted in it stays there." data-confirm-ok="Leave">
   <button class="chip">Leave the group</button>
 </form>`}
 <script>${raw(STEP_SCRIPT)}
@@ -549,7 +561,9 @@ export function groupProblem(ctx, { membership: g, message }) {
 ${groupHead(ctx, g, null, "")}
 <p class="notice">${waiting ? message : gone ? "You're no longer in this group, or it's been deleted."
     : html`Couldn't load this from ${host(g.origin)}: ${message}`}</p>
-${g.role !== "owner" && html`<form method="post" action="/_groups/${g.id}/leave">
+${g.role !== "owner" && (g.identity && !gone ? html`<p id="error" role="alert"></p><div class="actions-row"><button class="chip" data-group-record="leave"
+  data-group="${g.id}">${waiting ? "Cancel the request" : "Leave the group"}</button></div>`
+  : html`<form method="post" action="/_groups/${g.id}/leave">
   <button class="chip">${waiting ? "Cancel the request" : gone ? "Remove it from your groups" : "Leave the group"}</button>
-</form>`}`);
+</form>`)}`);
 }

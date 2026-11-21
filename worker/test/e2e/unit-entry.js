@@ -18,4 +18,5 @@ export { makeRecord, parseRecord } from "../../public/static/records.js";
 export { checkRecord } from "../../src/records.js";
 export { Rules, checkList, signHead, checkHead, headOf, PER_AUTHOR, EDIT_SECONDS } from "../../src/lists.js";
 export { takeRecord, readList, listEntries } from "../../src/hosted.js";
+export { MemberRules } from "../../src/members.js";
 export { local } from "../../src/sqlite.js";

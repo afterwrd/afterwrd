@@ -7,8 +7,9 @@
 // run part-way), then written in one batch that only goes through if the list is still where it was read. The queue
 // stops a crowd of comments retrying each other out; the compare-and-swap is the guarantee if anything else writes
 // (a restart, another copy of the code). So two records never get the same number, and none is lost.
-import { parseRecord } from "../public/static/records.js";
+import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
+import { MemberRules } from "./members.js";
 import { checkRecord } from "./records.js";
 import { CHECKPOINT, PAGE, Rules, signHead } from "./lists.js";
 
@@ -32,13 +33,19 @@ export async function listEntries(db, list, after = 0) {
   return results.flatMap((r) => JSON.parse(String(r.entries))).filter((e) => e.n > after);
 }
 
+/** The rules a list follows: a group's members list (its id is the group's own: members.js), or an item's. */
+export const rulesKind = (list, host) => (list === host ? MemberRules : Rules);
+
 /** The rules as they stand after a list's entries (this site's own, already checked: their records are only parsed). */
-async function rulesFor(db, list, owner, host) {
-  const rules = new Rules({ host, list, owner });
+export async function rulesFor(db, list, owner, host) {
+  const Kind = rulesKind(list, host);
+  const rules = new Kind({ host, list, owner });
   const entries = await listEntries(db, list);
   for (const e of entries) {
     const record = e.sent ? parseRecord(fromB64url(e.sent.record)) : null;
-    await rules.add({ fp: e.fp, taken: e.taken, record, byHost: Boolean(e.by_host), head: e.head });
+    // A members list's roles are in its records' content.
+    const content = record && Kind === MemberRules && e.sent.content ? await contentOf(record, e.sent.content, e.sent.salt) : undefined;
+    await rules.add({ fp: e.fp, taken: e.taken, record, byHost: Boolean(e.by_host), head: e.head, content });
   }
   return { rules, entries };
 }
@@ -65,7 +72,7 @@ async function take(db, got, { sent, host, taken, list }) {
     const { rules, entries } = row ? await rulesFor(db, list, owner, host.person) : { rules: new Rules({ host: host.person, list, owner }), entries: [] };
     const why = rules.refuse(got, taken);
     if (why) return { refused: why };
-    const head = await rules.add({ fp: got.fp, taken, record: got.record, byHost: got.byHost });
+    const head = await rules.add({ fp: got.fp, taken, record: got.record, byHost: got.byHost, content: got.content });
     const n = rules.n;
     const entry = { n, fp: got.fp, taken, head, sent, ...(got.byHost ? { by_host: 1 } : {}) };
     const page = Math.floor((n - 1) / PAGE);

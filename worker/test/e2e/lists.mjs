@@ -3,7 +3,7 @@
 // their browsers (real browser keys, allowed by software passkeys). Then bad writers try their luck with the host, and a
 // bad host tries its luck with readers.
 import { pathToFileURL } from "node:url";
-const { signed, readIdentity, makeRecord, checkRecord, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local }
+const { signed, readIdentity, makeRecord, checkRecord, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules }
   = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -345,6 +345,51 @@ check("a comment slipped in after closing is spotted, though the host signed it"
     && raw.prepare("SELECT COUNT(*) AS n FROM list_pages WHERE list = ?").get(itemRecord.fp).n === 0, deleted.refused);
   check("…and it can't be put back, with or without its old comments", (await takeRecord(db, { sent: itemRecord.sent, host, lookups, taken: NOW + 4 })).refused === "That's been deleted."
     && (await takeRecord(db, { sent: made[5].sent, host, lookups, taken: NOW + 4 })).refused === "That's been deleted.");
+}
+
+// --- a group's members list (step 6b: src/members.js) ------------------------------------------------------------------
+// The group G (its id is its members list's) is owned by Ann; Bob and Cat ask to join; Dave too, later.
+{
+  const dave = await person("https://dave.example");
+  const G = "g".repeat(43);
+  const rules = new MemberRules({ host: G, list: G, owner: ann.id });
+  const last = new Map();
+  const at = () => (rules.n ? { n: rules.n, h: rules.heads.get(rules.n) } : null);
+  const sign = async (who, kind, extra = {}, content) => {
+    const made = await makeRecord({ kind, author: who.id, host: G, item: G, seen: at(), prev: last.get(who.id) ?? null, ...extra }, content, who.browser);
+    return { got: await checkRecord(made.sent, { ...lookups, at: NOW }), fp: made.fp, who };
+  };
+  const take = async ({ got, fp, who }) => {
+    const why = rules.refuse(got, NOW);
+    if (!why) { await rules.add({ fp, taken: NOW, record: got.record, content: got.content }); last.set(who.id, fp); }
+    return why;
+  };
+  check("a group's owner is in, without joining", rules.roleOf(ann.id) === "owner" && (await take(await sign(ann, "join", {}, { name: "Ann" }))) === "The owner is in already.");
+  const bobJoin = await sign(bob, "join", {}, { name: "Bob" });
+  check("someone asks to join with their own signed join, and waits", !(await take(bobJoin)) && rules.roleOf(bob.id) === "waiting");
+  const catJoin = await sign(cat, "join", {}, { name: "Cat" });
+  await take(catJoin);
+  check("someone waiting can't let anyone in", (await take(await sign(bob, "approve", { about: catJoin.fp, role_at: at() }))) === "Only the group's admins can do that.");
+  check("the owner lets them in", !(await take(await sign(ann, "approve", { about: bobJoin.fp }))) && !(await take(await sign(ann, "approve", { about: catJoin.fp })))
+    && rules.roleOf(bob.id) === "member" && rules.roleOf(cat.id) === "member");
+  check("a member can't make admins", (await take(await sign(cat, "role", { about: bobJoin.fp, role_at: at() }, { role: "admin" }))) === "Only the group's admins can do that.");
+  check("the owner makes Bob an admin", !(await take(await sign(ann, "role", { about: bobJoin.fp }, { role: "admin" }))) && rules.roleOf(bob.id) === "admin");
+  const bobSaw = at();
+  const daveJoin = await sign(dave, "join", {}, { name: "Dave" });
+  await take(daveJoin);
+  const early = await sign(bob, "approve", { about: daveJoin.fp, role_at: bobSaw });
+  check("an admin lets someone in, saying when they held the role", !(await take(early)) && rules.roleOf(dave.id) === "member");
+  check("an admin can't remove the owner, nor make admins", (await take(await sign(bob, "remove", { about: "x".repeat(43), role_at: at() }))) === "They aren't in this group, or asking."
+    && (await take(await sign(bob, "role", { about: catJoin.fp, role_at: at() }, { role: "admin" }))) === "Only the group's owner can make admins.");
+  const stale = at();
+  check("the owner takes Bob's role back", !(await take(await sign(ann, "role", { about: bobJoin.fp }, { role: "member" }))) && rules.roleOf(bob.id) === "member");
+  check("…and he can't act on what he saw as an admin before", (await take(await sign(bob, "remove", { about: daveJoin.fp, role_at: stale }))) === "Only the group's admins can do that.");
+  check("a member leaves", !(await take(await sign(cat, "leave"))) && rules.roleOf(cat.id) === null);
+  check("…and can't be approved again without joining again", (await take(await sign(ann, "approve", { about: catJoin.fp }))) === "They aren't in this group, or asking.");
+  check("the owner can't leave", (await take(await sign(ann, "leave"))) === "The owner can't leave: delete the group instead.");
+  check("…and these kinds belong only in a members list", new Rules({ host: G, list: "i".repeat(43), owner: ann.id })
+    .refuse({ ...(await sign(bob, "join", {}, { name: "Bob" })).got, record: { ...(await sign(bob, "join", {}, { name: "Bob" })).got.record, item: "i".repeat(43) } }, NOW)
+    === "That belongs in a group's members list.");
 }
 
 process.exit(failed ? 1 : 0);

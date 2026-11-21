@@ -90,8 +90,15 @@ async function join(page, site, link, { typed = false } = {}) {
   await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("#go")]);
   return asked;
 }
-const call = (site, path, key, body) => fetch(site + path, { method: body ? "POST" : "GET", redirect: "manual",
-  headers: { ...(key && { Authorization: `Bearer ${key}` }), ...(body && { "Content-Type": "application/json" }) }, body: body && JSON.stringify(body) });
+// A call as a site: with a key (groups from before step 6b), or, for {state, from}, signed by that site (step 6b on).
+const call = (site, path, key, body) => (key && typeof key === "object" ? siteCall(key.state, key.from, site + path, body ?? null)
+  : fetch(site + path, { method: body ? "POST" : "GET", redirect: "manual",
+    headers: { ...(key && { Authorization: `Bearer ${key}` }), ...(body && { "Content-Type": "application/json" }) }, body: body && JSON.stringify(body) }));
+// Signing as each site (step 6b: a group with an identity knows its members by theirs, and calls them signed).
+const asAnn = { state: stateA, from: A };
+const asBob = { state: stateB, from: B };
+const asCat = { state: stateC, from: C };
+const asGroup = { state: stateG, from: G };
 async function addEvent(page, fields) {
   await page.$eval("details.add-event", (d) => { d.open = true; });
   await page.$eval("form.event-form", (f, v) => { for (const [k, x] of Object.entries(v)) f.elements[k].value = x; }, fields);
@@ -165,22 +172,25 @@ check("the link opens a page naming the group, without signing in", (await stran
 // Bob and Cat ask to join, from their own sites.
 check("Bob pastes the link into Groups on his own site (the box comes first there), and is asked to confirm", await join(bob, B, link) && bob.joinBoxFirst);
 check("Bob waits to be let in", (await text(bob)).includes("Waiting for Ann Example to let you in"), await text(bob));
-const bobKey = sql(stateB, "SELECT their_key FROM groups")[0]?.their_key;
-check("Bob's key can't read the group yet", (await call(G, "/_group/posts", bobKey)).status === 403);
+const bobKey = asBob;
+check("Bob's site can't read the group yet", (await call(G, "/_group/posts", bobKey)).status === 403);
 check("…nor anything on Ann's site", (await call(A, "/_p/items", bobKey)).status === 401 && (await call(A, "/_group/posts", bobKey)).status !== 200);
 check("Cat opens the link instead: it says to paste it into Groups on her site, with the address box folded away, which still works",
   await join(cat, C, link, { typed: true }) && cat.joinPage.includes("paste it into Groups") && cat.joinFolded);
-const catKey = sql(stateC, "SELECT their_key FROM groups")[0]?.their_key;
+const catKey = asCat;
 
 await ann.goto(`${A}/groups/${annGroup}`);
 check("Ann's group shows 2 asking to join", (await ann.$eval(".tabs .count", (c) => c.firstChild.textContent).catch(() => "")) === "2");
 await ann.goto(`${A}/groups/${annGroup}/members`);
 check("Members lists both asking to join", (await text(ann, ".requests")).includes("Bob Example") && (await text(ann, ".requests")).includes("localhost:8789"));
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
+await Promise.all([ann.waitForNavigation(), ann.click('.requests button[data-group-record="approve"]')]);
+await Promise.all([ann.waitForNavigation(), ann.click('.requests button[data-group-record="approve"]')]);
 check("Ann lets them both in", !(await ann.$(".requests")) && n(stateG, "group_members WHERE approved_at IS NOT NULL") === 3);
 const bobMember = sql(stateG, `SELECT id FROM group_members WHERE origin = '${B}'`)[0].id;
-await Promise.all([ann.waitForNavigation(), ann.click(`button[formaction$="/members/${bobMember}/admin"]`)]);
+const bobJoin = sql(stateG, `SELECT join_fp FROM group_members WHERE origin = '${B}'`)[0].join_fp;
+check("each is in by their own signed join, and Ann's signed approval, on the group's members list",
+  n(stateG, `lists WHERE id = '${groupDoc.person}' AND n = 4`) === 1);
+await Promise.all([ann.waitForNavigation(), ann.click(`button[data-group-record="role"][data-role="admin"][data-about="${bobJoin}"]`)]);
 check("Ann makes Bob an admin", sql(stateG, `SELECT role FROM group_members WHERE id = ${bobMember}`)[0].role === "admin");
 check("Cat can't run the group", (await call(G, "/_group/admin/link", catKey, {})).status === 403);
 const linkRow = sql(stateG, "SELECT requests FROM group_links")[0];
@@ -232,7 +242,7 @@ check("…but never back to another site", (await bob.$eval("#close", (a) => a.g
 
 // Changing words in a group (edits.js, on the group's Worker): only the writer, for 15 minutes, and until someone else
 // comments. The writer's site keeps its own record.
-const annKey = sql(stateA, "SELECT their_key FROM groups")[0].their_key;
+const annKey = asAnn;
 // `item` is the post or comment; `v` where its V is: "> header" for a post, ".under" for a comment.
 const edit = async (page, item, v, words) => {
   await page.click(`${item} ${v} details.more summary`);
@@ -336,9 +346,9 @@ const postsBefore = n(stateG, "group_posts");
 const failed = await call(G, "/_group/posts", catKey, { type: "Note", content: "photo that won't arrive", attachment: [fake("a".repeat(64))] });
 check("a post whose photos can't be copied isn't kept, nor its photos", failed.status === 400 && n(stateG, "group_posts") === postsBefore
   && n(stateG, `group_photos WHERE hash = '${"a".repeat(64)}'`) === 0);
-const bobAdminKey = sql(stateB, "SELECT their_key FROM groups")[0].their_key;
+const bobAdminKey = asBob;
 check("Bob, an admin, can't delete Ann's post (she owns the group)", (await call(G, `/_group/posts/${annPost}/delete`, bobAdminKey, {})).status === 404);
-const groupKeyForBob = sql(stateG, `SELECT their_key FROM group_members WHERE origin = '${B}'`)[0].their_key;
+const groupKeyForBob = asGroup;
 const noted = n(stateB, "group_inbox");
 await call(B, "/_member/notify", groupKeyForBob, { type: "Create", object: { type: "Note", inReplyTo: `${G}/groups/1/posts/${annPost}`, content: "psst", attributedTo: { name: "x" } } });
 check("the group can't send notes about posts Bob isn't part of", n(stateB, "group_inbox") === noted);
@@ -350,7 +360,7 @@ check("Download everything carries no group keys", !exported.includes("key") && 
 
 // Bob, an admin, sees the controls a member would; deleting; renaming.
 await bob.goto(`${B}/groups/${bobGroup}/members`);
-const bobControls = await bob.$$eval(".member-list form:not(.friendship) button", (l) => l.map((b) => b.textContent));
+const bobControls = await bob.$$eval(".member-list button[data-group-record]", (l) => l.map((b) => b.textContent));
 check("Bob, an admin, can remove Cat but not Ann, nor make admins", bobControls.join() === "Remove", bobControls.join());
 await bob.goto(`${B}/groups/${bobGroup}/posts/${bobPost}`);
 const before = n(stateG, "group_comments");
@@ -415,7 +425,7 @@ await ann.$eval("form.event-form", (f) => { f.elements.start_time.value = "20:00
 await Promise.all([ann.waitForNavigation(), ann.click("form.event-form button.primary")]);
 check("changing the time tells Bob and Cat", await waitFor(() => notes(stateB) === 1 && notes(stateC) === 1));
 check("…and not Ann, who changed it", notes(stateA) === 0);
-check("changing it again straight away is refused", (await call(G, `/_group/events/${swap.post_id}/edit`, sql(stateA, "SELECT their_key FROM groups")[0].their_key,
+check("changing it again straight away is refused", (await call(G, `/_group/events/${swap.post_id}/edit`, asAnn,
   { type: "Note", content: "", "afterwrd:event": { type: "Event", name: "Book swap", startTime: "2027-06-12T20:00:00Z", "afterwrd:timeZone": "Europe/London" } })).status === 400);
 check("Bob's copy of his plans is brought up to date", sql(stateB, "SELECT starts_at FROM events_elsewhere")[0]?.starts_at === Date.UTC(2027, 5, 12, 19) / 1000);
 await bob.goto(`${B}/activity`);
@@ -447,7 +457,7 @@ sql(stateG, "UPDATE group_events SET title = 'Book swap'");
 const catNoted = notes(stateC);
 const forged = { type: "Update", "afterwrd:change": "changed", actor: { name: "x" },
   object: { type: "Note", id: `${G}/groups/1/posts/${swap.post_id}`, "afterwrd:event": edited["afterwrd:event"] } };
-const groupKeyForCat = sql(stateG, `SELECT their_key FROM group_members WHERE origin = '${C}'`)[0].their_key;
+const groupKeyForCat = asGroup;
 await call(C, "/_member/notify", groupKeyForCat, forged);
 check("a group can't send notes about an event Cat isn't going to", notes(stateC) === catNoted);
 check("…nor one that isn't an event", (await call(B, "/_member/notify", groupKeyForBob, { ...forged, object: { ...forged.object, "afterwrd:event": { type: "Event" } } })).status === 400);
@@ -462,7 +472,7 @@ sql(stateG, `INSERT INTO group_events (post_id, title, starts_at, all_day, time_
 await bob.goto(`${B}/groups/${bobGroup}/posts/${bobPost}`);
 check("the group can't turn Bob's post into an event of his", !(await text(bob)).includes("Forged party"));
 sql(stateG, `DELETE FROM group_events WHERE post_id = ${bobPost}`);
-check("Ann can't move her event into the past", (await call(G, `${evPath}/edit`, sql(stateA, "SELECT their_key FROM groups")[0].their_key,
+check("Ann can't move her event into the past", (await call(G, `${evPath}/edit`, asAnn,
   { type: "Note", content: "", "afterwrd:event": { type: "Event", name: "Book swap", startTime: "2020-06-12T19:00:00Z", "afterwrd:timeZone": "Europe/London" } })).status === 400);
 
 // Bob adds one; Ann, the owner, calls it off; Bob is told.
@@ -596,19 +606,20 @@ check("…and she can't ask again from the group", (await text(ann, "body")).inc
 
 // Leaving and removing.
 await ann.goto(`${A}/groups/${annGroup}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click(`button[formaction$="/members/${bobMember}/member"]`)]);
+await Promise.all([ann.waitForNavigation(), ann.click(`button[data-group-record="role"][data-role="member"][data-about="${bobJoin}"]`)]);
 await bob.goto(`${B}/groups/${bobGroup}/members`);
-check("Ann takes Bob's admin role back", (await bob.$$eval(".member-list form:not(.friendship) button", (l) => l.length)) === 0);
-await Promise.all([bob.waitForNavigation(), bob.click('form[action$="/leave"] button')]);
+check("Ann takes Bob's admin role back", (await bob.$$eval(".member-list button[data-group-record]", (l) => l.length)) === 0);
+await Promise.all([bob.waitForNavigation(), bob.click('button[data-group-record="leave"]')]);
 check("Bob leaves", n(stateB, "groups") === 0 && n(stateG, `group_members WHERE origin = '${B}'`) === 0);
 check("…keeping his own copies of his posts", sql(stateB, "SELECT kind FROM group_mine").every((r) => r.kind === "post"));
 check("…and forgetting his plans there", n(stateB, "events_elsewhere") === 0);
 check("…and the group forgets his answers, so rejoining starts afresh", n(stateG, `group_answers WHERE origin = '${B}'`) === 0);
 check("…which stays in the group", n(stateG, `group_posts WHERE id = ${bobPost}`) === 1);
 await ann.goto(`${A}/groups/${annGroup}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click('button[formaction$="/remove"]')]);
-check("Ann removes Cat, and Cat's site forgets the group", n(stateC, "groups") === 0);
-check("Cat's key no longer works", (await call(G, "/_group/posts", catKey)).status === 401);
+await Promise.all([ann.waitForNavigation(), ann.click('button[data-group-record="remove"]')]);
+check("Ann removes Cat, and Cat's site forgets the group", await waitFor(() => n(stateC, "groups") === 0));
+check("…and the group's list says so, signed by Ann", n(stateG, `lists WHERE id = '${groupDoc.person}' AND n = 8`) === 1);
+check("Cat's site no longer gets in", (await call(G, "/_group/posts", catKey)).status === 401);
 check("the owner can't just leave", (await ann.evaluate((p) => fetch(p, { method: "POST" }).then((r) => r.status), `/_groups/${annGroup}/leave`)) === 400);
 
 // Deleting the group empties it, and Ann's site forgets it.

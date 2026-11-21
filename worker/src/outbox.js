@@ -19,6 +19,7 @@ import { messagePage } from "./views/pages.js";
 import { callFriend } from "./calls.js";
 import { noteFor } from "./notes.js";
 import { sendReceipt } from "./receipts.js";
+import { callMember } from "./groupmembers.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
@@ -31,7 +32,7 @@ export const outbox = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
 
 // Who each kind of keyed note goes to: its table here, how to find their site and key, and where to send it. (Groups'
 // only, until groups are signed too: docs/signed-conversations.md, step 6.)
-const MEMBERS = "SELECT id, origin, their_key FROM group_members WHERE approved_at IS NOT NULL AND id IN";
+const MEMBERS = "SELECT id, origin, their_key, identity FROM group_members WHERE approved_at IS NOT NULL AND id IN";
 const KINDS = {
   member_notes: { column: "member_id", path: "/_member/notify", sql: MEMBERS },
 };
@@ -323,10 +324,12 @@ export class Outbox extends DurableObject {
       let again = Boolean(to);
       if (to) {
         try {
-          const response = await fetch(`${to.origin}${path}`, {
-            method: "POST", redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
-            headers: { Authorization: `Bearer ${to.their_key}`, "Content-Type": "application/json" }, body: note.body,
-          });
+          // A member who joined with an identity (step 6b) is called with a signed call; one from before, with its key.
+          const response = to.identity ? await callMember(this.env, to, path, JSON.parse(String(note.body)))
+            : await fetch(`${to.origin}${path}`, {
+              method: "POST", redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
+              headers: { Authorization: `Bearer ${to.their_key}`, "Content-Type": "application/json" }, body: note.body,
+            });
           await response.body?.cancel();
           delivered = response.ok;
           again = response.status >= 500 || response.status === 429; // anything else won't change by asking again
