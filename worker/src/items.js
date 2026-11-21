@@ -51,14 +51,14 @@ export function lookupsFor(env) {
 }
 
 /** A record as stored in an entry ({sent}), read: {record, content} (content undefined once it's gone). */
-function readEntry(e) {
+export function readEntry(e) {
   if (!e.sent) return null;
   const record = parseRecord(fromB64url(e.sent.record));
   const content = e.sent.content ? decode(fromB64url(e.sent.content)) : undefined;
   return record && { record, content };
 }
 
-const sentRecord = (sent) => {
+export const sentRecord = (sent) => {
   const bytes = typeof sent?.record === "string" ? fromB64url(sent.record) : null;
   return bytes && { bytes, record: parseRecord(bytes), content: sent.content ? decode(fromB64url(sent.content)) : undefined };
 };
@@ -221,11 +221,11 @@ async function createItem(env, host, sent, photosSent, { guests: guestIds = null
 }
 
 /** The photo items of a post (in order), and the post a photo item is in. */
-const photosOf = async (db, post) => (await db.prepare("SELECT photo FROM item_photos WHERE post = ? ORDER BY position").bind(post).all()).results.map((r) => String(r.photo));
+export const photosOf = async (db, post) => (await db.prepare("SELECT photo FROM item_photos WHERE post = ? ORDER BY position").bind(post).all()).results.map((r) => String(r.photo));
 const postOf = async (db, photo) => (await db.prepare("SELECT post FROM item_photos WHERE photo = ?").bind(photo).first())?.post ?? null;
 
 /** Everything of an item gone from here: its row, and a photo's file (if nothing else uses it) and its place in its post. */
-async function itemGone(env, id) {
+export async function itemGone(env, id) {
   const db = env.DB;
   const files = (await db.prepare("SELECT hash, thumb_hash FROM media WHERE item_id = ?").bind(id).all()).results;
   await db.batch([
@@ -275,11 +275,12 @@ export const shownMentions = (record, content) => (Array.isArray(content?.mentio
   .map((m) => ({ name: m.name.slice(0, 100), person: m.person }));
 
 /**
- * What a vote, an answer, a poll's end or an event's change on `item` (its row, and `content` as it is now) would do,
- * checked before it's taken: {refused}, or what it means ({guests} for a change that says who's invited now, {moved},
- * {cancelled}). Anything else: {}.
+ * What a vote, an answer, a poll's end, an event's change or (in a group) its calling off on `item` (its row, and
+ * `content` as it is now) would do, checked before it's taken: {refused}, or what it means ({guests} for a change that
+ * says who's invited now, {moved}, {cancelled}). Anything else: {}. `isGuest(person)`: whether they may answer (in a
+ * group, any member); otherwise the event's guests here.
  */
-async function kindPlan(env, item, content, { record, content: c }, { guestIds, salt }) {
+export async function kindPlan(env, item, content, { record, content: c }, { guestIds, salt, isGuest = null }) {
   const tally = item.tally ? JSON.parse(String(item.tally)) : null;
   const at = now();
   if (record.kind === "vote" || record.kind === "end") {
@@ -295,12 +296,18 @@ async function kindPlan(env, item, content, { record, content: c }, { guestIds, 
   const e = content.event;
   if (record.kind === "answer") {
     if (!ANSWERS.includes(c?.answer)) return { refused: "Answer going, maybe or no." };
-    const guest = await env.DB.prepare("SELECT 1 FROM item_guests WHERE item = ? AND person = ?").bind(item.id, record.author).first();
+    const guest = isGuest ? await isGuest(record.author)
+      : await env.DB.prepare("SELECT 1 FROM item_guests WHERE item = ? AND person = ?").bind(item.id, record.author).first();
     if (!guest) return { refused: "That event isn't there any more." };
     if (e.cancelled) return { refused: "That event's been called off." };
     if (finishedAt(e) <= at) return { refused: "That event is over." };
     if (record.version !== item.version) return { refused: "That event has just changed. Have a look, then answer again." };
     return {};
+  }
+  if (record.kind === "calloff") {
+    if (e.cancelled) return { refused: "That event's been called off." };
+    if (finishedAt(e) <= at) return { refused: "That event is over." };
+    return { cancelled: true };
   }
   if (record.kind !== "change") return {};
   const event = cleanEvent(c?.event);

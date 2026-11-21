@@ -6,11 +6,13 @@
 //   POST /_p/mention   {v: 2, kind: "receipt", host, item, photo?, sent, receipt, delegation, people}
 //     a signed call from the writer's own site: their comment as signed (`sent`), the host's receipt for it (its
 //     signed head where it took it), the delegation behind it, and the writer's identity and signed name (`people`).
-// Taken only about a friend's post (the host must be a friend here), and only when it mentions the owner here; anything
-// else gets the same quiet answer, so nobody can learn from it who the owner is friends with. The writer's identity is
+// Taken only about a friend's post (the host must be a friend here), or a post in a group the owner's in (step 6c), and
+// only when it mentions the owner here; anything else gets the same quiet answer, so nobody can learn from it who the
+// owner is friends with. The writer's identity is
 // fetched from their own address only once that much has checked.
 import { callFriend, siteCalling } from "./calls.js";
 import { friendThread } from "./friendcopies.js";
+import { groupThread } from "./groupcopies.js";
 import { checkProfile, identityState } from "./identities.js";
 import { ID_RE, ownHost } from "./items.js";
 import { checkHead } from "./lists.js";
@@ -90,11 +92,12 @@ export async function receiveReceipt(request, env, url, work) {
   const host = String(note?.host ?? "");
   const item = String(note?.item ?? "");
   if (!me || note?.v !== 2 || note.kind !== "receipt" || !ID_RE.test(host) || !ID_RE.test(item)) return quiet();
-  // Only about a friend's post: nothing is fetched or kept for anything else.
+  // Only about a friend's post, or a post in a group the owner's in (step 6c): nothing is fetched or kept for anything else.
   const connection = await env.DB.prepare("SELECT * FROM connections WHERE identity = ? AND approved_at IS NOT NULL AND connected_at IS NOT NULL")
     .bind(host).first();
+  const group = !connection && (await env.DB.prepare("SELECT * FROM groups WHERE identity = ? AND joined_at IS NOT NULL AND origin IS NOT NULL").bind(host).first());
   const record = typeof note.sent?.record === "string" ? parseRecord(fromB64url(note.sent.record)) : null;
-  if (!connection || !record || record.kind !== "comment" || record.host !== host || record.item !== item || record.author === me.person
+  if ((!connection && !group) || !record || record.kind !== "comment" || record.host !== host || record.item !== item || record.author === me.person
     || !(record.mentions ?? []).includes(me.person)) return quiet();
   // From the writer's own site, signed by it (its identity fetched from its address only now).
   const caller = await siteCalling(request, env, url, bytes);
@@ -112,22 +115,50 @@ export async function receiveReceipt(request, env, url, work) {
   const actor = friend ? String(friend.name) : signed?.name ?? "Someone";
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
-  await env.DB.prepare(`INSERT OR IGNORE INTO mention_receipts (fp, connection_id, item, n, head, writer, state, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'unchecked', ?)`).bind(got.fp, connection.id, item, took.n, took.head, record.author, now()).run();
+  await env.DB.prepare(`INSERT OR IGNORE INTO mention_receipts (fp, connection_id, group_id, item, n, head, writer, state, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'unchecked', ?)`).bind(got.fp, connection ? connection.id : null, group ? group.id : null, item, took.n, took.head,
+    record.author, now()).run();
   // The mention, whether or not the host's own note has come (the same notice either way: one per record).
   const text = got.content?.text ?? "";
-  if (await keepNotice(env.DB, { kind: "mention", fp: got.fp, connection: connection.id, item, target, actor, text })) {
-    await tellMention(env, url.origin, work, { connection: connection.id, title: String(connection.name), actor, text, comment: true,
-      url: `/friend/${connection.id}/posts/${target}`, tag: `mention-${connection.id}-${target}` });
+  const holder = connection ? { connection: Number(connection.id) } : { group: Number(group.id) };
+  const where = connection ? `/friend/${connection.id}/posts/${target}` : `/groups/${group.id}/posts/${target}`;
+  if (await keepNotice(env.DB, { kind: "mention", fp: got.fp, ...holder, item, target, actor, text })) {
+    await tellMention(env, url.origin, work, { ...holder, title: String((connection ?? group).name), actor, text, comment: true,
+      url: where, tag: connection ? `mention-${connection.id}-${target}` : `mention-g${group.id}-${target}` });
   }
   // Then whether the host shows the owner here the same conversation at that point.
-  const checking = checkReceipts(env, url.origin, connection, got.fp).catch((error) => console.error("receipt check:", error.message));
+  const checking = (connection ? checkReceipts(env, url.origin, connection, got.fp) : checkGroupReceipts(env, url.origin, group, got.fp))
+    .catch((error) => console.error("receipt check:", error.message));
   if (work?.waitUntil) work.waitUntil(checking);
   else await checking;
   return quiet();
 }
 
 // --- checking -----------------------------------------------------------------------------------------------------------
+
+/** As checkReceipts, for a group the owner's in (`group`: its row here), whose site took the comment (step 6c). */
+export async function checkGroupReceipts(env, from, group, only = null) {
+  const db = env.DB;
+  const { results } = only
+    ? await db.prepare("SELECT * FROM mention_receipts WHERE fp = ?").bind(only).all()
+    : await db.prepare("SELECT * FROM mention_receipts WHERE group_id = ? AND state = 'unchecked' AND created_at > ? ORDER BY created_at LIMIT 3")
+      .bind(group.id, now() - CHECK_SECONDS).all();
+  const threads = new Map();
+  for (const r of results) {
+    const item = String(r.item);
+    if (!threads.has(item)) threads.set(item, await groupThread(env, from, group, item));
+    const thread = threads.get(item);
+    if (thread.error) continue;
+    const at = thread.entries.find((e) => e.n === Number(r.n));
+    const state = at && at.fp === r.fp && at.head === r.head ? "ok" : "hidden";
+    await db.prepare("UPDATE mention_receipts SET state = ?, checked_at = ? WHERE fp = ?").bind(state, now(), r.fp).run();
+    if (state === "hidden") {
+      const said = await db.prepare("SELECT actor, target FROM notices WHERE kind = 'mention' AND fp = ?").bind(r.fp).first();
+      await keepNotice(db, { kind: "hidden", fp: String(r.fp), group: Number(group.id), item, target: said ? String(said.target) : item,
+        actor: said?.actor ? String(said.actor) : "Someone", text: null });
+    }
+  }
+}
 
 /**
  * Asks the host (`connection`) for each post a receipt here is about, and checks its list shows that comment where the

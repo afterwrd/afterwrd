@@ -52,7 +52,7 @@ export async function callMember(env, member, path, body) {
 }
 
 /** A member's signed record and the delegation behind it, checked as theirs; the record, or a reason it isn't. */
-async function theirs(env, person, { sent, delegation }) {
+export async function theirs(env, person, { sent, delegation }) {
   const record = typeof sent?.record === "string" ? parseRecord(fromB64url(sent.record)) : null;
   if (!record || record.author !== person) return { error: "That isn't yours to send." };
   const state = await identityState(env, person);

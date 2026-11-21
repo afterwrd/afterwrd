@@ -88,20 +88,20 @@ const LINK_REQUESTS = 100; // requests to join one invite link can make
 const WAITING_SECONDS = 7 * 86400; // a request to join no one has answered is dropped after this
 const COPY_TIMEOUT_MS = 20_000;
 // Photos as members' sites make them (2560px JPEGs, upload.js) are well within these.
-const PHOTO_BYTES = 8_000_000;
-const THUMB_BYTES = 1_000_000;
-const GROUP_BYTES = 1_000_000_000; // all the group's photos: free Cloudflare accounts have 5 GB for everything
+export const PHOTO_BYTES = 8_000_000;
+export const THUMB_BYTES = 1_000_000;
+export const GROUP_BYTES = 1_000_000_000; // all the group's photos: free Cloudflare accounts have 5 GB for everything
 // From one member's site.
-const POST_RATE = { count: 10, seconds: 600, daily: 50, photos: 40 };
+export const POST_RATE = { count: 10, seconds: 600, daily: 50, photos: 40 };
 const COMMENT_RATE = { count: 30, seconds: 600, daily: 300 };
 
 export const cleanText = (text) => (typeof text === "string" ? text.replace(/\r\n?/g, "\n").trim() : "");
 export const cleanName = (name, fallback = "Someone") => (typeof name === "string" && name.trim() ? name.trim().slice(0, 100) : fallback);
-const isAdmin = (member) => member.role === "owner" || member.role === "admin";
+export const isAdmin = (member) => member.role === "owner" || member.role === "admin";
 
 /** The group this Worker holds, or null before it's claimed. */
 /** @type {(db: D1Database) => Promise<Row<"groups"> | null>} */
-const theGroup = (db) => db.prepare("SELECT * FROM groups WHERE origin IS NULL ORDER BY id LIMIT 1").first();
+export const theGroup = (db) => db.prepare("SELECT * FROM groups WHERE origin IS NULL ORDER BY id LIMIT 1").first();
 const ownerOf = (db) => db.prepare("SELECT origin, name FROM group_members WHERE role = 'owner' LIMIT 1").first();
 
 // --- what members' sites read ---------------------------------------------------------------------------------------
@@ -114,12 +114,12 @@ const byName = (a, b) => {
 };
 
 /** The group as a Group: its owner, how many members it has, and (for the member asking) their role. */
-async function groupObject(db, site, group, member) {
+export async function groupObject(db, site, group, member) {
   // Every member's every page reads this, so what grows with the group is read once: the members in any order (sorted
   // here, not by SQLite), and those waiting counted only for an admin, who's the only one told.
   const [owner, members, waiting] = await db.batch([
     db.prepare("SELECT origin, name FROM group_members WHERE role = 'owner' LIMIT 1"),
-    db.prepare("SELECT origin, name FROM group_members WHERE approved_at IS NOT NULL"),
+    db.prepare("SELECT origin, name, identity FROM group_members WHERE approved_at IS NOT NULL"),
     ...(isAdmin(member) ? [db.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL")] : []),
   ]);
   members.results.sort((a, b) => byName(a.name, b.name));
@@ -130,7 +130,8 @@ async function groupObject(db, site, group, member) {
     "afterwrd:members": members.results.length, "afterwrd:role": member.role,
     "afterwrd:waiting": waiting ? waiting.results[0].n : undefined,
     // Mentions (mentions.js): who's in it, to mention (as GET /_group/members says), and who may use @here.
-    "afterwrd:people": members.results.map((m) => ({ type: "Person", id: actorId(m.origin), name: m.name })),
+    // With who they are (step 6c), for signed mentions.
+    "afterwrd:people": members.results.map((m) => ({ type: "Person", id: actorId(m.origin), name: m.name, ...(m.identity && { "afterwrd:person": m.identity }) })),
     "afterwrd:hereAnyone": Boolean(group.here_anyone), "afterwrd:mayHere": isAdmin(member) || Boolean(group.here_anyone),
   };
 }
@@ -289,7 +290,7 @@ async function groupMembers(env, site, group, member, { all = false } = {}) {
 // @here (mentions.js): its owner and admins may use it, or anyone if they've said so (here_anyone); either way only a
 // few a day for each member, and for the group. The group's allowance only holds back ordinary members, so they can't
 // use it all and leave the admins without.
-const HERE_LIMITS = { member: 3, group: 10 };
+export const HERE_LIMITS = { member: 3, group: 10 };
 
 /**
  * Who a member's post or comment (`note`, its words `text`) mentions: only members, and @here if they may use it now.
@@ -363,7 +364,7 @@ function capped(body, limit) {
  * store checks each file matches its hash (and keeps one it already has). Two calls out per file: within the free
  * plan's 50 for a post's 8 photos and their thumbnails.
  */
-async function copyPhotos(env, photos) {
+export async function copyPhotos(env, photos) {
   const files = [...new Map(photos.flatMap((p) => [[p.hash, [p.src, PHOTO_BYTES]], [p.thumb_hash, [p.thumbSrc, THUMB_BYTES]]])).entries()];
   for (const [hash, [link, limit]] of files) {
     let response;
@@ -709,12 +710,15 @@ const CLOSING_ROUND = 30;
 async function close(env, group, owner) {
   const db = env.DB;
   const { results: members } = await db.prepare("SELECT origin, their_key FROM group_members WHERE id != ? ORDER BY id").bind(owner.id).all();
-  const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos").all();
+  const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos UNION ALL SELECT hash, thumb_hash FROM media WHERE item_id IS NOT NULL").all();
   const setting = (key, value) => db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, value);
   await db.batch([
     ...["group_comments", "group_comment_versions", "group_photos", "group_answers", "group_event_skips", "answer_log", "group_poll_votes", "group_polls",
-      "group_events", "group_posts", "group_post_versions", "group_links", "group_members", "groups"]
+      "group_events", "group_posts", "group_post_versions", "group_links", "group_members", "groups",
+      // Its signed posts (step 6c), and every list, its members list too (closing properly, with its 30 days, is 6e).
+      "items", "item_photos", "lists", "list_pages", "checkpoints", "here_log"]
       .map((table) => db.prepare(`DELETE FROM ${table}`)),
+    db.prepare("DELETE FROM media WHERE item_id IS NOT NULL"),
     // So it can't be claimed again, should its Worker outlast this (its owner's site deletes it next).
     setting("group_closed", "1"),
     setting("group_closer", owner.key_hash),
@@ -898,6 +902,10 @@ export async function handleGroupApi(request, env, url) {
   if (route === "POST /_group/identity") return setGroupIdentity(request, env, url, member);
 
   const site = url.origin;
+  // A group with an identity (step 6c) has signed posts only (groupposts.js, at /_p/…): nothing goes in the old tables.
+  if (/^(GET|POST) \/_group\/(posts|comments|events|polls)(\/|$)/.test(route) && (await groupSelf(env))) {
+    return json({ error: "This group's posts are signed: your site needs updating to read or write them." }, 410);
+  }
   const one = /^(GET|POST) \/_group\/(posts|comments)\/(\d{1,15})(\/delete|\/edit)?$/.exec(route);
   if (route === "GET /_group/posts") {
     const page = Math.min(10_000, Math.max(1, Number.parseInt(url.searchParams.get("page"), 10) || 1));

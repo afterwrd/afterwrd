@@ -9,9 +9,9 @@
 //   host, item              where it lives: the host's person id, and the item (none for the record that makes one)
 //   seen {n, h}             the point in the item's list the writer last saw (number and running fingerprint)
 //   prev                    the fingerprint of the writer's own previous record on this item, or null
-//   about                   for edit, delete, remove, approve, role: the record it acts on (for a group's members, a
-//                           member's join)
-//   role_at {n, h}          for an admin's action in a group's members list: the point in it at which they held the role
+//   about                   for edit, delete, remove, approve, role, calloff: the record it acts on (for a group's
+//                           members, a member's join; for calloff, the event)
+//   role_at {n, h}          for an admin's action in a group: the point in its members list at which they held the role
 //   version                 for vote and answer: the fingerprint of the item's version they answer
 //   mentions                person ids it mentions
 //   audience                for item and change: who it's for, {kind: "invited", fp} (an event's guests: audienceOf),
@@ -25,12 +25,13 @@ import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url,
 // `end`: a poll's owner ending its voting (comments carry on); `close` closes a whole item.
 // A group's members list (step 6b: src/members.js): `join` (by the member; content {name}, as they call themselves),
 // `approve` and `remove` (by an admin), `role` (by the owner: content {role: "admin" | "member"}), `leave` (by the member).
+// In a group's post (step 6c), an admin's `remove` and `calloff` (an event called off, about the event) carry `role_at`.
 export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove", "end",
-  "join", "approve", "leave", "role"]);
+  "join", "approve", "leave", "role", "calloff"]);
 /** Kinds that carry content (and so a body). */
 export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote", "answer", "role", "join"]);
 /** Kinds that act on another record (about). */
-export const ABOUT = new Set(["edit", "delete", "remove", "approve", "role"]);
+export const ABOUT = new Set(["edit", "delete", "remove", "approve", "role", "calloff"]);
 /** Kinds that answer a version of the item. */
 export const VERSIONED = new Set(["vote", "answer"]);
 export const SALT_BYTES = 16;

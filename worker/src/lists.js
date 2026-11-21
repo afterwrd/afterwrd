@@ -86,7 +86,7 @@ export class Rules {
     // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
     // Not the item's owner's changes (inviting people to an event one by one, say, mustn't run out); their words and
     // comments are held to it like anyone's.
-    if (!byHost && record.kind !== "delete" && !(record.kind === "change" && record.author === this.owner)
+    if (!byHost && record.kind !== "delete" && !(record.kind === "change" && record.author === this.owner) && !this.uncapped(record)
       && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) {
       return "That's as many as anyone can add here.";
     }
@@ -107,7 +107,10 @@ export class Rules {
           if (other.n > target.n && other.author !== null && other.author !== record.author) return "Someone has replied since.";
         }
       }
-      if (record.kind === "remove" && !byHost && record.author !== this.owner && record.author !== this.host) return "Only its owner or host can remove that.";
+      if (record.kind === "remove" || record.kind === "calloff") {
+        const why = this.actTrouble(record, target, byHost);
+        if (why) return why;
+      }
     }
     if (record.kind === "close" && !byHost && record.author !== this.owner && record.author !== this.host) return "Only its owner can close it.";
     if (record.kind === "change" && record.author !== this.owner) return "Only its owner can change it.";
@@ -115,6 +118,23 @@ export class Rules {
     if (record.kind === "end" && (record.author !== this.owner || this.ended)) return this.ended ? "That's already ended." : "Only its owner can end it.";
     if (record.kind === "vote" && this.ended) return "That poll has closed.";
     return null;
+  }
+
+  /** Whether a record isn't held to the per-person cap (besides deletes, and the owner's changes). @param {any} record @returns {boolean} */
+  uncapped(record) {
+    void record;
+    return false;
+  }
+
+  /**
+   * Why `record` (a remove or a calloff) may not act on `target` (its entry here, if known); null if it may. On a
+   * friend's item: its owner, or its host, removes; nobody calls off (that's in groups).
+   * @param {any} record @param {any} target @param {boolean} byHost @returns {string | null}
+   */
+  actTrouble(record, target, byHost) {
+    void target;
+    if (record.kind === "calloff") return "Only a group's admins call things off.";
+    return byHost || record.author === this.owner || record.author === this.host ? null : "Only its owner or host can remove that.";
   }
 
   /**
@@ -170,6 +190,38 @@ export class Rules {
 }
 
 /**
+ * The rules for a post in a group (afterwrd 2, step 6c): as any item's, but what's removed is removed by the group's
+ * admins or its owner, not by the post's writer, and an admin may call off anyone's event (`calloff`, about the
+ * event). An admin can't remove what the group's owner wrote. `group`: {owner: the group's owner (a person id), admin:
+ * (person, role_at) => whether they're an admin at that point in the members list}: the group's site goes by its
+ * members list as it stands (and refuses a role that's changed since `role_at`); a reader, by the owner's signed
+ * `role` records the group sends with the thread. Admins' removals and calling off aren't held to the per-person cap.
+ */
+export class GroupRules extends Rules {
+  /** @param {{ host: string, list: string, owner?: string | null, group: { owner: string, admin: (person: string, roleAt: any) => boolean } }} options */
+  constructor({ host, list, owner = null, group }) {
+    super({ host, list, owner });
+    this.group = group;
+  }
+
+  uncapped(record) {
+    return record.kind === "remove" || record.kind === "calloff";
+  }
+
+  /** @param {any} record @param {any} target @param {boolean} byHost @returns {string | null} */
+  actTrouble(record, target, byHost) {
+    if (record.kind === "calloff" && record.about !== this.list) return "That isn't this event.";
+    if (byHost) return record.kind === "remove" ? null : "Only the group's admins call things off.";
+    const owner = record.author === this.group.owner;
+    if (!owner && !this.group.admin(record.author, record.role_at ?? null)) {
+      return record.kind === "remove" ? "Only the group's admins can remove that." : "Only the group's admins can call that off.";
+    }
+    if (!owner && target?.author === this.group.owner) return "Only the group's owner can remove what they wrote.";
+    return null;
+  }
+}
+
+/**
  * Checks a list as a host shows it. `entries` run from just after `from` (a checked point: {n, head}, a checkpoint or
  * this reader's last checked point; none for the start) to the end; `signedHead` is the host's signature on the end.
  * Returns {entries: [{n, fp, taken, state, record, content}], upTo, head, problem}: everything up to `upTo` checked; a
@@ -177,8 +229,8 @@ export class Rules {
  * "unexpected": an entry no honest host would have taken). Each entry's state is "ok", "deleted", "removed",
  * "left-out" (gone, with nothing signed saying why) or "failed" (its signature doesn't check: hidden).
  */
-export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules }) {
-  const rules = new Kind({ host, list, owner });
+export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules, group = null }) {
+  const rules = group ? new GroupRules({ host, list, owner, group }) : new Kind({ host, list, owner });
   if (from) rules.startAt(from.n, from.head);
   const shown = [];
   const checked = [];

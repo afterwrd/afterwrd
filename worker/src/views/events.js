@@ -5,6 +5,7 @@ import { dateKey, datesOf, dayName, eventDay, eventDays, eventFormValues, eventT
 import { asset, icon } from "./nav.js";
 import { html, raw } from "./html.js";
 import { groupBase, groupHead, mayDelete } from "./groups.js";
+import { groupItemCard } from "./items.js";
 import { page } from "./layout.js";
 
 // --- events in groups (calendar.js) ---------------------------------------------------------------------------------
@@ -436,8 +437,10 @@ function notificationsSwitch(pushKey) {
  * A group's calendar: a month of its events on the grid, the month's (or a chosen day's) events under it to answer,
  * and adding one. The group lists 100 to come and the 30 most recent; earlier months may be missing some.
  */
-export function groupCalendarPage(ctx, { membership: g, outdated, group: info, upcoming, past, view, month, day, week, from, to }) {
+export function groupCalendarPage(ctx, { membership: g, outdated, group: info, upcoming, past, view, month, day, week, from, to, signed = false }) {
   if (info) g.ownerFrom = info.ownerFrom;
+  // A signed group's events (step 6c) are its posts, drawn as they are on its page, and added signed.
+  const ownerPerson = info?.people?.find((p) => p.origin === info.ownerFrom)?.person ?? null;
   const base = `${groupBase(g)}/calendar`;
   const posts = [...past.slice().reverse(), ...upcoming];
   // Every date, a repeating event's each on its own, with the owner's answer to it.
@@ -448,7 +451,8 @@ export function groupCalendarPage(ctx, { membership: g, outdated, group: info, u
   const shown = posts.filter(want);
   // A month before the oldest event the group still lists (past is newest first) may have had others.
   const missing = past.length >= 30 && monthAround(month).key < eventDays(past.at(-1).event)[0].slice(0, 7);
-  const card = (p) => html`<article class="card social in-group" id="gp${p.id}" data-region="">${groupEventBlock(ctx, g, p)}</article>`;
+  const card = (p) => (signed ? groupItemCard(ctx, g, p, { ownerPerson })
+    : html`<article class="card social in-group" id="gp${p.id}" data-region="">${groupEventBlock(ctx, g, p)}</article>`);
   const at = Date.now() / 1000;
   // The month: the grid, then its events as cards to answer; a week, or what's to come: each date as a row.
   const shownView = view === "week" ? html`<section class="calendar" aria-labelledby="cal-week">${weekHead(ctx, week, base)}
@@ -467,7 +471,9 @@ ${outdated ? html`<p class="notice">This group's site needs updating before it c
   <summary>Add an event</summary>
   <p class="meta">Everyone in the group will see it here. No one is sent anything about it; those who say they're
   going, or might, are told if it changes or is called off.</p>
-  ${eventForm({ action: `/_groups/${g.id}/events`, back: base, submit: "Add the event", repeats: true })}
+  ${signed ? eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event",
+    sign: ` data-sign="event-new" data-sign-host="${g.identity}" data-sign-group="${g.id}" data-sign-to="/_groups/${g.id}/items"` })
+    : eventForm({ action: `/_groups/${g.id}/events`, back: base, submit: "Add the event", repeats: true })}
 </details>
 ${calendarSwitch(base, view)}
 ${shownView}`}`);

@@ -14,7 +14,7 @@ const read = (id) => {
 };
 /** @type {{ name: string, origin: string, person?: string }[]} */
 const friends = read("mention-people") ?? [];
-/** @type {{ people: { name: string, origin: string }[], here: boolean } | null} */
+/** @type {{ people: { name: string, origin: string, person?: string }[], here: boolean } | null} */
 const group = read("mention-group");
 
 /** Everyone who can be mentioned from `box`, the owner here left out. */
@@ -26,7 +26,7 @@ function candidates(box) {
   // those with an identity.
   const seen = new Set([location.origin]);
   const once = (p) => {
-    const key = signed ? p.person : p.origin;
+    const key = p.origin === "here" ? "here" : signed ? p.person : p.origin;
     return Boolean(p.name && key && !seen.has(key) && seen.add(key));
   };
   // On a friend's post or photo: its writer, and those who've commented there already. Their site tells no one else.
@@ -38,7 +38,9 @@ function candidates(box) {
   const near = box.closest("[data-region], article, .info, main") ?? document.body;
   const shown = [.../** @type {NodeListOf<HTMLElement>} */ (near.querySelectorAll("[data-who], [data-person]"))].map(who);
   const list = group
-    ? [...(group.here ? [{ name: "here", origin: "here", person: "", note: "everyone in the group" }] : []), ...group.people.map((p) => ({ person: "", ...p, note: "" })), ...shown]
+    // @here: in a signed group (step 6c), on a new post only.
+    ? [...(group.here && !(signed && form?.id !== "composer") ? [{ name: "here", origin: "here", person: "", note: "everyone in the group" }] : []),
+      ...group.people.map((p) => ({ person: "", ...p, note: "" })), ...shown]
     : [...shown, ...friends.map((p) => ({ person: "", ...p, note: "" }))];
   return list.filter(once);
 }

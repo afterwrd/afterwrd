@@ -14,7 +14,7 @@ import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
 import { parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
-import { namesFor, ownHost, shownMentions } from "./items.js";
+import { itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
 import { ANSWERS, cleanEvent } from "./calendar.js";
 import { safeNext } from "./auth.js";
@@ -33,7 +33,7 @@ const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 /** JSON from base64url (a signed record's content), or null. */
 const fromB64json = (text) => { try { return JSON.parse(new TextDecoder().decode(fromB64url(text))); } catch { return null; } };
 
-const lookupsWith = (env, delegations) => ({
+export const lookupsWith = (env, delegations) => ({
   identityOf: (person) => identityState(env, person),
   delegationOf: async (key) => delegations?.[key] ?? null,
 });
@@ -156,17 +156,30 @@ export async function pullItems(env, from, connection) {
  * must be theirs (`person`), on their own site, and be what its id says. Returns {statement (keeping the copy), record,
  * content} or null.
  */
-export async function keepItem(env, connection, person, item, delegations) {
+export function keepItem(env, connection, person, item, delegations) {
+  return keepCopy(env, { connection: Number(connection.id), host: person, author: person }, item, delegations);
+}
+
+/**
+ * A post as its host sent it, checked, for keeping as a copy here: a friend's (`connection`: on their own site, by them),
+ * or a group's (`group`: on the group's site, `host`, by any of its members). A group isn't the writer, so a group's
+ * post is worked out from what's signed (signedNow), not from what the group says it says; `rules` ({owner, admins})
+ * say who may call off someone's event there. Returns {statement (keeping it), record, content} or null.
+ */
+export async function keepCopy(env, { connection = null, group = null, host, author = null, rules = null }, item, delegations) {
   if (!ID_RE.test(item?.id ?? "")) return null;
   const got = await checkRecord(item.sent, { ...lookupsWith(env, delegations), at: Number(item.taken) });
-  if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.author !== person || got.record.host !== person) return null;
+  if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.host !== host || (author && got.record.author !== author)) return null;
+  if (group) item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules })) };
   // A poll is as its signed first record asked it; an event is as its site says it is now (its changes are signed
   // records too, checked when they're sent as notes or its thread is opened), and only if its first record said it's
-  // one, for those invited.
-  const event = got.content?.type === "event" && got.record.audience ? cleanEvent(stripCancelled(item.content?.event)) : null;
+  // one: for those invited, from a friend; for every member, in a group.
+  const isEvent = got.content?.type === "event" && (group ? !got.record.audience : Boolean(got.record.audience));
+  const event = isEvent ? cleanEvent(stripCancelled(item.content?.event)) : null;
   const content = { text: typeof item.content?.text === "string" ? item.content.text.slice(0, 5000) : "",
     photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")),
     ...(Array.isArray(got.content?.mentions) && { mentions: shownMentions(got.record, got.content) }),
+    ...(group && got.content?.here === true && { here: true }),
     ...(got.content?.poll && !pollTrouble(got.content.poll, Number(item.taken)) && { poll: got.content.poll }),
     ...(event && { type: "event", event: { ...event, ...(event.cancelled && Number.isSafeInteger(item.content.event.cancelled_at) ? { cancelled_at: item.content.event.cancelled_at } : {}) } }),
     // What a vote or answer names now (the item, or the owner's latest change that moved their event).
@@ -174,19 +187,47 @@ export async function keepItem(env, connection, person, item, delegations) {
   if (got.content?.type === "event" && !event) return null;
   const tally = cleanTally(item.tally);
   const list = Number.isSafeInteger(item.list?.n) && item.list.n >= 1 && ID_RE.test(item.list.head ?? "") ? item.list : null;
-  const statement = env.DB.prepare(`INSERT INTO copies (id, connection_id, author, record, content, earlier, edited_at, comments, created_at, changed_at, tally,
-    list_n, list_head)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content, earlier = excluded.earlier,
+  // Kept only for where it came from: a copy is never moved from one friend or group to another.
+  const statement = env.DB.prepare(`INSERT INTO copies (id, connection_id, group_id, author, record, content, earlier, edited_at, comments, created_at,
+    changed_at, tally, list_n, list_head)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET content = excluded.content, earlier = excluded.earlier,
     edited_at = excluded.edited_at, comments = excluded.comments, changed_at = excluded.changed_at, tally = excluded.tally,
-    list_n = excluded.list_n, list_head = excluded.list_head`)
-    .bind(item.id, connection.id, person, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
+    list_n = excluded.list_n, list_head = excluded.list_head
+    WHERE copies.connection_id IS excluded.connection_id AND copies.group_id IS excluded.group_id`)
+    .bind(item.id, connection, group, got.record.author, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
       Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, Number(item.taken), Number(item.changed_at) || now(),
       tally ? JSON.stringify(tally) : null, list?.n ?? null, list?.head ?? null);
   return { statement, record: got.record, content };
 }
 
-/** An event's details as a host sends them, without what cleanEvent doesn't take (when it was called off). */
-const stripCancelled = (e) => (e && typeof e === "object" ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== "cancelled_at")) : null);
+/**
+ * A group's post as its signed records say it is now (afterwrd 2, step 6c): its first record, then those the group sent
+ * with it (`item.records`: its writer's edits and changes, and an admin calling it off), each checked, worked out as its
+ * host works it out (items.js itemFromList). Returns what replaces the group's own word: {content (its words, photos
+ * with the group's links to them, event), earlier, edited_at}.
+ */
+async function signedNow(env, got, item, delegations, { host, rules }) {
+  const entries = [{ n: 1, fp: got.fp, taken: Number(item.taken), sent: item.sent }];
+  for (const x of Array.isArray(item.records) ? item.records.slice(0, 60) : []) {
+    if (!Number.isSafeInteger(x?.taken)) continue;
+    const r = await checkRecord(x.sent, { ...lookupsWith(env, delegations), at: x.taken });
+    if (!r || r.record.item !== item.id || r.record.host !== host) continue;
+    if (r.record.kind === "calloff" ? !(rules && (r.record.author === rules.owner || rules.admins.has(r.record.author))) : r.record.author !== got.record.author) continue;
+    entries.push({ n: entries.length + 1, fp: r.fp, taken: x.taken, sent: x.sent });
+  }
+  const worked = itemFromList(item.id, { author: got.record.author, content: "{}", audience: "group" }, entries, null);
+  const now_ = JSON.parse(worked.content);
+  // Its photos as signed, each with the group's link to its file, if the group sent one for that very photo.
+  const links = new Map((Array.isArray(item.content?.photos) ? item.content.photos : []).map((p) => [p?.item, p]));
+  const photos = (Array.isArray(now_.photos) ? now_.photos : []).flatMap((p) => {
+    const l = links.get(p.item);
+    return l && l.hash === p.hash && l.thumb_hash === p.thumb_hash ? [{ ...p, src: l.src, thumbSrc: l.thumbSrc }] : [];
+  });
+  return { content: { ...now_, photos }, earlier: worked.earlier ? JSON.parse(worked.earlier) : [], edited_at: worked.edited_at };
+}
+
+/** An event's details as a host sends them, without what cleanEvent doesn't take (when it was called off, and by whom). */
+export const stripCancelled = (e) => (e && typeof e === "object" ? Object.fromEntries(Object.entries(e).filter(([k]) => k !== "cancelled_at" && k !== "called_off_by")) : null);
 
 const MAX_TALLY = 2000; // people in one poll's or event's totals
 /**
@@ -273,7 +314,7 @@ async function copiesShown(db, rows) {
       mine: last.get(String(r.id)) ?? null } : null }));
 }
 
-function copyFromRow(r, { names = new Map(), me = null } = {}) {
+export function copyFromRow(r, { names = new Map(), me = null } = {}) {
   const content = JSON.parse(String(r.content));
   const tally = r.tally ? JSON.parse(String(r.tally)) : null;
   for (const [p] of Object.entries(tally?.answers ?? {})) if (p === String(r.author)) names.set(p, String(r.name));

@@ -20,6 +20,7 @@ import { callFriend } from "./calls.js";
 import { noteFor } from "./notes.js";
 import { sendReceipt } from "./receipts.js";
 import { callMember } from "./groupmembers.js";
+import { groupNoteFor } from "./groupposts.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
@@ -245,9 +246,11 @@ export class Outbox extends DurableObject {
       if (room <= 0) break;
       notes.set(note.id, note);
       let next = [];
-      if (note.audience === "friends") {
-        const { results } = await this.env.DB.prepare(`SELECT id FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
-          AND id > ? ORDER BY id LIMIT ?`).bind(Number(note.cursor), room).all();
+      if (note.audience === "friends" || note.audience === "members") {
+        // Every friend, or (a group's @here: groupposts.js) every member who joined with an identity.
+        const { results } = await this.env.DB.prepare(note.audience === "friends" ? `SELECT id FROM connections WHERE approved_at IS NOT NULL
+          AND connected_at IS NOT NULL AND id > ? ORDER BY id LIMIT ?` : `SELECT id FROM group_members WHERE approved_at IS NOT NULL
+          AND identity IS NOT NULL AND id > ? ORDER BY id LIMIT ?`).bind(Number(note.cursor), room).all();
         next = results.map((r) => Number(r.id));
         if (next.length) this.sql.exec("UPDATE fat_notes SET cursor = ? WHERE id = ?", next.at(-1), note.id);
         if (next.length < room) this.sql.exec("UPDATE fat_notes SET due = ? WHERE id = ?", DONE, note.id);
@@ -263,7 +266,10 @@ export class Outbox extends DurableObject {
     }
     if (!calls.length) return 0;
     const ids = [...new Set(calls.filter((c) => c.note.kind !== "receipt").map((c) => c.connection))];
-    const { results } = await this.env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
+    // On a group's site, notes go to members (groupposts.js); on a person's, to friends.
+    const group = Boolean(this.env.GROUP_KEY);
+    const { results } = await this.env.DB.prepare(group ? `SELECT * FROM group_members WHERE approved_at IS NOT NULL AND identity IS NOT NULL
+      AND id IN (SELECT value FROM json_each(?))` : `SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
       AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
     const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
     // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
@@ -275,6 +281,19 @@ export class Outbox extends DurableObject {
       if (note.kind === "receipt") {
         try {
           delivered = await sendReceipt(this.env, note, JSON.parse(String(note.recipients))[connection]);
+        } catch (error) {
+          const status = /** @type {any} */ (error).status;
+          again = status === 0 || status >= 500 || status === 429 || status === undefined;
+        }
+      } else if (friend && group) {
+        try {
+          const body = await groupNoteFor(this.env, note, friend);
+          if (body) {
+            const response = await callMember(this.env, friend, "/_p/notes", body);
+            await response.body?.cancel();
+            if (!response.ok) throw Object.assign(new Error(`answered ${response.status}`), { status: response.status });
+          }
+          delivered = Boolean(body);
         } catch (error) {
           const status = /** @type {any} */ (error).status;
           again = status === 0 || status >= 500 || status === 429 || status === undefined;
@@ -291,7 +310,7 @@ export class Outbox extends DurableObject {
         }
       }
       const tries = retry ? Number(retry.tries) + 1 : 0;
-      if (note.kind === "item" && note.recipients && friend && (delivered || !again || tries >= NOTE_RETRY_SECONDS.length)) {
+      if (!group && note.kind === "item" && note.recipients && friend && (delivered || !again || tries >= NOTE_RETRY_SECONDS.length)) {
         deliveries.push(this.env.DB.prepare("UPDATE item_guests SET delivery = ? WHERE item = ? AND connection_id = ?")
           .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.item, connection));
       }

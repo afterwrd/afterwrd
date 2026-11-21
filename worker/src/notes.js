@@ -16,7 +16,11 @@
 //
 // The owner's own posts: a friend's comment, or the owner's, also tells the owner here (notices, own), when it's someone
 // else's: noticeOwn.
+//
+// A group's site (step 6c) sends notes to the same address, about its members' posts: groupcopies.js receiveGroupNote.
 import { friendCalling } from "./calls.js";
+import { signedGroup } from "./groupjoin.js";
+import { receiveGroupNote } from "./groupcopies.js";
 import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js";
 import { keepItem } from "./friendcopies.js";
 import { listEntries } from "./hosted.js";
@@ -133,38 +137,42 @@ export async function noteFor(env, note, connection) {
 // --- receiving --------------------------------------------------------------------------------------------------------
 
 /**
- * Keeps a notice for the owner here, within the limits for `connection`'s site (counted together, of every kind), once
- * per record and kind. Returns whether it was kept.
+ * Keeps a notice for the owner here, within the limits for `connection`'s site, or `group`'s (counted together, of
+ * every kind), once per record and kind. Returns whether it was kept.
  */
-export async function keepNotice(db, { kind, fp, connection, own = 0, item, target, actor, text }) {
+export async function keepNotice(db, { kind, fp, connection = null, group = null, own = 0, item, target, actor, text }) {
   const at = now();
-  const row = await db.prepare(`INSERT INTO notices (kind, fp, connection_id, own, target, actor, text, created_at, item)
+  const by = group === null ? "connection_id" : "group_id";
+  const row = await db.prepare(`INSERT INTO notices (kind, fp, ${by}, own, target, actor, text, created_at, item)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12
-    WHERE (SELECT COUNT(*) FROM notices WHERE connection_id = ?3 AND created_at > ?8 - ?9) < ?10
-      AND (SELECT COUNT(*) FROM notices WHERE connection_id = ?3 AND created_at > ?8 - 86400) < ?11
+    WHERE (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - ?9) < ?10
+      AND (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - 86400) < ?11
     ON CONFLICT (kind, fp) DO NOTHING RETURNING id`)
-    .bind(kind, fp, connection, own, target, snippet(actor, 100) || null, snippet(text) || null, at, rateWindow(RATE.seconds), RATE.count, DAILY, item).first();
+    .bind(kind, fp, group ?? connection, own, target, snippet(actor, 100) || null, snippet(text) || null, at, rateWindow(RATE.seconds), RATE.count, DAILY, item).first();
   // Only what's past keeping (notices_by_time).
   await db.prepare("DELETE FROM notices WHERE created_at < ?").bind(at - KEEP_SECONDS).run();
   return Boolean(row);
 }
 
 /** A mention said on the owner's phones that take mentions, within their allowance (notify.js pushAllowed). */
-export async function tellMention(env, origin, work, { connection, title, actor, text, url, tag, comment = false }) {
-  if (!(await pushAllowed(env.DB, "SELECT COUNT(*) AS n FROM notices WHERE connection_id = ?1 AND kind = 'mention' AND created_at > ?2", connection, now()))) return;
+export async function tellMention(env, origin, work, { connection = null, group = null, title, actor, text, url, tag, comment = false }) {
+  const by = group === null ? "connection_id" : "group_id";
+  if (!(await pushAllowed(env.DB, `SELECT COUNT(*) AS n FROM notices WHERE ${by} = ?1 AND kind = 'mention' AND created_at > ?2`, group ?? connection, now()))) return;
   notifyLater(env, origin, work, { kind: "mention", title, text: `${actor === title ? "Mentioned you" : `${actor} mentioned you`}: ${snippet(text)}`,
     hidden: comment ? "Mentioned you in a comment" : "Mentioned you in a post", url, tag });
 }
 
-/** POST /_p/notes: a note from a friend's site. */
+/** POST /_p/notes: a note from a friend's site, or from a group's (step 6c: groupcopies.js). */
 export async function receiveNotes(request, env, url, work) {
+  const group = await signedGroup(request, env, url);
   const body = new Uint8Array(await request.arrayBuffer());
-  const caller = await friendCalling(request, env, url, body);
+  const caller = group ?? (await friendCalling(request, env, url, body));
   if (caller instanceof Response) return caller;
   let note = null;
   try { note = JSON.parse(new TextDecoder().decode(body)); } catch {}
   const me = await ownHost(env);
   if (!me || note?.v !== 2) return json({ error: "That didn't work." }, 400);
+  if (group) return receiveGroupNote(env, url, work, group, me, note);
   if (note.kind === "item") return receiveItem(env, url, work, caller, me, note);
   if (note.kind === "comment" || note.kind === "change") return receiveComment(env, url, work, caller, me, note);
   if (note.kind === "gone") return receiveGone(env, url, work, caller, me, note);

@@ -1,12 +1,14 @@
 // The owner's composer on Home and Posts: text and up to 20 photos (prepared and uploaded by upload.js), and perhaps a
 // poll (the text is its question; src/polls.js), then the post is signed here and saved (src/items.js). In a group, the
-// form says where it goes and how many photos it takes (src/groups.js), and the post isn't signed yet.
+// form says where it goes and how many photos it takes (src/groups.js); in a signed group (data-host, step 6c), the
+// post is signed here too, hosted by the group (src/groupcopies.js).
 import { call, picker, uploadPhotos } from "./upload.js";
 
 const form = /** @type {HTMLFormElement} */ (document.getElementById("composer"));
 const MAX_PHOTOS = Number(form.dataset.max) || 20;
 const MAX_OPTIONS = 10;
 const ACTION = form.dataset.action || null; // a group's; none for the owner's own signed posts
+const HOST = form.dataset.host || null; // a signed group's identity (step 6c): its posts are signed here too
 const input = /** @type {HTMLInputElement} */ (form.querySelector("input[type=file]"));
 const status = /** @type {HTMLElement} */ (form.querySelector(".status"));
 const error = /** @type {HTMLElement} */ (form.querySelector(".error"));
@@ -90,15 +92,15 @@ form.addEventListener("submit", async (event) => {
     status.textContent = "Posting…";
     // Who it mentions, as picked (ui/mentions.js): the site keeps those whose @name is still in the words.
     const mentions = /** @type {HTMLInputElement | null} */ (form.querySelector("input[name=mentions]"))?.value ?? null;
-    if (!ACTION) {
-      // The owner's own post (and any poll in it) is a record signed here, with this browser's key (src/items.js).
-      // (Groups follow in a later step.)
-      const [{ makeRecord, pickedMentions }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
+    if (!ACTION || HOST) {
+      // The owner's own post (and any poll in it) is a record signed here, with this browser's key (src/items.js); so
+      // is a post in a signed group (src/groupcopies.js), hosted by the group.
+      const [{ makeRecord, pickedMentions, says }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
       const key = await savedKey();
       if (!key?.person || key.expires < Date.now() / 1000) throw new Error(CANT_SIGN);
       // Each photo is an item of its own (its own page and comments), signed first; the post lists them.
       const fields = ["hash", "thumb_hash", "width", "height", "size"];
-      const own = { kind: "item", author: key.person, host: key.person };
+      const own = { kind: "item", author: key.person, host: HOST ?? key.person };
       const madePhotos = [];
       for (const p of photos) madePhotos.push(await makeRecord(own, { type: "photo", ...Object.fromEntries(fields.map((f) => [f, p[f]])) }, key));
       const listed = photos.map((p, i) => ({ item: madePhotos[i].fp, ...Object.fromEntries(fields.map((f) => [f, p[f]])) }));
@@ -107,9 +109,16 @@ form.addEventListener("submit", async (event) => {
       // A poll, as the site keeps one (polls.js readPoll): its options tidied, one choice or several, when it closes.
       const poll = question && { options: question.options.map((o) => o.replace(/\s+/g, " ").trim()).filter(Boolean),
         multiple: question.multiple ? 1 : 0, closes_at: question.closes_at ?? null };
+      // In a group, @here (if the words say it) is for everyone in it: the group decides whether it's allowed.
+      const here = Boolean(HOST && says(text, "here"));
       const made = await makeRecord({ ...own, ...(picked.mentions.length && { mentions: picked.mentions }) },
-        { type: "post", text, photos: listed, ...(poll && { poll }), ...(picked.shown.length && { mentions: picked.shown }) }, key);
-      await call("/_admin/items", { sent: made.sent, photos: madePhotos.map((m) => m.sent) });
+        { type: "post", text, photos: listed, ...(poll && { poll }), ...(picked.shown.length && { mentions: picked.shown }), ...(here && { here: true }) }, key);
+      if (HOST) {
+        // The photos were uploaded to this site; it sends the group links to them (files), and lets them go afterwards.
+        await call(ACTION, { sent: made.sent, photos: madePhotos.map((m) => m.sent), files: photos.map((p) => ({ ...Object.fromEntries(fields.map((f) => [f, p[f]])) })) });
+      } else {
+        await call("/_admin/items", { sent: made.sent, photos: madePhotos.map((m) => m.sent) });
+      }
     } else {
       await call(ACTION, { text, photos, ...(question && { poll: question }), ...(mentions && { mentions }) });
     }

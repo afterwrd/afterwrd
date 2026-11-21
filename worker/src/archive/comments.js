@@ -42,6 +42,9 @@ const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g
 // post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
   WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled')`;
+// A signed group's (step 6c: groupcopies.js): comments, mentions, @here and changes to events, while the owner's in it.
+const GROUP_NOTICES = `FROM notices n JOIN groups g ON g.id = n.group_id AND g.joined_at IS NOT NULL
+  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions
@@ -54,7 +57,10 @@ const NOTIFICATIONS_SQL = `
   SELECT 'group', i.id, CAST(i.post_id AS TEXT), i.text, i.created_at, i.actor, NULL, g.id, g.name,
     EXISTS (SELECT 1 FROM group_mine m WHERE m.site = g.origin AND m.remote_group = g.remote_id AND m.kind = 'post' AND m.post_id = i.post_id),
     i.kind, i.date, NULL
-  ${GROUP_THERE}`;
+  ${GROUP_THERE}
+  UNION ALL
+  SELECT 'group', n.id, n.target, n.text, n.created_at, n.actor, NULL, g.id, g.name, n.own, n.kind, NULL, NULL
+  ${GROUP_NOTICES}`;
 
 /** The newest notifications, for the Notifications page. */
 export async function latestComments(db, page, size) {
@@ -71,7 +77,8 @@ export async function newCount(db, user) {
   const row = await db.prepare(`SELECT
     (SELECT COUNT(*) FROM comments WHERE created_at > ?1 AND (author_id IS NULL OR author_id != ?2))
     + (SELECT COUNT(*) ${NOTICES} AND n.created_at > ?1)
-    + (SELECT COUNT(*) ${GROUP_THERE} WHERE i.created_at > ?1) AS n`)
+    + (SELECT COUNT(*) ${GROUP_THERE} WHERE i.created_at > ?1)
+    + (SELECT COUNT(*) ${GROUP_NOTICES} AND n.created_at > ?1) AS n`)
     .bind(user.activity_seen_at ?? 0, user.id).first();
   return row.n;
 }

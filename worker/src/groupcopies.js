@@ -1,0 +1,503 @@
+// A group's signed posts, from a member's own site (afterwrd 2, step 6c: docs/signed-conversations.md, "6c in detail"),
+// as a friend's are (friendcopies.js), for groups with an identity:
+// - copies: the group's newest posts (KEEP, and events still to come) kept here, asked for with `since` while its page
+//   opens and hourly in the background (pullGroup, pullGroups), each post's first record checked as it arrives; older
+//   pages are read from the group with `before`, checked, and not kept;
+// - a post opened: its whole list read from the group and checked (groupThread), admins' removals by the owner's
+//   signed `role` records the group sends with it;
+// - what the owner here does there, signed in their browser and passed on in a signed call, kept in `sent` with the
+//   group's receipt:
+//     POST /_groups/<id>/items                  {sent, photos: [sent…], files: [{hash, thumb_hash}…]}: a new post (its
+//                                               photos uploaded here first, and sent as signed links) or event
+//     POST /_groups/<id>/items/<item>/records   form: sent (JSON), back: a comment, edit, delete, vote, answer, end,
+//                                               change, or (an admin) remove or calloff
+// - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
+import { callFriend } from "./calls.js";
+import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt } from "./calendar.js";
+import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
+import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
+import { ID_RE, namesFor, ownHost } from "./items.js";
+import { checkHead, checkList, headOf } from "./lists.js";
+import { MAX_GROUP_PHOTOS } from "./groups.js";
+import { parseGroup, refresh } from "./membership.js";
+import { keepNotice, tellMention } from "./notes.js";
+import { pushAllowed } from "./notify.js";
+import { checkPhotos, removeUnusedFiles } from "./posts.js";
+import { notifyLater } from "./push.js";
+import { checkGroupReceipts, queueReceipts } from "./receipts.js";
+import { checkRecord } from "./records.js";
+import { signedFile } from "./share.js";
+import { safeNext } from "./auth.js";
+import { messagePage } from "./views/pages.js";
+import { parseRecord } from "../public/static/records.js";
+import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { html, json, now, Refusal } from "./util.js";
+
+export const KEEP = 50; // a group's newest posts kept here (docs/signed-conversations.md section 3)
+const PULL_SECONDS = 3600;
+const PAGES = 3;
+const PAGE_SIZE = 20;
+const SNIPPET = 200;
+
+const snippet = (text) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, SNIPPET) : "");
+
+/** Everyone a group sent (`people`: {person: {chain, profile}}), learnt and checked here, with their signed names. */
+async function learnPeople(env, people) {
+  const names = new Map();
+  for (const [p, info] of Object.entries(people ?? {}).slice(0, 500)) {
+    if (!ID_RE.test(p)) continue;
+    const chain = parseChain(info?.chain);
+    const state = chain && (await learnIdentity(env, chain));
+    if (!state || state.id !== p) continue;
+    const profile = info.profile && (await checkProfile(info.profile, state));
+    if (profile) {
+      names.set(p, profile.name);
+      await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(info.profile), p).run();
+    }
+  }
+  return names;
+}
+
+/** A call to a group's site, signed by this one. Throws as callFriend does. */
+const ask = async (env, from, group, path, body = null) => callFriend(env, from, String(group.origin), path, { ...(body !== null && { body }), timeout: 25_000 });
+
+/**
+ * Asks a group's site for the posts that changed since this site last asked, and keeps them (each post's first record
+ * checked: on the group's site, signed by whoever wrote it). Returns the group as the member sees it (its name, members
+ * and their role: membership.js parseGroup), or throws as callFriend does.
+ */
+export async function pullGroup(env, from, group) {
+  const db = env.DB;
+  let since = Number(group.items_since ?? 0);
+  let info = null;
+  for (let page = 0; page < PAGES; page++) {
+    let data;
+    try {
+      data = await ask(env, from, group, `/_p/items?since=${since}`);
+    } catch (error) {
+      await db.prepare("UPDATE groups SET items_checked_at = ? WHERE id = ?").bind(now(), group.id).run();
+      if (page === 0) throw error;
+      break;
+    }
+    if (page === 0) info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
+    await learnPeople(env, data.people);
+    const rules = await copyRules(env, group, data);
+    const statements = [];
+    for (const item of Array.isArray(data.items) ? data.items.slice(0, 60) : []) {
+      const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules }, item, data.delegations);
+      if (kept) statements.push(kept.statement);
+    }
+    for (const id of Array.isArray(data.gone) ? data.gone.slice(0, 500) : []) {
+      if (ID_RE.test(id)) statements.push(db.prepare("DELETE FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id));
+    }
+    since = Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
+    statements.push(db.prepare("UPDATE groups SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(since, now(), group.id));
+    await db.batch(statements);
+    if (!data.more) break;
+  }
+  group.items_since = since;
+  await trim(env, group);
+  // Mention receipts the group's site couldn't be asked about before (receipts.js): it's answering now.
+  await checkGroupReceipts(env, from, group).catch(() => null);
+  if (info) await refresh(db, group, info);
+  return info;
+}
+
+/**
+ * Keeps a group's newest KEEP posts here, and its events still to come, and anything the owner here has acted on in the
+ * last 30 days; older ones are read from the group when they're wanted.
+ */
+async function trim(env, group) {
+  const db = env.DB;
+  const { results } = await db.prepare(`SELECT id, content FROM copies WHERE group_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?`)
+    .bind(group.id, KEEP).all();
+  if (!results.length) return;
+  const acted = new Set((await db.prepare("SELECT DISTINCT item FROM sent WHERE host = ? AND created_at > ?").bind(group.identity, now() - 30 * 86400).all())
+    .results.map((r) => String(r.item)));
+  const old = results.filter((r) => {
+    const content = JSON.parse(String(r.content));
+    return !acted.has(String(r.id)) && !(content.event && !content.event.cancelled && finishedAt(content.event) > now());
+  }).map((r) => String(r.id));
+  if (old.length) await db.prepare("DELETE FROM copies WHERE group_id = ? AND id IN (SELECT value FROM json_each(?))").bind(group.id, JSON.stringify(old)).run();
+}
+
+/** Asks every signed group's site not asked in the last hour (in the background, from Home). */
+export async function pullGroups(env, from) {
+  const { results } = await env.DB.prepare(`SELECT * FROM groups WHERE identity IS NOT NULL AND joined_at IS NOT NULL AND origin IS NOT NULL
+    AND COALESCE(items_checked_at, 0) < ? ORDER BY COALESCE(items_checked_at, 0) LIMIT 20`).bind(now() - PULL_SECONDS).all();
+  await Promise.all(results.map((g) => pullGroup(env, from, g).catch(() => null)));
+}
+
+/**
+ * Copies as a group's pages show them: each with its writer named (as the owner here knows them, or as they sign
+ * themselves), whether it's the owner's own, and where its list is up to for the signed forms on it.
+ */
+export async function groupCopiesShown(env, group, rows, people = []) {
+  const db = env.DB;
+  const me = await ownHost(env);
+  const names = memberNames(people);
+  people = rows.flatMap((r) => {
+    const t = r.tally ? JSON.parse(String(r.tally)) : null;
+    return [String(r.author), ...Object.keys(t?.votes ?? t?.answers ?? {})];
+  });
+  const [known, mine] = await Promise.all([namesFor(db, people),
+    rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) ORDER BY created_at, rowid`)
+      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }]);
+  for (const [p, name] of known) names.set(p, name);
+  const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
+  return rows.map((r) => {
+    const name = names.get(String(r.author)) ?? "Someone";
+    const shown = copyFromRow({ ...r, name, origin: "", connection_id: 0 }, { names, me: me?.person ?? null });
+    return { ...shown, connection: null, name, mine: String(r.author) === me?.person,
+      list: r.list_n && me ? { host: String(group.identity), me: me.person, seen: { n: Number(r.list_n), h: String(r.list_head) },
+        mine: last.get(String(r.id)) ?? null } : null };
+  });
+}
+
+/**
+ * A group's page of posts: its newest (after asking its site what's changed), or (`before`, a time) older ones, read
+ * from its site and checked, not kept. Returns {info, posts, next (the `before` for the page after, or null), error}.
+ */
+export async function groupPosts(env, from, group, { before = null } = {}) {
+  const db = env.DB;
+  let info = null;
+  let error = null;
+  if (!before) {
+    try { info = await pullGroup(env, from, group); } catch (e) { error = e; }
+    const { results } = await db.prepare("SELECT * FROM copies WHERE group_id = ? ORDER BY created_at DESC LIMIT ?").bind(group.id, PAGE_SIZE + 1).all();
+    const rows = results.slice(0, PAGE_SIZE);
+    const posts = await groupCopiesShown(env, group, rows, info?.people);
+    return { info, posts, error, next: results.length > PAGE_SIZE ? Number(rows.at(-1).created_at) : null };
+  }
+  let data;
+  try { data = await ask(env, from, group, `/_p/items?before=${Number(before)}`); } catch (e) { return { info: null, posts: [], error: e, next: null }; }
+  info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
+  await learnPeople(env, data.people);
+  const rules = await copyRules(env, group, data);
+  const rows = [];
+  for (const item of Array.isArray(data.items) ? data.items.slice(0, PAGE_SIZE) : []) {
+    // Checked as a copy would be, then shown from what was checked, without keeping it.
+    const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules }, item, data.delegations);
+    if (!kept) continue;
+    rows.push({ id: item.id, group_id: group.id, author: kept.record.author, record: JSON.stringify(item.sent), content: JSON.stringify(kept.content),
+      earlier: JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []), edited_at: Number.isSafeInteger(item.edited_at) ? item.edited_at : null,
+      comments: item.comments > 0 ? 1 : 0, created_at: Number(item.taken), tally: cleanTally(item.tally) ? JSON.stringify(cleanTally(item.tally)) : null,
+      list_n: Number.isSafeInteger(item.list?.n) ? item.list.n : null, list_head: typeof item.list?.head === "string" ? item.list.head : null,
+      checked_n: null, checked_head: null });
+  }
+  const posts = await groupCopiesShown(env, group, rows, info?.people);
+  return { info, posts, error: null, next: data.more === true && rows.length ? Number(rows.at(-1).created_at) : null };
+}
+
+/** One of a group's posts kept here, as pages show it; null if it isn't. */
+export async function groupCopy(env, group, id, people = []) {
+  const row = await env.DB.prepare("SELECT * FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
+  return row ? (await groupCopiesShown(env, group, [row], people))[0] : null;
+}
+
+/**
+ * Names for a group's members as its members list gives them (`people`: membership.js parseGroup's, with who they are),
+ * for anyone whose own signed name, or a friend's name here, this site doesn't have.
+ */
+const memberNames = (people) => new Map((Array.isArray(people) ? people : []).filter((p) => p?.person && p.name).map((p) => [String(p.person), String(p.name)]));
+
+/**
+ * Who's an admin, as the owner's signed `role` records the group sent with a thread say (`roles`: {person: {join, role}},
+ * each as signed): the owner made their `join` an admin. Readers take the group's word that they still were when they
+ * acted (the group checks that, by the members list's `role_at`).
+ */
+async function checkRoles(env, group, owner, roles, delegations) {
+  const admins = new Set();
+  const lookups = { ...lookupsWith(env, delegations), at: now() };
+  for (const [person, proof] of Object.entries(roles ?? {}).slice(0, 50)) {
+    if (!ID_RE.test(person)) continue;
+    const join = await checkRecord(proof?.join, lookups);
+    const role = await checkRecord(proof?.role, lookups);
+    if (join && role && join.record.kind === "join" && join.record.author === person && join.record.host === group.identity
+      && join.record.item === group.identity && role.record.kind === "role" && role.record.author === owner && role.record.host === group.identity
+      && role.record.about === join.fp && role.content?.role === "admin") admins.add(person);
+  }
+  return admins;
+}
+
+/** Who may call off someone's event in `group`, for checking its posts (friendcopies.js keepCopy): its owner, and admins. */
+async function copyRules(env, group, data) {
+  const state = await identityState(env, String(group.identity));
+  const owner = state?.current.owner ? String(state.current.owner) : "";
+  return { owner, admins: owner ? await checkRoles(env, group, owner, data.roles, data.delegations) : new Set() };
+}
+
+/**
+ * A group's post opened: its list read from the group and checked. Returns {entries (as lists.js checkList shows them,
+ * with each writer's name), problem, changed, seen, mine, host, owner} or {error}.
+ */
+export async function groupThread(env, from, group, id, people = []) {
+  let data;
+  try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: error.message, status: error.status }; }
+  const signed = await learnPeople(env, data.people);
+  const state = await identityState(env, String(group.identity));
+  if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
+  const owner = String(state.current.owner);
+  const admins = await checkRoles(env, group, owner, data.roles, data.delegations);
+  const me = await ownHost(env);
+  const copy = await env.DB.prepare("SELECT author, checked_n, checked_head FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const host = String(group.identity);
+  const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: state.current.hosting, host, list: id }));
+  const result = await checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
+    entries, signedHead: data.signedHead, from: from0 ? { n: from0.n, head: from0.head } : null, lookups: lookupsWith(env, data.delegations),
+    group: { owner, admin: (p) => admins.has(p) } });
+  const before = copy?.checked_n ? entries.find((e) => e.n === Number(copy.checked_n)) : null;
+  const changed = Boolean(copy?.checked_n && (!before || before.head !== copy.checked_head));
+  const last = entries.at(-1);
+  if (copy && !result.problem && !changed && last) {
+    await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ? AND group_id = ?").bind(last.n, last.head, id, group.id).run();
+  }
+  const known = await namesFor(env.DB, [...new Set(result.entries.map((e) => e.by).filter(Boolean))]);
+  const names = new Map([...memberNames(people), ...signed, ...known]);
+  const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
+  const heads = new Map(entries.map((e) => [e.n, e.head]));
+  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? names.get(e.by) ?? "Someone" : null,
+    removedByAdmin: e.removedBy && e.removedBy !== owner && admins.has(e.removedBy) })),
+  problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names };
+}
+
+/** The owner's signed record, with the delegation behind it and their signed name, ready to pass on to `group`. */
+async function ready(env, group, sent, check) {
+  const me = await ownHost(env);
+  const record = typeof sent?.record === "string" ? parseRecord(fromB64url(sent.record)) : null;
+  if (!me || !record || record.author !== me.person || record.host !== group.identity || !check(record)) throw new Refusal("That didn't work. Try again.");
+  const delegation = await env.DB.prepare("SELECT bytes, proof FROM delegations WHERE key = ? AND expires_at > ?").bind(record.key, now()).first();
+  if (!delegation) throw new Refusal("This browser can't sign for you any more. Sign out and sign in again.");
+  const own = await env.DB.prepare("SELECT profile FROM own_identity WHERE id = 1").first();
+  return { record, delegation: { bytes: String(delegation.bytes), proof: JSON.parse(String(delegation.proof)) },
+    ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) };
+}
+
+/** Keeps the owner's own copy of what they sent a group, with the group's receipt. */
+async function keepSent(env, record, sent, receipt) {
+  const fp = await fingerprintOf("record", fromB64url(sent.record));
+  await env.DB.prepare("INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(fp, record.host, record.kind === "item" ? fp : record.item, record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
+  return fp;
+}
+
+/**
+ * POST /_groups/<id>/items: the owner's new post (or event) in `group`, signed by the composer, its photos (uploaded
+ * here first: `files`) sent as signed links for the group to copy, then let go here. Returns {id}.
+ */
+export async function postSigned(env, url, group, body) {
+  const files = Array.isArray(body?.files) ? body.files : [];
+  const photos = Array.isArray(body?.photos) ? body.photos : [];
+  try {
+    if (photos.length !== files.length || photos.length > MAX_GROUP_PHOTOS) throw new Refusal(`Up to ${MAX_GROUP_PHOTOS} photos in a group post.`);
+    if (files.length) {
+      const trouble = await checkPhotos(env, files, MAX_GROUP_PHOTOS);
+      if (trouble) throw new Refusal(trouble);
+    }
+    const post = await ready(env, group, body?.sent, (r) => r.kind === "item");
+    for (const p of photos) await ready(env, group, p, (r) => r.kind === "item");
+    const links = await Promise.all(files.map(async (f) => ({ src: await signedFile(env, url.origin, f.hash), thumbSrc: await signedFile(env, url.origin, f.thumb_hash) })));
+    let reply;
+    try {
+      reply = await ask(env, url.origin, group, "/_p/items", { sent: body.sent, photos, files: links, delegation: post.delegation, ...(post.profile && { profile: post.profile }) });
+    } catch (error) {
+      throw new Refusal(`Couldn't post in ${group.name}: ${error.message}`);
+    }
+    const id = await keepSent(env, post.record, body.sent, reply.receipt ?? null);
+    for (const p of photos) await keepSent(env, parseRecord(fromB64url(p.record)), p, null);
+    // Asked again when the group's page opens, which shows it.
+    await env.DB.prepare("UPDATE groups SET items_checked_at = 0 WHERE id = ?").bind(group.id).run();
+    return { id };
+  } finally {
+    // The group has its own copies now (or the post wasn't made): these were only uploaded to be sent.
+    await removeUnusedFiles(env, files.flatMap((f) => [f?.hash, f?.thumb_hash]).filter((h) => typeof h === "string"));
+  }
+}
+
+/** POST /_groups/<id>/items/<item>/records: the owner's signed record on a group's post, passed on. */
+export async function relayToGroup(request, env, url, group, id) {
+  const form = await request.formData().catch(() => new FormData());
+  const back = new URL(safeNext(String(form.get("back") ?? `/groups/${group.id}`), url), url.origin);
+  const refused = (message, status = 400) => html(messagePage(message, { href: back.pathname + back.search, label: "Go back" }), status);
+  let sent = null;
+  try { sent = JSON.parse(String(form.get("sent") ?? "")); } catch {}
+  if (!sent) return refused("This browser can't sign for you yet. Sign out and in again, or set it up in Your devices.");
+  let ready_;
+  try { ready_ = await ready(env, group, sent, (r) => r.item === id && r.kind !== "item"); } catch (error) { return refused(error.message); }
+  const { record } = ready_;
+  let answer;
+  try {
+    answer = await ask(env, url.origin, group, "/_p/records", { sent, delegation: ready_.delegation, ...(ready_.profile && { profile: ready_.profile }) });
+  } catch (error) { return refused(`Couldn't send it: ${error.message}`); }
+  const fp = await keepSent(env, record, sent, answer.receipt ?? null);
+  // Those it mentions are sent the group's receipt too, from here (receipts.js).
+  if (answer.receipt) await queueReceipts(env, url.origin, record, fp);
+  const db = env.DB;
+  if (answer.deleted) {
+    await db.prepare("DELETE FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).run();
+    return Response.redirect(`${url.origin}/groups/${group.id}`, 303);
+  }
+  // The owner's own vote or answer, in their copy's totals at once (the group's are asked for again when it opens).
+  if (record.kind === "vote" || record.kind === "answer") {
+    const copy = await db.prepare("SELECT tally FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
+    const content = sent.content ? decode(fromB64url(sent.content)) : null;
+    if (copy && content) {
+      const tally = JSON.parse(String(copy.tally ?? "null")) ?? (record.kind === "vote" ? { votes: {}, ended_at: null } : { answers: {} });
+      if (record.kind === "vote") {
+        const mask = (Array.isArray(content.choices) ? content.choices : []).reduce((m, i) => (Number.isInteger(i) && i >= 0 && i < 10 ? m | (1 << i) : m), 0);
+        tally.votes ??= {};
+        if (mask) tally.votes[record.author] = mask;
+        else delete tally.votes[record.author];
+      } else if (ANSWERS.includes(content.answer)) {
+        tally.answers ??= {};
+        tally.answers[record.author] = { answer: content.answer, version: record.version ?? null };
+      }
+      await db.prepare("UPDATE copies SET tally = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(tally), id, group.id).run();
+    }
+  }
+  await db.prepare("UPDATE groups SET items_checked_at = 0 WHERE id = ?").bind(group.id).run();
+  back.hash = `gi-${id}`;
+  return Response.redirect(back.href, 303);
+}
+
+// --- notes from a group ------------------------------------------------------------------------------------------------
+
+/** Someone's name as a group's note says its members list has it: only when there's no better (memberNames). */
+const groupSays = (note, person) => (typeof note.names?.[person] === "string" && note.names[person].trim() ? note.names[person].trim().slice(0, 100) : "Someone");
+
+const eventWords = (e) => `${e.title} · ${eventWhen(e)}${e.place ? ` · ${e.place}` : ""}`.slice(0, 400);
+
+/** What this site's owner answered to a group's event, as its copy here says. */
+const myAnswer = (copy, me) => (copy ? JSON.parse(String(copy.tally ?? "{}"))?.answers?.[me]?.answer ?? null : null);
+
+/**
+ * A note from a group the owner's in (POST /_p/notes, a signed call from the group's site: groupjoin.js signedGroup),
+ * checked as a friend's are (notes.js): a new post that mentions the owner or is for everyone (@here); a comment, with
+ * the group's receipt; a change to an event, or its calling off; or a post gone.
+ */
+export async function receiveGroupNote(env, url, work, group, me, note) {
+  const host = String(group.identity);
+  const g = Number(group.id);
+  const link = (target) => `/groups/${g}/posts/${target}`;
+  if (note.kind === "item") {
+    await learnPeople(env, note.people);
+    const kept = await keepCopy(env, { group: g, host, rules: await copyRules(env, group, {}) }, note.item, note.delegations);
+    if (!kept) return json({ error: "That isn't a post in this group." }, 400);
+    await kept.statement.run();
+    const id = String(note.item.id);
+    const author = kept.record.author;
+    if (author === me.person) return json({ ok: true }, 202);
+    const actor = (await namesFor(env.DB, [author])).get(author) ?? groupSays(note, author);
+    const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
+    if ((kept.record.mentions ?? []).includes(me.person)) {
+      if (await keepNotice(env.DB, { kind: "mention", fp: id, group: g, item: id, target: id, actor, text })) {
+        await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, url: link(id), tag: `mention-g${g}-${id}` });
+      }
+    } else if (note.here === true && kept.content.here) {
+      // @here: on Notifications always; on the phone, only the first from this group in a day.
+      const told = await env.DB.prepare("SELECT 1 FROM notices WHERE group_id = ? AND kind = 'here' AND created_at > ? LIMIT 1").bind(g, now() - 86400).first();
+      if (await keepNotice(env.DB, { kind: "here", fp: id, group: g, item: id, target: id, actor, text }) && !told
+        && (await pushAllowed(env.DB, "SELECT COUNT(*) AS n FROM notices WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?2", g, now()))) {
+        notifyLater(env, url.origin, work, { kind: "mention", title: String(group.name), text: `${actor} wrote to everyone: ${snippet(text)}`,
+          hidden: "Wrote to everyone in a group", url: link(id), tag: `here-g${g}-${id}` });
+      }
+    }
+    return json({ ok: true }, 202);
+  }
+  if (note.kind === "gone") {
+    const id = String(note.item ?? "");
+    if (!ID_RE.test(id)) return json({ error: "That didn't work." }, 400);
+    const copy = await env.DB.prepare("SELECT content, tally FROM copies WHERE id = ? AND group_id = ?").bind(id, g).first();
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM copies WHERE id = ? AND group_id = ?").bind(id, g),
+      env.DB.prepare("DELETE FROM notices WHERE item = ? AND group_id = ?").bind(id, g),
+    ]);
+    const was = copy && JSON.parse(String(copy.content));
+    if (note.cancelled === true && was?.event && !was.event.cancelled && myAnswer(copy, me.person) !== "no") {
+      const words = eventWords(was.event);
+      if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, group: g, item: id, target: id, actor: String(group.name), text: words })) {
+        notifyLater(env, url.origin, work, { title: String(group.name), text: `Called off: ${words}`, hidden: "Called off an event you were going to",
+          url: `/groups/${g}`, tag: `event-g${g}-${id}` });
+      }
+    }
+    return json({ ok: true }, 202);
+  }
+  if (!["comment", "change", "calloff"].includes(note.kind)) return json({ error: "That didn't work." }, 400);
+  const { entry, receipt } = note;
+  const item = String(note.item ?? "");
+  if (!ID_RE.test(item) || !Number.isSafeInteger(entry?.n) || entry.n < 2 || !Number.isSafeInteger(entry.taken)
+    || !ID_RE.test(entry.fp ?? "") || typeof entry.prev !== "string") return json({ error: "That didn't work." }, 400);
+  // The group took it at that point: the head worked out again, and signed by the group.
+  const state = await identityState(env, host);
+  if (!state) return json({ error: "The group's identity couldn't be checked." }, 400);
+  const head = await headOf({ host, list: item, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
+  const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list: item });
+  if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
+  const signed = await learnPeople(env, note.people);
+  const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
+  if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== host || got.record.item !== item) {
+    return json({ error: "That doesn't check." }, 400);
+  }
+  const author = got.record.author;
+  if (author === me.person) return json({ ok: true }, 202);
+  const actor = (await namesFor(env.DB, [author])).get(author) ?? signed.get(author) ?? groupSays(note, author);
+  const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
+  const target = photo ? `${photo.post}/photos/${photo.index}` : item;
+  if (note.kind === "comment") {
+    const mentioned = (got.record.mentions ?? []).includes(me.person);
+    const copy = await env.DB.prepare("SELECT author FROM copies WHERE id = ? AND group_id = ?").bind(photo ? photo.post : item, g).first();
+    const own = copy && String(copy.author) === me.person ? 1 : 0;
+    const there = !mentioned && !own && (await env.DB.prepare("SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' LIMIT 1").bind(item).first());
+    if (!mentioned && !own && !there) return json({ ok: true }, 202);
+    const text = got.content?.text ?? "";
+    const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, group: g, own, item, target, actor, text });
+    if (kept && mentioned) {
+      await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, comment: true, url: link(target), tag: `mention-g${g}-${target}` });
+    }
+    return json({ ok: true }, 202);
+  }
+  // An event changed by whoever added it, or called off by an admin: the copy here brought up to date, and the owner
+  // told, if it moved or is off and they hadn't said no.
+  const copy = await env.DB.prepare("SELECT author, content, tally FROM copies WHERE id = ? AND group_id = ?").bind(item, g).first();
+  if (!copy) return json({ ok: true }, 202);
+  const was = JSON.parse(String(copy.content));
+  if (!was.event) return json({ error: "That isn't a change to an event." }, 400);
+  if (note.kind === "change" && author !== String(copy.author)) return json({ error: "That isn't theirs to change." }, 400);
+  const event = note.kind === "calloff" ? { ...was.event, cancelled: true } : cleanEvent(got.content?.event);
+  if (!event) return json({ error: "That isn't a change to an event." }, 400);
+  const { cancelled_at: _, ...plain } = event;
+  void _;
+  const cancelled = Boolean(event.cancelled) && !was.event.cancelled;
+  const moved = eventChanged(was.event, plain);
+  const now_ = { ...was, event: { ...plain, ...(event.cancelled ? { cancelled_at: was.event.cancelled_at ?? entry.taken } : {}) },
+    ...(note.kind === "change" && typeof got.content.text === "string" ? { text: got.content.text.slice(0, 5000) } : {}) };
+  await env.DB.prepare("UPDATE copies SET content = ?, changed_at = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(now_), entry.taken, item, g).run();
+  if ((moved || cancelled) && myAnswer(copy, me.person) !== "no") {
+    const kind = cancelled ? "cancelled" : "changed";
+    const words = eventWords(now_.event);
+    if (await keepNotice(env.DB, { kind, fp: entry.fp, group: g, item, target: item, actor, text: words })) {
+      notifyLater(env, url.origin, work, { title: String(group.name), text: `${cancelled ? "Called off" : "Changed"}: ${words}`,
+        hidden: cancelled ? "Called off an event you're going to" : "Changed an event you're going to", url: link(item), tag: `event-g${g}-${item}` });
+    }
+  }
+  return json({ ok: true }, 202);
+}
+
+/** One of a group's posts this site doesn't keep (an older one, opened by a link): asked for, checked, and kept. */
+export async function fetchGroupItem(env, from, group, id, people = []) {
+  let data;
+  try { data = await ask(env, from, group, `/_p/items?id=${id}`); } catch { return null; }
+  await learnPeople(env, data.people);
+  const item = Array.isArray(data.items) ? data.items.find((i) => i?.id === id) : null;
+  const kept = item && (await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules: await copyRules(env, group, data) }, item, data.delegations));
+  if (kept) await kept.statement.run();
+  return kept ? groupCopy(env, group, id, people) : null;
+}
+
+/** A signed group's events kept here (copies), as pages show them: for its calendar, and the owner's Events. */
+export async function groupEvents(env, group, people = []) {
+  const { results } = await env.DB.prepare(`SELECT * FROM copies WHERE group_id = ? AND json_extract(content, '$.type') = 'event'
+    ORDER BY created_at DESC LIMIT 500`).bind(group.id).all();
+  return groupCopiesShown(env, group, results, people);
+}

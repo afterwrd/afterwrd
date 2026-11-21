@@ -85,8 +85,9 @@ export async function signedFor(env, hash, params) {
   const friend = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
   const mac = (await friendMac(env, hash, exp, friend)).subarray(0, bytes.length - FRIEND_BYTES);
   if (!crypto.subtle.timingSafeEqual(mac, bytes.subarray(FRIEND_BYTES))) return 0;
-  const still = await env.DB.prepare("SELECT 1 FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL")
-    .bind(friend).first();
+  // On a group's site (step 6c), the link is a member's: only while they're in.
+  const still = env.GROUP_KEY ? await env.DB.prepare("SELECT 1 FROM group_members WHERE id = ? AND approved_at IS NOT NULL").bind(friend).first()
+    : await env.DB.prepare("SELECT 1 FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL").bind(friend).first();
   return still ? exp - now() : 0;
 }
 

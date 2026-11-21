@@ -80,6 +80,7 @@ export async function handleEvents(request, env, url) {
 async function readForSigning(env, form, zone) {
   const db = env.DB;
   const op = String(form.get("op") ?? "");
+  const group = Number(form.get("group") ?? 0) || null;
   const fail = (error) => Response.json({ error }, { status: 400 });
   const plain = ({ title, starts_at, ends_at, all_day, time_zone, place }) => ({ title, starts_at, ends_at, all_day, time_zone, place });
   const words = (value) => {
@@ -103,9 +104,13 @@ async function readForSigning(env, form, zone) {
       if (finishedAt(read.event) <= now()) return fail("That's already over: pick a time still to come.");
       const text = words(form.get("text"));
       if (text === null) return fail(`The words about it can be up to ${MAX_POST_TEXT} characters.`);
+      // In a signed group (step 6c), an event is for everyone in it: nobody is picked.
+      if (group) return Response.json({ event: plain(read.event), text });
       return Response.json({ event: plain(read.event), text, guests: await people(form.getAll("guest").map(String)) });
     }
-    const item = await db.prepare("SELECT content FROM items WHERE id = ? AND audience = 'invited'").bind(String(form.get("item") ?? "")).first();
+    const item = group
+      ? await db.prepare("SELECT content FROM copies WHERE id = ? AND group_id = ?").bind(String(form.get("item") ?? ""), group).first()
+      : await db.prepare("SELECT content FROM items WHERE id = ? AND audience = 'invited'").bind(String(form.get("item") ?? "")).first();
     if (!item) return fail("That event isn't there any more.");
     const content = JSON.parse(String(item.content));
     const was = plain(content.event);
@@ -117,6 +122,7 @@ async function readForSigning(env, form, zone) {
       return Response.json({ event: plain(read.event), text });
     }
     if (op === "cancel") return Response.json({ event: { ...was, cancelled: true }, text: content.text ?? "" });
+    if (group) return fail("That didn't work.");
     const { results } = await db.prepare("SELECT connection_id FROM item_guests WHERE item = ?").bind(String(form.get("item"))).all();
     const now_ = results.map((r) => Number(r.connection_id));
     const picked = form.getAll("guest").map(Number);

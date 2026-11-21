@@ -18,8 +18,9 @@ import { eventFormValues, finishedAt } from "../calendar.js";
  * The data-sign-* attributes for a record of `kind` on item `item`, from where its list is up to (`list`: {host, seen,
  * mine}), as a string: for a poll's or an event's forms (pollBlock, eventBlock), and the event forms (ui/sign.js).
  */
-const signAttrs = (kind, list, item, { version = null } = {}) => ` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${list.host}"`
-  + ` data-sign-seen-n="${list.seen.n}" data-sign-seen-h="${list.seen.h}" data-sign-prev="${list.mine ?? ""}"${version ? ` data-sign-version="${version}"` : ""}`;
+const signAttrs = (kind, list, item, { version = null, about = null, group = null } = {}) => ` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${list.host}"`
+  + ` data-sign-seen-n="${list.seen.n}" data-sign-seen-h="${list.seen.h}" data-sign-prev="${list.mine ?? ""}"${version ? ` data-sign-version="${version}"` : ""}`
+  + `${about ? ` data-sign-about="${about}"` : ""}${group ? ` data-sign-group="${group}"` : ""}`;
 
 const PUBLIC_POLL = "Everyone who can see this poll can see who chose what.";
 
@@ -30,6 +31,13 @@ const signing = (kind, { item, host, seen, prev, about = null }) => raw(` data-s
 /** A Delete in the V menu, signed. `inplace`: "remove" (a post) or "refresh" (a comment: its post is drawn again). */
 const signedDelete = (action, confirm, sign, { back, inplace }) => html`<form method="post" action="${action}" data-confirm="${confirm}" data-confirm-ok="Delete"${raw(inplace === "remove" ? ' data-inplace="remove"' : " data-inplace")}${signing("delete", sign)}>
     <input type="hidden" name="back" value="${back}"><button class="delete">Delete</button></form>`;
+
+/**
+ * A Remove in the V menu, signed: in a signed group (step 6c), what an admin (or the group's owner) takes down. The
+ * browser asks this site where the group's members list is up to first (ui/sign.js role_at).
+ */
+const signedRemove = (action, confirm, sign, { back, inplace, group }) => html`<form method="post" action="${action}" data-confirm="${confirm}" data-confirm-ok="Remove"${raw(inplace === "remove" ? ' data-inplace="remove"' : " data-inplace")}${signing("remove", sign)} data-sign-group="${group}">
+    <input type="hidden" name="back" value="${back}"><button class="delete">Remove</button></form>`;
 
 /** An edit box, as parts.js editBox, signed. */
 const signedEdit = (id, home, action, text, back, max, sign, { required = true } = {}) => html`<div class="edit" id="${id}">
@@ -44,9 +52,10 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
 /**
  * An item's comments (items.js thread), then a box to add one. `list`: {seen, owner, host, mine} (where the list is
  * up to, and this person's newest record on it, for the signed forms). `region`: the comments are what's drawn again
- * when something's sent from them (a photo's page), not the post they're in.
+ * when something's sent from them (a photo's page), not the post they're in. `moderate`: in a signed group, {group (its
+ * id here), may(person)}: whose comments the owner here may remove, as an admin or the group's owner.
  */
-export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null } = {}) {
+export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
   const sign = { item: item.id, host: list.host, seen: list.seen, prev: list.mine };
   const name = (c) => (c.author === list.me ? ctx.ownerName : c.name ?? "Someone");
@@ -58,6 +67,8 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
       <time title="${fmtDatetime(c.taken)}">${fmtAgo(c.taken)}</time>
       ${c.author === list.me && moreMenu([c.editable && menuEdit(`edit-c-${c.fp}`),
         signedDelete(action, "Delete this comment?", { ...sign, about: c.fp }, { back, inplace: "refresh" })])}
+      ${c.author !== list.me && moderate?.may(c.author) && moreMenu([signedRemove(action, "Remove this comment? Everyone in the group will see it was removed by you.",
+        { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group })])}
     </div>
     ${edited(c)}
     ${c.author === list.me && c.editable && signedEdit(`edit-c-${c.fp}`, `c-${c.fp}`, action, c.text, back, MAX_COMMENT, { ...sign, about: c.fp })}
@@ -257,4 +268,108 @@ export function itemEventEditPage(ctx, { item, list }) {
   ${eventForm({ action: `/_admin/items/${item.id}/records`, back: `/posts/${item.id}`, values: eventFormValues(item.event),
     text: item.text ?? "", submit: "Save", sign: signAttrs("event-change", list, item.id) })}
 </section>`);
+}
+
+// --- a signed group's posts (step 6c: groupcopies.js) ----------------------------------------------------------------------
+
+const ROLE_RUNS = new Set(["owner", "admin"]);
+const EDIT_SECONDS = 15 * 60;
+
+/**
+ * Whom the owner here may remove things of in group `g` (its membership here, with its role), given its owner's identity
+ * (`ownerPerson`): running it, anyone's but their own; as an admin, not the owner's.
+ */
+export const mayModerate = (g, ownerPerson, me) => (person) => ROLE_RUNS.has(g.role) && person !== me && (g.role === "owner" || person !== ownerPerson);
+
+/**
+ * A post in a signed group (groupcopies.js), as its page and the group's pages show it: as a friend's signed post is
+ * drawn (friendItemCard), with its writer named, and, for the owner here, Edit and Delete on their own, and, running the
+ * group, Remove on others' (and calling off their events).
+ */
+export function groupItemCard(ctx, g, item, { thread = null, list = null, open = false, problem = null, back = null, ownerPerson = null } = {}) {
+  const base = `/groups/${g.id}/posts/${item.id}`;
+  const relay = `/_groups/${g.id}/items/${item.id}/records`;
+  const signing_ = list ?? item.list ?? null;
+  const here = back ?? `${ctx.url.pathname}${ctx.url.search}`;
+  const n = item.photos.length;
+  const may = mayModerate(g, ownerPerson, signing_?.me ?? null);
+  const sign = signing_ && { item: item.id, host: signing_.host, seen: signing_.seen, prev: signing_.mine, about: item.id };
+  const editable = item.mine && !item.event && Date.now() / 1000 - item.created_at < EDIT_SECONDS && !item.comments && !(item.poll?.voters > 0);
+  const stay = `?${new URLSearchParams({ in: "post", back: `${here}#gi-${item.id}` })}`;
+  return html`<article class="card social in-group" id="gi-${item.id}" data-region="${base}" data-own-page data-person="${item.author}" data-name="${item.mine ? ctx.ownerName : item.name}">
+  <header>
+    ${item.mine ? ownerFace(ctx) : html`<span class="who who-${item.created_at % 6}" aria-hidden="true">${initial(item.name)}</span>`}
+    <span class="what"><strong>${item.mine ? "You" : item.name}</strong></span>
+    <a class="when" href="${base}" title="${fmtDatetime(item.created_at)}"><time>${fmtAgo(item.created_at)}</time></a>
+    ${sign && moreMenu([editable && menuEdit(`edit-gi-${item.id}`),
+      item.mine && signedDelete(relay, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back: `/groups/${g.id}`, inplace: "remove" }),
+      !item.mine && may(item.author) && signedRemove(relay, "Remove this post, its photos and its comments from the group? This can’t be undone.", sign,
+        { back: `/groups/${g.id}`, inplace: "remove", group: g.id })])}
+  </header>
+  ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
+  ${edited(item)}
+  ${sign && editable && signedEdit(`edit-gi-${item.id}`, `gi-${item.id}`, relay, item.text, here, MAX_POST_TEXT, sign, { required: !n || Boolean(item.poll) })}
+  ${n > 0 && html`<div class="collage collage-${Math.min(n, 4)}">
+    ${item.photos.slice(0, 4).map((m, i) => html`<a href="${base}/photos/${i + 1}${stay}" class="tile"><img src="${m.thumbSrc}" alt="" loading="lazy"${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
+      ${i === 3 && n > 4 && html`<span class="more">+${n - 4}</span>`}</a>`)}
+  </div>`}
+  ${item.poll && pollBlock(ctx, item.poll, { id: `poll-${item.id}`, action: relay, whoNote: "Everyone in the group can see who chose what.",
+    sign: signing_ ? signAttrs("vote", signing_, item.id, { version: item.version }) : "",
+    closeAction: item.mine && signing_ ? relay : null, closeSign: item.mine && signing_ ? signAttrs("end", signing_, item.id) : "" })}
+  ${item.event && eventBlock(ctx, item.event, { href: base, full: open, ics: `${base}/event.ics`, edit: item.mine ? `${base}/edit` : null,
+    answer: signing_ ? { action: relay, sign: signAttrs("answer", signing_, item.id, { version: item.version }) } : null,
+    cancel: signing_ && (item.mine || may(item.author)) ? relay : null,
+    cancelSign: !signing_ ? "" : item.mine ? signAttrs("event-cancel", signing_, item.id, { group: g.id })
+      : signAttrs("calloff", signing_, item.id, { about: item.id, group: g.id }),
+    cancelNote: "Call this event off? Everyone going, or who might, will be told.", note: "Everyone in the group can see it." })}
+  ${problem && html`<p class="notice alert">${problem}</p>`}
+  <details class="comments"${open && raw(" open")} data-thread="${base}">
+    <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
+    ${thread && list ? itemThread(ctx, item, thread, list, { action: relay, moderate: { group: g.id, may } })
+      : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
+  </details>
+</article>`;
+}
+
+/**
+ * A photo in a signed group's post: the photo, from the group's site by its link, paging through the post's photos,
+ * ✕ back to where it was opened from, and the photo's own comments (its own item, read from the group and checked).
+ */
+export function signedGroupPhoto(ctx, { membership: g, group: info, item, index, back, thread, list, problem, ownerPerson }) {
+  const m = item.photos[index - 1];
+  const stay = `?${new URLSearchParams({ in: "post", back })}`;
+  const base = `/groups/${g.id}/posts/${item.id}/photos`;
+  const main = html`
+<main class="theatre">
+  <section class="stage">
+    <img src="${m.src}" style="background-image: url('${m.thumbSrc}')" alt=""${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
+    <a class="close" id="close" href="${back}" title="Back (Esc)" aria-label="Back to the post">✕</a>
+    <span class="counter">${index} / ${item.photos.length}</span>
+    ${index > 1 && html`<a class="nav prev" id="prev" href="${base}/${index - 1}${stay}" title="Previous (←)" aria-label="Previous"></a>`}
+    ${index < item.photos.length && html`<a class="nav next" id="next" href="${base}/${index + 1}${stay}" title="Next (→)" aria-label="Next"></a>`}
+  </section>
+  <aside class="info">
+    <a class="album-link" href="/groups/${g.id}">${info?.name ?? g.name}</a>
+    <time class="when">${fmtDatetime(item.created_at)}</time>
+    <h2>Comments</h2>
+    ${problem && html`<p class="notice alert">${problem}</p>`}
+    ${thread && list && itemThread(ctx, { id: m.item }, thread, list, { region: true, action: `/_groups/${g.id}/items/${m.item}/records`,
+      moderate: { group: g.id, may: mayModerate(g, ownerPerson, list.me) } })}
+    <h2>Posted with</h2>${groupItemCard(ctx, g, item, { back, ownerPerson })}
+  </aside>
+</main>
+<script>
+  document.addEventListener('keydown', e => {
+    if (e.target.matches('input, textarea, select') || e.metaKey || e.ctrlKey) return;
+    const link = document.getElementById({ ArrowLeft: 'prev', ArrowRight: 'next', Escape: 'close' }[e.key]);
+    if (link) link.click();
+  });
+</script>`;
+  return layout(ctx, { title: info?.name ?? g.name, bodyClass: "viewer", main });
+}
+
+/** Changing an event the owner here added to a signed group: the form, signed as a change (ui/sign.js event-change). */
+export function groupItemEventForm(g, item, list) {
+  return eventForm({ action: `/_groups/${g.id}/items/${item.id}/records`, back: `/groups/${g.id}/posts/${item.id}`, values: eventFormValues(item.event),
+    text: item.text ?? "", submit: "Save", sign: signAttrs("event-change", list, item.id, { group: g.id }) });
 }

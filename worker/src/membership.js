@@ -40,6 +40,7 @@ import { handleGroupSites } from "./groupsites.js";
 import { handleGroupIdentity } from "./groupidentity.js";
 import { callFriend } from "./calls.js";
 import { joinPoint, joinSigned, membersPoint, relayGroupRecord, signedGroup, waitingPoint } from "./groupjoin.js";
+import { postSigned, relayToGroup } from "./groupcopies.js";
 import { ownOrigin } from "./keys.js";
 import { notifyLater } from "./push.js";
 import { parsePoll, questionFor, readPoll } from "./polls.js";
@@ -108,7 +109,7 @@ export function parseGroupNote(note, site, n, env) {
 }
 
 /** The group itself, from the context of what its site sends; it must be the group asked for. */
-function parseGroup(g, site, n, env) {
+export function parseGroup(g, site, n, env) {
   if (g?.type !== "Group" || g.id !== groupId(site, n)) throw unexpected();
   const waiting = g["afterwrd:waiting"];
   const owner = person(g.attributedTo, env);
@@ -119,7 +120,8 @@ function parseGroup(g, site, n, env) {
     waiting: Number.isSafeInteger(waiting) && waiting >= 0 ? waiting : 0,
     // Mentions (mentions.js): its members, to pick from, and whether the owner here may use @here, and anyone may.
     people: (Array.isArray(g["afterwrd:people"]) ? g["afterwrd:people"].slice(0, MAX_LISTED) : [])
-      .map((p) => person(p, env)).filter((p) => p.name && p.from).map((p) => ({ name: p.name, origin: p.from })),
+      .map((p) => ({ ...person(p, env), person: /^[A-Za-z0-9_-]{43}$/.test(p?.["afterwrd:person"] ?? "") ? p["afterwrd:person"] : null }))
+      .filter((p) => p.name && p.from).map((p) => ({ name: p.name, origin: p.from, ...(p.person && { person: p.person }) })),
     mayHere: g["afterwrd:mayHere"] === true,
     hereAnyone: g["afterwrd:hereAnyone"] === true,
   };
@@ -219,7 +221,7 @@ const call = async (env, group, path, body) => (group.identity
   : callSite(group.origin, path, { key: group.their_key, body }));
 
 /** Keeps a group's name, owner and our role up to date, from what it just said. */
-async function refresh(db, group, info) {
+export async function refresh(db, group, info) {
   if (info.name === group.name && info.about === group.about && info.role === group.role && (info.owner ?? group.host_name) === group.host_name) return;
   Object.assign(group, { name: info.name, about: info.about, role: info.role, host_name: info.owner ?? group.host_name });
   await db.prepare("UPDATE groups SET name = ?, about = ?, role = ?, host_name = ? WHERE id = ?")
@@ -668,9 +670,11 @@ export async function leaveGroup(env, group) {
   await forgetGroup(env.DB, group);
 }
 
-/** Forgets a group here (its notes and plans too). The owner's copies of what they said stay. */
+/** Forgets a group here (its notes and plans too, and its signed posts kept here). The owner's copies of what they said stay. */
 export const forgetGroup = (db, group) => db.batch([
   db.prepare("DELETE FROM group_inbox WHERE group_id = ?").bind(group.id),
+  db.prepare("DELETE FROM copies WHERE group_id = ?").bind(group.id),
+  db.prepare("DELETE FROM notices WHERE group_id = ?").bind(group.id),
   db.prepare("DELETE FROM events_elsewhere WHERE group_id = ?").bind(group.id),
   db.prepare("DELETE FROM groups WHERE id = ?").bind(group.id),
 ]);
@@ -742,6 +746,18 @@ export async function handleGroupActions(request, env, url) {
       return json({ error: error.message }, error instanceof Refusal ? error.status ?? 400 : 400);
     }
   }
+  // A signed group's posts (step 6c: groupcopies.js): a new post or event, and records on its posts, signed here.
+  if (group.identity && action === "/items") {
+    try {
+      const made = await postSigned(env, url, group, await request.json().catch(() => ({})));
+      return json({ ok: true, id: made.id, go: `/groups/${group.id}/posts/${made.id}` });
+    } catch (error) {
+      if (error instanceof Refusal) return json({ error: error.message }, error.status ?? 400);
+      throw error;
+    }
+  }
+  const onItem = group.identity && /^\/items\/([A-Za-z0-9_-]{43})\/records$/.exec(action);
+  if (onItem) return relayToGroup(request, env, url, group, onItem[1]);
   try {
     if (action === "/posts") {
       const body = await request.json().catch(() => ({}));

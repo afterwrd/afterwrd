@@ -8,7 +8,8 @@
 //   - an event is a post whose content is {type: "event", text, event: {title, starts_at, ends_at, all_day, time_zone,
 //     place}}, for those invited (its record's `audience`). The owner's `change` ({event, text}) carries it as it now
 //     is: a change of anything but the words moves its version, which answers name; `event.cancelled` calls it off.
-//     An `answer` ({answer: going | maybe | no}) comes from a guest, while it's neither off nor over.
+//     An `answer` ({answer: going | maybe | no}) comes from a guest, while it's neither off nor over. In a group
+//     (step 6c), every member is a guest, and an admin may call it off (`calloff`).
 import { readPoll, choicesMask } from "./polls.js";
 import { ANSWERS, cleanEvent, eventChanged, finishedAt } from "./calendar.js";
 
@@ -56,6 +57,11 @@ export function workOut(read, { id, author, guests = null }) {
       }
       content = { ...content, event: { ...event, ...(event.cancelled ? { cancelled_at: content.event.cancelled_at ?? e.taken } : {}) },
         ...(typeof c.text === "string" ? { text: c.text } : {}) };
+    } else if (record.kind === "calloff" && record.about === id && content.type === "event" && !content.event?.cancelled) {
+      // In a group (lists.js GroupRules): an admin calling off someone's event, as its writer's change would.
+      version = e.fp;
+      movedAt = e.taken;
+      content = { ...content, event: { ...content.event, cancelled: true, cancelled_at: e.taken, called_off_by: record.author } };
     } else if (record.kind === "end" && record.author === author && content.poll) {
       endedAt ??= e.taken;
     } else if (record.kind === "vote" && content.poll && record.version === id && endedAt === null

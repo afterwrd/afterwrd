@@ -12,6 +12,7 @@ import { groupEventBlock } from "./events.js";
 import { faceFor, notFriend, remoteMedia } from "./friends.js";
 import { layout, mentionData, page } from "./layout.js";
 import { composer, editBox, edited, feed, menuDelete, menuEdit, moreMenu, ownerFace, pager, pollBlock, said } from "./parts.js";
+import { groupItemCard, groupItemEventForm, signedGroupPhoto as itemPhotoPage } from "./items.js";
 
 // --- groups, each its own Worker, read from there (membership.js) -----------------------------------------------------
 
@@ -370,7 +371,52 @@ function groupCard(ctx, g, p, { back = `${ctx.url.pathname}${ctx.url.search}#gp$
 </article>`;
 }
 
-export function groupPage(ctx, { membership: g, group: info, posts, paging, maxPhotos }) {
+/** The group's owner's identity (step 6c), from those its site lists: who admins may not remove things of. */
+const ownerPersonOf = (info) => info?.people?.find((p) => p.origin === info.ownerFrom)?.person ?? null;
+
+/**
+ * A signed group's page (step 6c: groupcopies.js): its newest posts as this site keeps them, and older ones a page at a
+ * time (`next`: the time the next page goes back from), with a composer that signs.
+ */
+function signedGroupPage(ctx, { membership: g, group: info, posts, next, before, maxPhotos }) {
+  g.ownerFrom = info.ownerFrom;
+  const ownerPerson = ownerPersonOf(info);
+  return page(ctx, info.name, html`
+${groupHead(ctx, g, info, "posts")}
+${!before && composer({ action: `/_groups/${g.id}/items`, max: maxPhotos, placeholder: `Write something for ${info.name}`, host: g.identity })}
+${feed(posts, (p) => groupItemCard(ctx, g, p, { ownerPerson }), before ? "Nothing older." : "Nothing posted yet. Write the first post above.")}
+${(before || next) && html`<nav class="pager">${before ? html`<a class="chip" href="${groupBase(g)}">Newest</a>` : ""}${next ? html`<a class="chip" href="${groupBase(g)}?before=${next}">Older posts</a>` : ""}</nav>`}`);
+}
+
+/** A post in a signed group, its comments open (read from the group and checked). */
+export function groupItemPage(ctx, { membership: g, group: info, item, thread, list, problem }) {
+  g.ownerFrom = info.ownerFrom;
+  return page(ctx, info.name, html`
+${groupHead(ctx, g, info, "")}
+<div class="feed">${groupItemCard(ctx, g, item, { thread, list, open: true, problem, ownerPerson: ownerPersonOf(info) })}</div>`);
+}
+
+/** A photo in a signed group's post. */
+export function groupItemPhotoPage(ctx, data) {
+  return itemPhotoPage(ctx, { ...data, ownerPerson: ownerPersonOf(data.group) });
+}
+
+/** Changing an event the owner here added to a signed group. */
+export function groupItemEventEditPage(ctx, { membership: g, group: info, item, list }) {
+  g.ownerFrom = info.ownerFrom;
+  return page(ctx, `${info.name}: change the event`, html`
+${groupHead(ctx, g, info, "")}
+<section class="card">
+  <h2>Change the event</h2>
+  <p class="meta">If you change its name, time or place, everyone going, or who might, is told. Its times are in
+  ${item.event.time_zone.replace(/_/g, " ")} time.</p>
+  ${groupItemEventForm(g, item, list)}
+</section>`);
+}
+
+export function groupPage(ctx, data) {
+  if (data.signed) return signedGroupPage(ctx, data);
+  const { membership: g, group: info, posts, paging, maxPhotos } = data;
   g.ownerFrom = info.ownerFrom;
   return page(ctx, info.name, html`
 ${groupHead(ctx, g, info, "posts")}

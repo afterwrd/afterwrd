@@ -17,6 +17,7 @@ import * as friend from "../friends.js";
 import { MAX_GROUP_PHOTOS, maxMembers } from "../groups.js";
 import { whereAmI } from "../groupsites.js";
 import * as groups from "../membership.js";
+import * as groups_ from "../groupcopies.js";
 import { ownerName } from "../sites.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
@@ -112,6 +113,11 @@ const ROUTES = [
   [/^\/groups\/join$/, null, groupJoin, views.groupJoinPage],
   [/^\/groups\/(\d{1,15})$/, null, groupHome, views.groupPage],
   [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})$/, null, groupPost, views.groupPostPage],
+  // A signed group's posts (step 6c: groupcopies.js), by their id.
+  [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})$/, null, (ctx, params, id, item) => groupItemPost(ctx, params, id, item), views.groupItemPage],
+  [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/photos\/(\d{1,2})$/, null, groupItemPost, views.groupItemPhotoPage],
+  [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/edit$/, null, groupItemEventEdit, views.groupItemEventEditPage],
+  [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/event\.ics$/, null, groupItemEventFile, null],
   [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})\/photos\/([0-9a-f]{64})$/, null, groupPhoto, views.groupPhotoPage],
   [/^\/groups\/(\d{1,15})\/members$/, null, groupMembers, views.groupMembersPage],
   [/^\/groups\/(\d{1,15})\/calendar$/, null, groupCalendar, views.groupCalendarPage],
@@ -1029,8 +1035,16 @@ async function eventsIndex(ctx, params) {
   // each, as Home asks friends; at most GROUPS_ASKED groups, as a page may only ask 50 other sites on the free plan.
   // A group that doesn't answer, or isn't asked, shows the owner's own copies of their plans there.
   const unreachable = [];
-  const asked = new Set(joined.results.slice(0, GROUPS_ASKED).map((g) => g.id));
-  await Promise.all(joined.results.map(async (g) => {
+  // A signed group's events (step 6c) are kept here as copies: nothing to ask.
+  for (const g of joined.results.filter((x) => x.identity)) {
+    for (const p of await groups_.groupEvents(ctx.env, g)) {
+      if (p.event.answer === "no" || !inSpan(p.event)) continue;
+      items.push(calendarItem(p.event, { kind: "group", href: `/groups/${g.id}/posts/${p.id}`, who: g.name, answer: p.event.answer }));
+    }
+  }
+  const unsigned = joined.results.filter((x) => !x.identity);
+  const asked = new Set(unsigned.slice(0, GROUPS_ASKED).map((g) => g.id));
+  await Promise.all(unsigned.map(async (g) => {
     let reply;
     try {
       if (asked.has(g.id)) reply = await groups.loadEvents(ctx.env, ctx.url.origin, g, { past: from < at });
@@ -1050,7 +1064,7 @@ async function eventsIndex(ctx, params) {
   }));
   items.sort((a, b) => a.starts_at - b.starts_at);
   return {
-    ...calendarShown(shown), items, unreachable, notAsked: Math.max(0, joined.results.length - GROUPS_ASKED),
+    ...calendarShown(shown), items, unreachable, notAsked: Math.max(0, unsigned.length - GROUPS_ASKED),
     invitations: [
       // Invitations still to answer, for events still to come and not called off: answered here as anywhere else,
       // signed, and passed on by this site (friendcopies.js).
@@ -1108,8 +1122,90 @@ async function fromGroup(ctx, id, load) {
 }
 
 async function groupHome(ctx, params, id) {
-  return fromGroup(ctx, id, async (g) => ({
-    ...await groups.loadGroup(ctx.env, ctx.url.origin, g, pageNumber(params)), maxPhotos: MAX_GROUP_PHOTOS }));
+  return fromGroup(ctx, id, async (g) => {
+    // A signed group (step 6c: groupcopies.js): its newest posts kept here, after asking what's changed; older ones read.
+    if (g.identity) {
+      const before = Number(params.get("before")) || null;
+      const got = await groups_.groupPosts(ctx.env, ctx.url.origin, g, { before });
+      if (got.error || !got.info) throw got.error ?? new Error("The group's site sent something unexpected.");
+      return { signed: true, group: got.info, posts: got.posts, next: got.next, before, maxPhotos: MAX_GROUP_PHOTOS };
+    }
+    return { ...await groups.loadGroup(ctx.env, ctx.url.origin, g, pageNumber(params)), maxPhotos: MAX_GROUP_PHOTOS };
+  });
+}
+
+/**
+ * A signed group's post (step 6c), with its comments read from the group and checked. `photo`: one of its photos
+ * (from 1), with that photo's own comments instead.
+ */
+async function groupItemPost(ctx, params, id, itemId, photo = null) {
+  return fromGroup(ctx, id, async (g) => {
+    if (!g.identity) throw new Error("That post isn't there any more.");
+    const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
+    let item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? (await groups_.fetchGroupItem(ctx.env, ctx.url.origin, g, itemId, info?.people));
+    if (!item) throw new Error("That post isn't there any more.");
+    if (photo !== null) {
+      const at = Number(photo);
+      if (!(at >= 1 && at <= item.photos.length) || !item.photos[at - 1]?.item) throw new Error("That photo isn't there any more.");
+      const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/groups/${g.id}#gi-${itemId}`;
+      return { group: info, item, index: at, back, ...(await groupComments(ctx, g, item.photos[at - 1].item, item.author, info?.people)) };
+    }
+    const shown = await groupComments(ctx, g, itemId, item.author, info?.people);
+    // A poll counted again from its checked list, as a friend's is (friendItemPost).
+    if (item.poll && shown.counted) {
+      const worked = workOut(shown.counted, { id: itemId, author: item.author });
+      const ordered = (o) => JSON.stringify(Object.fromEntries(Object.entries(o).sort()));
+      if (item.tally && ordered(item.tally.votes ?? {}) !== ordered(worked.tally.votes)) {
+        shown.problem ??= `${g.name}'s site's totals were wrong; these are counted from the votes themselves.`;
+      }
+      await ctx.db.prepare("UPDATE copies SET tally = ? WHERE id = ? AND group_id = ?").bind(JSON.stringify(worked.tally), itemId, g.id).run();
+    }
+    item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? item;
+    return { group: info, item, ...shown };
+  });
+}
+
+/** The comments on a signed group's post or photo (its own list, `id`), read from the group and checked. */
+async function groupComments(ctx, g, id, owner, people = []) {
+  const t = await groups_.groupThread(ctx.env, ctx.url.origin, g, id, people);
+  if (t.error) return { thread: null, list: null, problem: t.error };
+  const read = t.entries.map((e) => ({ n: e.n, fp: e.fp, taken: e.taken, failed: e.state === "failed",
+    r: e.record ? { record: e.record, content: e.content } : null }));
+  const comments = itemComments(read, { owner, item: id });
+  const name = (p) => t.names.get(p) ?? "Someone";
+  for (const c of comments) {
+    if (c.author) c.name = name(c.author);
+    // Removed by the group's owner, or one of its admins (lists.js GroupRules).
+    if (c.removedBy) c.removedByName = c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}` : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
+  }
+  const me = await ownHost(ctx.env);
+  const problem = t.problem ? `${g.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
+    : t.changed ? `${g.name}'s site has changed this conversation since you last saw it.` : null;
+  const counted = !t.problem && read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine }, problem, counted };
+}
+
+/** Changing an event the owner here added to a signed group. */
+async function groupItemEventEdit(ctx, params, id, itemId) {
+  return fromGroup(ctx, id, async (g) => {
+    if (!g.identity) throw new Error("That isn't an event you added.");
+    const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
+    const item = await groups_.groupCopy(ctx.env, g, itemId, info?.people);
+    if (!item?.event || !item.mine || !item.list) throw new Error("That isn't an event you added.");
+    return { group: info, item, list: item.list };
+  });
+}
+
+/** A signed group's event as a calendar file. */
+async function groupItemEventFile(ctx, params, id, itemId) {
+  return fromGroup(ctx, id, async (g) => {
+    const item = g.identity && (await groups_.groupCopy(ctx.env, g, itemId));
+    if (!item?.event) throw new Error("That isn't an event.");
+    const page = `${ctx.url.origin}/groups/${g.id}/posts/${item.id}`;
+    const body = icsFile(item.event, { uid: `${item.id}@${new URL(g.origin).host}`, url: page, about: [item.text, `${g.name}: ${page}`].filter(Boolean).join("\n\n") });
+    return new Response(body, { headers: { "Content-Type": "text/calendar; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="event.ics"', "Cache-Control": "private, no-store" } });
+  });
 }
 
 async function groupPost(ctx, params, id, postId) {
@@ -1136,8 +1232,17 @@ async function groupPhoto(ctx, params, id, postId, hash) {
 /** A group's calendar: events to come, and adding one. */
 async function groupCalendar(ctx, params, id) {
   const shown = calendarView(params, ctx.zone);
-  return fromGroup(ctx, id, async (g) => ({ ...await groups.loadEvents(ctx.env, ctx.url.origin, g, { past: shown.from < now() }),
-    ...calendarShown(shown) }));
+  return fromGroup(ctx, id, async (g) => {
+    // A signed group's (step 6c): its events kept here, after asking what's changed.
+    if (g.identity) {
+      const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
+      const events = await groups_.groupEvents(ctx.env, g, info?.people);
+      const at = now();
+      return { signed: true, outdated: false, group: info, upcoming: events.filter((p) => finishedAt(p.event) >= at).sort((a, b) => a.event.starts_at - b.event.starts_at),
+        past: events.filter((p) => finishedAt(p.event) < at).sort((a, b) => b.event.starts_at - a.event.starts_at), ...calendarShown(shown) };
+    }
+    return { ...await groups.loadEvents(ctx.env, ctx.url.origin, g, { past: shown.from < now() }), ...calendarShown(shown) };
+  });
 }
 
 /** Changing an event the owner here added. */

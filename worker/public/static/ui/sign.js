@@ -3,7 +3,8 @@
 // field. Its data-sign-* attributes say what the record says besides its words: the item, its host, the point in the
 // item's list this page saw, the owner's own newest record on it, and what an edit or delete is about.
 // "photo-delete" (a photo's page) signs two: the delete on the photo's own list (`sent`), and the owner's change to
-// its post, listing the photos left (`change`, from the data-sign-post-* attributes).
+// its post, listing the photos left (`change`, from the data-sign-post-* attributes). In a signed group (data-sign-group),
+// an admin's "remove" or "calloff" also says where the members list was (role_at).
 // Forms sent in place are signed by inplace.js; others here, as they're sent (after any "Are you sure?": confirm.js
 // sends the form again).
 import { audienceOf, makeRecord, pickedMentions } from "../records.js";
@@ -31,6 +32,8 @@ async function signEvent(form, body, key) {
   for (const [name, value] of body) ask.append(name, value);
   ask.set("op", op);
   ask.set("item", d.signItem ?? "");
+  // A signed group's event (step 6c): for everyone in it, so nobody is picked.
+  if (d.signGroup) ask.set("group", d.signGroup);
   const res = await fetch("/_admin/events/read", { method: "POST", body: ask });
   const got = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(got.error ?? "That didn't work. Try again.");
@@ -42,11 +45,24 @@ async function signEvent(form, body, key) {
   }
   const guests = got.guests?.map((g) => g.id) ?? null;
   if (op === "new") {
-    const made = await makeRecord({ kind: "item", author: key.person, host: key.person, audience }, { type: "event", text: got.text, event: got.event }, key);
+    const made = await makeRecord({ kind: "item", author: key.person, host: d.signHost || key.person, ...(audience && { audience }) },
+      { type: "event", text: got.text, event: got.event }, key);
     return { made, guests, salt };
   }
   const made = await makeRecord({ ...fieldsOf(d, "sign", "change", key), ...(audience && { audience }) }, { event: got.event, text: got.text }, key);
   return { sent: JSON.stringify(made.sent), ...(guests && { guests: JSON.stringify(guests), salt }) };
+}
+
+/**
+ * In a signed group (step 6c), an admin's remove or calloff says where the members list was when they acted (`role_at`),
+ * as their own site has just checked it (POST /_groups/<id>/point).
+ */
+async function roleAt(d) {
+  if (!d.signGroup || (d.sign !== "remove" && d.sign !== "calloff")) return {};
+  const res = await fetch(`/_groups/${d.signGroup}/point`, { method: "POST" });
+  const got = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(got.error ?? "That didn't work. Try again.");
+  return got.role_at ? { role_at: got.role_at } : {};
 }
 
 /** The signed fields a form sends ({sent} and, for some, more), each JSON. Throws CANT_SIGN without a key. */
@@ -66,7 +82,8 @@ export async function signForm(form, body) {
   // A comment's mentions, as the @ list noted them (ui/mentions.js): in the record by identity, and named in its content.
   const { mentions, shown } = kind === "comment" ? pickedMentions(words, body.get("mentions")) : { mentions: [], shown: [] };
   const content = kind === "comment" || kind === "edit" ? { text: words, ...(shown.length && { mentions: shown }) } : undefined;
-  const fields = { sent: JSON.stringify((await makeRecord({ ...fieldsOf(d, "sign", kind, key), ...(mentions.length && { mentions }) }, content, key)).sent) };
+  const fields = { sent: JSON.stringify((await makeRecord({ ...fieldsOf(d, "sign", kind, key), ...(mentions.length && { mentions }), ...(await roleAt(d)) },
+    content, key)).sent) };
   if (d.sign === "photo-delete") {
     const photos = JSON.parse(d.signPostPhotos ?? "[]");
     fields.change = JSON.stringify((await makeRecord(fieldsOf(d, "signPost", "change", key), { photos }, key)).sent);
@@ -87,12 +104,13 @@ document.addEventListener("submit", async (e) => {
       const button = form.querySelector("button");
       if (button) button.disabled = true;
       const { made, guests, salt } = /** @type {any} */ (await signEvent(form, new FormData(form), key));
-      const res = await fetch("/_admin/items", { method: "POST", headers: { "Content-Type": "application/json" },
+      // A signed group's (data-sign-to: step 6c) goes to the group, through the owner's own site.
+      const res = await fetch(form.dataset.signTo || "/_admin/items", { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sent: made.sent, guests, salt }) });
       const answer = await res.json().catch(() => ({}));
       if (button) button.disabled = false;
       if (!res.ok) throw new Error(answer.error ?? "That didn't work. Try again.");
-      location.href = `/posts/${answer.id}`;
+      location.href = answer.go ?? `/posts/${answer.id}`;
       return;
     }
     // The button pressed is part of what's said (an answer's going, maybe or no), and form.submit() leaves it out.

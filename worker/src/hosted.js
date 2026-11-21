@@ -11,7 +11,7 @@ import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { MemberRules } from "./members.js";
 import { checkRecord } from "./records.js";
-import { CHECKPOINT, PAGE, Rules, signHead } from "./lists.js";
+import { CHECKPOINT, GroupRules, PAGE, Rules, signHead } from "./lists.js";
 
 const TRIES = 8;
 const turns = new Map(); // list -> the last take queued for it
@@ -36,10 +36,13 @@ export async function listEntries(db, list, after = 0) {
 /** The rules a list follows: a group's members list (its id is the group's own: members.js), or an item's. */
 export const rulesKind = (list, host) => (list === host ? MemberRules : Rules);
 
-/** The rules as they stand after a list's entries (this site's own, already checked: their records are only parsed). */
-export async function rulesFor(db, list, owner, host) {
+/**
+ * The rules as they stand after a list's entries (this site's own, already checked: their records are only parsed).
+ * `group`: on a group's site, a post's (lists.js GroupRules).
+ */
+export async function rulesFor(db, list, owner, host, group = null) {
   const Kind = rulesKind(list, host);
-  const rules = new Kind({ host, list, owner });
+  const rules = group && Kind !== MemberRules ? new GroupRules({ host, list, owner, group }) : new Kind({ host, list, owner });
   const entries = await listEntries(db, list);
   for (const e of entries) {
     const record = e.sent ? parseRecord(fromB64url(e.sent.record)) : null;
@@ -55,21 +58,22 @@ export async function rulesFor(db, list, owner, host) {
  * the site's identity and hosting key), at `taken` (now). `lookups` find writers' identities and browser keys
  * (records.js). Returns {entry, receipt} or {refused: why}.
  */
-export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000) }) {
+export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000), group = null }) {
   const got = await checkRecord(sent, { ...lookups, at: taken });
   if (!got) return { refused: "That didn't check." };
   if (got.record.host !== host.person) return { refused: "That belongs somewhere else." };
   const list = got.record.kind === "item" ? got.fp : got.record.item;
-  return inTurn(list, () => take(db, got, { sent, host, taken, list }));
+  return inTurn(list, () => take(db, got, { sent, host, taken, list, group }));
 }
 
-async function take(db, got, { sent, host, taken, list }) {
+async function take(db, got, { sent, host, taken, list, group }) {
   for (let attempt = 0; attempt < TRIES; attempt++) {
     const row = await db.prepare("SELECT owner, n, head, deleted_at FROM lists WHERE id = ?").bind(list).first();
     if (row?.deleted_at) return { refused: "That's been deleted." };
     if (got.record.kind === "item" ? row : !row) return { refused: got.record.kind === "item" ? "duplicate" : "That isn't here." };
     const owner = row ? String(row.owner) : got.record.author;
-    const { rules, entries } = row ? await rulesFor(db, list, owner, host.person) : { rules: new Rules({ host: host.person, list, owner }), entries: [] };
+    const { rules, entries } = row ? await rulesFor(db, list, owner, host.person, group)
+      : { rules: group ? new GroupRules({ host: host.person, list, owner, group }) : new Rules({ host: host.person, list, owner }), entries: [] };
     const why = rules.refuse(got, taken);
     if (why) return { refused: why };
     const head = await rules.add({ fp: got.fp, taken, record: got.record, byHost: got.byHost, content: got.content });
@@ -85,14 +89,15 @@ async function take(db, got, { sent, host, taken, list }) {
       db.prepare(`INSERT INTO list_pages (list, page, entries) SELECT ?, ?, ? WHERE ${moved("")}
         ON CONFLICT(list, page) DO UPDATE SET entries = excluded.entries`).bind(list, page, JSON.stringify(pageEntries), list, list, head),
     ];
-    // Its owner deleting the whole item: everything on it goes, for good; the list's row stays as a tombstone.
-    if (got.record.kind === "delete" && got.record.about === list) {
+    // Its owner deleting the whole item (or, in a group, an admin removing it): everything on it goes, for good; the
+    // list's row stays as a tombstone.
+    if ((got.record.kind === "delete" || got.record.kind === "remove") && got.record.about === list) {
       const [won] = await db.batch([
         db.prepare("UPDATE lists SET n = ?, head = ?, deleted_at = ? WHERE id = ? AND n = ?").bind(n, head, taken, list, Number(row.n)),
         db.prepare(`DELETE FROM list_pages WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
         db.prepare(`DELETE FROM checkpoints WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
       ]);
-      if (won.meta.changes === 1) return { entry: { n, fp: got.fp, taken, head }, deleted: true };
+      if (won.meta.changes === 1) return { entry: { n, fp: got.fp, taken, head }, deleted: true, removed: got.record.kind === "remove" };
       continue;
     }
     // A delete or removal: the record it names keeps only its fingerprint, from now on, everywhere this site sends it.

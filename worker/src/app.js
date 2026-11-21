@@ -16,6 +16,7 @@ import { currentUser, handleAuth, safeNext } from "./auth.js";
 import { handleCloudflare } from "./cloudflare.js";
 import { handleConnectLink } from "./connect.js";
 import { handleGroupApi, handleJoinLink } from "./groups.js";
+import { handleGroupItems } from "./groupposts.js";
 import { HASH_RE, mediaStore } from "./media.js";
 import { handleGroupActions, handleMember } from "./membership.js";
 import { checkNewer, databaseIsNewer, ensureSchema } from "./migrate.js";
@@ -234,6 +235,8 @@ async function routeGroup(request, env, url) {
   if (url.pathname === "/.well-known/afterwrd") return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   if (url.pathname.startsWith("/_join/")) return handleJoinLink(request, env, url);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
+  // afterwrd 2 (step 6c): its posts, as signed items, to members' signed calls (groupposts.js).
+  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleGroupItems(request, env, url);
   const signed = await signedFile(request, env, url);
   if (signed) return signed;
   if (request.method === "GET" && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);
