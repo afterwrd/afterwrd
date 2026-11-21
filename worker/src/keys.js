@@ -39,6 +39,7 @@
 //   POST /_admin/keys/join/finish    {doc, delegation, token, response}
 import { checkDelegation, checkPasskeyProof, moveOf, parseIdentity, readIdentity } from "./identity.js";
 import { siteOrigin } from "./sites.js";
+import { readChain } from "./identities.js";
 import { readChallenge, safeNext, spendChallenge, withChallenge } from "./auth.js";
 import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
 import { html, json, now, randomToken } from "./util.js";
@@ -79,7 +80,8 @@ export async function ownIdentity(db) {
   const chain = JSON.parse(String(row.chain)).map(({ bytes, sig }) => ({ bytes: fromB64url(bytes), sig }));
   const { results } = await db.prepare("SELECT fp, first_seen FROM identity_seen").all();
   const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
-  const state = await readIdentity(chain, (fp) => seen.get(fp) ?? now(), now());
+  // A group's site (step 6) reads its own with its owner's identity beside it (identities.js readChain).
+  const state = await readChain(db, chain, (fp) => seen.get(fp) ?? now(), now());
   return state ? { person: String(row.person), chain, state } : null;
 }
 

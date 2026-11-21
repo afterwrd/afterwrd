@@ -6,7 +6,8 @@
 // A member's key opens this group and nothing else, and this Worker holds nothing but the group.
 //
 // Setting up, once, straight after its owner's site has made this Worker (groupsites.js):
-//   GET  /_group/ping             that it's running, and its version
+//   GET  /_group/ping             that it's running, its version, and its hosting key (afterwrd 2)
+//   POST /_group/identity         its owner's site sets its identity, once (groupidentity.js)
 //   POST /_group/claim            {origin, key, setup, name, about}: the owner's site, with the GROUP_KEY it made this
 //                                 Worker with. This Worker proves the key is that site's (its /_member/hello) and
 //                                 answers with a key for calling the group. The owner is its first member.
@@ -62,6 +63,8 @@ import { removeUnusedFiles } from "./posts.js";
 import { signedFile } from "./share.js";
 import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";
 import { editGroupComment, editGroupPost, groupCommentVersions, groupPostVersions, groupVersionsGone } from "./edits.js";
+import { hostingKey } from "./keys.js";
+import { setGroupIdentity } from "./groupidentity.js";
 
 export const MAX_MEMBERS = 40; // with the requests waiting, few enough that all can be told when the group closes
 /** The member cap: MAX_MEMBERS, or in a scale test (self-hosted, with TEST_SCALE) whatever TEST_MAX_MEMBERS says. */
@@ -836,7 +839,8 @@ async function memberFrom(request, env) {
 export async function handleGroupApi(request, env, url) {
   const route = `${request.method} ${url.pathname}`;
   const db = env.DB;
-  if (route === "GET /_group/ping") return json({ afterwrd: "group", version: pkg.version, protocol: PROTOCOL });
+  // hosting: the key this site signs with as host (afterwrd 2), for its owner's passkey to name in its identity.
+  if (route === "GET /_group/ping") return json({ afterwrd: "group", version: pkg.version, protocol: PROTOCOL, hosting: (await hostingKey(env)).publicKey });
   if (route === "POST /_group/claim") return claim(request, env, url);
 
   if (route === "POST /_group/admin/close") {
@@ -852,6 +856,7 @@ export async function handleGroupApi(request, env, url) {
     return json({ ok: true });
   }
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
+  if (route === "POST /_group/identity") return setGroupIdentity(request, env, url, member);
 
   const site = url.origin;
   const one = /^(GET|POST) \/_group\/(posts|comments)\/(\d{1,15})(\/delete|\/edit)?$/.exec(route);

@@ -8,7 +8,7 @@
 // Learning someone's identity checks every document (identity.js), notes when this site first saw each (the 7 days of
 // a slow change run from then), keeps the longest chain that reads cleanly, and freezes an identity seen in two
 // different versions: someone holding one of its keys is fighting the owner, so nothing it signs is trusted.
-import { forked, moveOf, readIdentity } from "./identity.js";
+import { forked, moveOf, ownerOf, readIdentity } from "./identity.js";
 import { checkCall } from "./signedcalls.js";
 import { siteOrigin } from "./sites.js";
 import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
@@ -44,10 +44,21 @@ async function seenTimes(db, chain) {
   return (fp) => seen.get(fp) ?? at;
 }
 
+/**
+ * How `chain` reads here now: a group's (step 6) with its owner's identity beside it, as this site knows them.
+ * @param {D1Database} db
+ */
+export async function readChain(db, chain, firstSeen, at = now()) {
+  const ownerId = ownerOf(chain);
+  const owner = ownerId ? await stateIn(db, ownerId) : null;
+  if (ownerId && !owner) return null;
+  return readIdentity(chain, firstSeen, at, { owner });
+}
+
 /** The longest start of `chain` that reads without a problem, and how it reads; null if not even the first does. */
-async function cleanest(chain, firstSeen, at) {
+async function cleanest(db, chain, firstSeen, at) {
   for (let n = chain.length; n > 0; n--) {
-    const state = await readIdentity(chain.slice(0, n), firstSeen, at);
+    const state = await readChain(db, chain.slice(0, n), firstSeen, at);
     if (!state) return null;
     if (!state.problem) return { chain: chain.slice(0, n), state };
   }
@@ -56,13 +67,15 @@ async function cleanest(chain, firstSeen, at) {
 
 /**
  * Learns an identity from `chain` (decoded). Returns how it reads now, with `frozen` if this site has seen two versions
- * of it; null if it isn't an identity at all.
+ * of it; null if it isn't an identity at all. A group's comes with its owner's (`owner`, decoded), learnt first.
+ * @param {Env} env @param {any[]} chain @param {{ owner?: any[] | null }} [options]
  */
-export async function learnIdentity(env, chain) {
+export async function learnIdentity(env, chain, { owner = null } = {}) {
   const db = env.DB;
+  if (ownerOf(chain) && owner && !ownerOf(owner)) await learnIdentity(env, owner);
   const firstSeen = await seenTimes(db, chain);
   const at = now();
-  const found = await cleanest(chain, firstSeen, at);
+  const found = await cleanest(db, chain, firstSeen, at);
   if (!found) return null;
   const { state } = found;
   const row = await db.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(state.id).first();
@@ -72,7 +85,7 @@ export async function learnIdentity(env, chain) {
     return { ...state, frozen: true };
   }
   if (known && known.length >= found.chain.length) {
-    const kept = await cleanest(known, firstSeen, at);
+    const kept = await cleanest(db, known, firstSeen, at);
     return kept && { ...kept.state, frozen: Boolean(row.frozen_at) };
   }
   // A change of address (waiting or done) is kept beside it: friends' sites switch to the new address when it's in
@@ -94,7 +107,7 @@ export async function fetchIdentity(env, origin) {
   const bytes = new Uint8Array(await response.arrayBuffer().catch(() => new ArrayBuffer(0)));
   const data = bytes.length && bytes.length <= MAX_REPLY ? decode(bytes) : null;
   const chain = parseChain(data?.chain);
-  const state = chain && (await learnIdentity(env, chain));
+  const state = chain && (await learnIdentity(env, chain, { owner: parseChain(data?.owner) }));
   if (!state || state.frozen || state.current.origin !== site) return null;
   await env.DB.prepare("UPDATE identities SET origin_checked_at = ? WHERE person = ?").bind(now(), state.id).run();
   return state;
@@ -102,10 +115,15 @@ export async function fetchIdentity(env, origin) {
 
 /** How `person`'s identity reads now, from what this site knows (null if it knows nothing of them), with `frozen`. */
 export async function identityState(env, person) {
-  const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
+  return stateIn(env.DB, person);
+}
+
+/** identityState, from the database alone. @param {D1Database} db @param {string} person */
+async function stateIn(db, person) {
+  const row = await db.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
   const chain = row && parseChain(JSON.parse(String(row.chain)));
   if (!chain) return null;
-  const state = await readIdentity(chain, await seenTimes(env.DB, chain), now());
+  const state = await readChain(db, chain, await seenTimes(db, chain), now());
   return state && { ...state, frozen: Boolean(row.frozen_at) };
 }
 
@@ -114,7 +132,7 @@ export async function hostingKeyFor(env, person, from) {
   const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
   if (row && !row.frozen_at) {
     const chain = parseChain(JSON.parse(String(row.chain)));
-    const state = chain && (await readIdentity(chain, await seenTimes(env.DB, chain), now()));
+    const state = chain && (await readChain(env.DB, chain, await seenTimes(env.DB, chain), now()));
     if (state && !state.problem && state.current.origin === from) return state.current.hosting;
   }
   const fetched = await fetchIdentity(env, from);
@@ -142,7 +160,11 @@ export async function handleIdentity(request, env, url) {
   if (url.pathname === "/.well-known/afterwrd") {
     const row = await env.DB.prepare("SELECT chain FROM own_identity WHERE id = 1").first();
     if (!row) return json({ error: "Not found." }, 404);
-    const response = json({ v: 2, chain: JSON.parse(String(row.chain)) });
+    // A group's site (step 6) gives its owner's identity too, which a reader needs to check the group's.
+    const chain = JSON.parse(String(row.chain));
+    const ownerId = ownerOf(parseChain(chain));
+    const owner = ownerId && (await env.DB.prepare("SELECT chain FROM identities WHERE person = ?").bind(ownerId).first());
+    const response = json({ v: 2, chain, ...(owner && { owner: JSON.parse(String(owner.chain)) }) });
     response.headers.set("Cache-Control", "public, max-age=60");
     response.headers.set("Access-Control-Allow-Origin", "*");
     return response;

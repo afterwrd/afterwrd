@@ -5,7 +5,7 @@ import { MAX_COMMENT } from "../archive/comments.js";
 import { MAX_GROUP_TEXT } from "../groups.js";
 import { fmtAgo, fmtDatetime, linkify } from "./format.js";
 
-import { icon } from "./nav.js";
+import { asset, icon } from "./nav.js";
 import { host } from "../sites.js";
 import { html, raw } from "./html.js";
 import { groupEventBlock } from "./events.js";
@@ -92,7 +92,9 @@ ${unfinished.length > 0 && html`<section class="card" id="unfinished">
       log("Waiting for it to answer…");
       for (let i = 0; i < 20 && !(await post("/_groups/create/wait", { id })).ready; i++) await new Promise((r) => setTimeout(r, 2000));
       log("Setting it up as yours…");
-      location.assign("/groups/" + (await post("/_groups/create/claim", { id })).id + "/members");
+      const claimed = (await post("/_groups/create/claim", { id })).id;
+      await signGroup(claimed);
+      location.assign("/groups/" + claimed + "/members");
     } catch (err) {
       error.textContent = err.message;
       button.disabled = false;
@@ -120,6 +122,15 @@ const STEP_SCRIPT = `
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "Something went wrong.");
     return data;
+  }
+  // afterwrd 2 (groupidentity.js): once its site is claimed, one face, fingerprint or PIN signs the group's identity
+  // as yours.
+  async function signGroup(id) {
+    log("Signing it as yours…");
+    const [S, { passkeySigns }] = await Promise.all([import(${JSON.stringify(asset("/static/signed.js"))}), import(${JSON.stringify(asset("/static/passkey.js"))})]);
+    const start = await post("/_groups/" + id + "/identity/start", {});
+    const response = await passkeySigns(start.nonce, [await S.fingerprintOf("identity", S.fromB64url(start.doc))], start.allow);
+    await post("/_groups/" + id + "/identity/finish", { doc: start.doc, response });
   }`;
 
 /** Starting a group: name it, and this site makes its Worker (groupsites.js), step by step. */
@@ -175,6 +186,7 @@ ${domain ? html`<form class="card stack" id="start">
       for (let i = 0; i < 40 && !(await post("/_groups/create/wait", { id: made })).ready; i++) await new Promise((r) => setTimeout(r, 2000));
       log("Setting it up as yours…");
       const { id } = await post("/_groups/create/claim", { id: made });
+      await signGroup(id);
       location.assign("/groups/" + id + "/members");
     } catch (err) {
       error.textContent = err.message + (made ? " Press the button again to carry on." : "");
@@ -223,6 +235,7 @@ which are kept on the group's site.</p>
       const made = (await post("/_groups/create/local", { origin, setup: form.setup.value.trim(), name: form.name.value, about: form.about.value })).id;
       log("Setting it up as yours…");
       const { id } = await post("/_groups/create/claim", { id: made });
+      await signGroup(id);
       location.assign("/groups/" + id + "/members");
     } catch (err) {
       error.textContent = err.message;

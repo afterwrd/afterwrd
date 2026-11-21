@@ -250,4 +250,43 @@ check("oversized or malformed documents aren't identities", (await readIdentity(
     && parseChain([{ bytes: "!!", sig: {} }]) === null && parseChain(Array.from({ length: 201 }, () => ({ bytes: b64url(g), sig: {} }))) === null);
 }
 
+// --- a group's identity (step 6a): owned by the person who made it ----------------------------------------------------
+
+{
+  const G = "https://club.example";
+  const groupHosting = await publicKeyText((await newKeyPair()).publicKey);
+  const gdoc = (seq, prev, extra = {}) => encode({ v: 2, kind: "identity", seq, prev, origin: G, passkeys: [], hosting: groupHosting, owner: gFp, ...extra });
+  const g0 = gdoc(0, null);
+  const g0Fp = await fingerprintOf("identity", g0);
+  const ann = await readIdentity([genesis], seen(new Map()), NOW);
+  const first = { bytes: g0, sig: { passkey: await phone.sign([g0Fp]) } };
+  const group = await readIdentity([first], seen(new Map()), NOW, { owner: ann });
+  check("a group's identity is signed by its owner's passkey", group?.id === g0Fp && group.current.owner === gFp && !group.problem);
+  check("…and can't be read without its owner's", (await readIdentity([first], seen(new Map()), NOW)) === null);
+  const bob = await softPasskey();
+  const bobG = encode({ v: 2, kind: "identity", seq: 0, prev: null, origin: "https://bob.example", passkeys: [bob.passkey], recovery: recovery.publicKey, hosting });
+  const bobState = await readIdentity([{ bytes: bobG, sig: { passkey: await bob.sign([await fingerprintOf("identity", bobG)]) } }], seen(new Map()), NOW);
+  check("…nor with someone else as its owner", (await readIdentity([first], seen(new Map()), NOW, { owner: bobState })) === null);
+  check("…nor signed by someone else's passkey", (await readIdentity([{ bytes: g0, sig: { passkey: await bob.sign([g0Fp]) } }], seen(new Map()), NOW, { owner: ann })) === null);
+  check("a group's document can't list passkeys or a recovery key of its own", (await readIdentity([{ bytes: gdoc(0, null, { passkeys: [bob.passkey] }), sig: { passkey: await phone.sign([await fingerprintOf("identity", gdoc(0, null, { passkeys: [bob.passkey] }))]) } }], seen(new Map()), NOW, { owner: ann })) === null);
+  const moved = gdoc(1, g0Fp, { origin: "https://club2.example" });
+  const movedFp = await fingerprintOf("identity", moved);
+  const c = [first, { bytes: moved, sig: { passkey: await phone.sign([movedFp]) } }];
+  const waiting = await readIdentity(c, seen(new Map([[movedFp, NOW]])), NOW + DAY, { owner: ann });
+  const done = await readIdentity(c, seen(new Map([[movedFp, NOW]])), NOW + 8 * DAY, { owner: ann });
+  check("moving a group waits 7 days, as a person's move does", waiting?.pending?.origin === "https://club2.example" && done?.current.origin === "https://club2.example");
+  const newKey = gdoc(1, g0Fp, { hosting: await publicKeyText((await newKeyPair()).publicKey) });
+  const newKeyFp = await fingerprintOf("identity", newKey);
+  const rekeyed = await readIdentity([first, { bytes: newKey, sig: { passkey: await phone.sign([newKeyFp]) } }], seen(new Map()), NOW, { owner: ann });
+  check("…and a new hosting key takes effect at once", rekeyed?.current.hosting !== groupHosting && !rekeyed.pending);
+  const takeover = gdoc(1, g0Fp, { owner: await fingerprintOf("identity", bobG) });
+  const takeoverFp = await fingerprintOf("identity", takeover);
+  const taken = await readIdentity([first, { bytes: takeover, sig: { passkey: await phone.sign([takeoverFp]) } }], seen(new Map()), NOW, { owner: ann });
+  check("a group's owner can't be changed", taken?.problem === "broken" && taken.current.owner === gFp);
+  const byCode = gdoc(1, g0Fp, { closed: true });
+  const byCodeFp = await fingerprintOf("identity", byCode);
+  const closing = await readIdentity([first, { bytes: byCode, sig: { recovery: await signAs("identity", recovery.privateKey, byCode) } }], seen(new Map()), NOW, { owner: ann });
+  check("its owner's recovery code can sign for it too (closing it, here, after 7 days)", closing?.pending?.closed === true && closing.pendingByRecovery);
+}
+
 process.exit(failed ? 1 : 0);

@@ -129,6 +129,28 @@ const claimed = await post(ann, "/_groups/create/claim", { id: waiting.id });
 check("Ann's site claims the group", claimed.status === 200 && n(stateG, "group_members WHERE role = 'owner' AND origin = 'http://localhost:8787'") === 1, JSON.stringify(claimed));
 check("…only once", (await call(G, "/_group/claim", null, { setup: GROUP_KEY, origin: C, key: "k".repeat(43), name: "Mine now" })).status === 409);
 const annGroup = claimed.id;
+// afterwrd 2 (step 6a): one passkey prompt signs the group's identity as Ann's, as the page does after claiming.
+const signGroup = (page, id) => page.evaluate(async (id) => {
+  const [S, { passkeySigns }] = await Promise.all([import("/static/signed.js"), import("/static/passkey.js")]);
+  const send = async (path, body) => { const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    return { status: r.status, ...(await r.json().catch(() => ({}))) }; };
+  const start = await send(`/_groups/${id}/identity/start`, {});
+  if (start.status !== 200) return start;
+  const response = await passkeySigns(start.nonce, [await S.fingerprintOf("identity", S.fromB64url(start.doc))], start.allow);
+  return send(`/_groups/${id}/identity/finish`, { doc: start.doc, response });
+}, id);
+const signedGroup = await signGroup(ann, annGroup);
+const groupDoc = (() => { const row = sql(stateG, "SELECT person, chain FROM own_identity")[0];
+  return row && { person: row.person, doc: JSON.parse(Buffer.from(JSON.parse(row.chain)[0].bytes, "base64url").toString()) }; })();
+const annPerson = sql(stateA, "SELECT person FROM own_identity")[0].person;
+check("Ann's passkey signs the group's identity: owned by her, at its address, with its hosting key", signedGroup.status === 200
+  && groupDoc?.doc.owner === annPerson && groupDoc.doc.origin === G && groupDoc.doc.passkeys.length === 0 && !("recovery" in groupDoc.doc)
+  && groupDoc.doc.hosting === (await (await call(G, "/_group/ping")).json()).hosting, JSON.stringify(signedGroup));
+check("…and her site ties the group to it", sql(stateA, `SELECT identity FROM groups WHERE id = ${annGroup}`)[0]?.identity === groupDoc?.person);
+const published = await (await fetch(`${G}/.well-known/afterwrd`)).json().catch(() => ({}));
+check("the group publishes its identity, with Ann's beside it", published.chain?.length === 1
+  && JSON.stringify(published.owner) === sql(stateA, "SELECT chain FROM own_identity")[0].chain);
+check("…once: it can't be signed again", (await signGroup(ann, annGroup)).status === 409);
 await ann.goto(`${A}/groups/${annGroup}/members`);
 check("the group's page names it and its site", (await ann.$eval("h1", (h) => h.textContent)) === "Book club" && (await text(ann)).includes("Your group, at localhost:8790"));
 await ann.click("#make");

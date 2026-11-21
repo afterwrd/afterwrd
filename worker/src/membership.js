@@ -26,7 +26,8 @@
 //   POST /_groups/<id>/events/<m>/(answer|edit|cancel)    answer: going, maybe or no; edit: their own; cancel: as delete
 //   POST /_groups/<id>/polls/<m>/(vote|close)              vote: choice…; close: a poll they asked (polls.js)
 //   Running a group (its admins): POST /_groups/<id>/link (JSON), /_groups/<id>/about (name, about),
-//   /_groups/<id>/members/<m>/(approve|decline|remove|admin|member); its owner: /_groups/<id>/delete (groupsites.js)
+//   /_groups/<id>/members/<m>/(approve|decline|remove|admin|member); its owner: /_groups/<id>/delete (groupsites.js),
+//   and /_groups/<id>/identity/(start|finish): signing the group's identity, once it's made (groupidentity.js)
 import { CONTEXT, fileUrl, groupId, groupPostId, seconds } from "../public/static/activity.js";
 import { MAX_COMMENT } from "./archive/comments.js";
 import { safeNext } from "./auth.js";
@@ -36,6 +37,7 @@ import { parseEdits, parseMedia } from "./friends.js";
 import { EDIT_SECONDS, mineVersions, mineVersionsGone } from "./edits.js";
 import { cleanName, cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT } from "./groups.js";
 import { handleGroupSites } from "./groupsites.js";
+import { handleGroupIdentity } from "./groupidentity.js";
 import { notifyLater } from "./push.js";
 import { parsePoll, questionFor, readPoll } from "./polls.js";
 import { receiveGroupNote } from "./notify.js";
@@ -690,6 +692,7 @@ export async function handleGroupActions(request, env, url) {
   if (!group) return problem("That group isn't here any more.", new URL("/groups", site), 404);
   const action = match[2];
   if (action === "/delete") return handleGroupSites(request, env, url, group);
+  if (action === "/identity/start" || action === "/identity/finish") return handleGroupIdentity(request, env, url, group, action);
   try {
     if (action === "/posts") {
       const body = await request.json().catch(() => ({}));

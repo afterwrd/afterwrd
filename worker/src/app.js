@@ -230,6 +230,8 @@ async function signedFile(request, env, url) {
 
 // A group's own Worker: invite links, its members' sites, and its photos by signed link. Nothing else.
 async function routeGroup(request, env, url) {
+  // afterwrd 2 (step 6a): the group's identity, public, with its owner's (identities.js, groupidentity.js).
+  if (url.pathname === "/.well-known/afterwrd") return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   if (url.pathname.startsWith("/_join/")) return handleJoinLink(request, env, url);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
   const signed = await signedFile(request, env, url);

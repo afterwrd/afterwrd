@@ -19,6 +19,11 @@
 //                the recovery key; one made with the recovery key only by the recovery key. So someone who has stolen a
 //                passkey can't stop the owner using their recovery code to remove it.
 //
+// A group (afterwrd 2, step 6) has no devices of its own: its identity documents list no passkeys and no recovery key,
+// but name its `owner` (the person who made it), whose passkeys (as their identity has them) or recovery key sign it and
+// every change to it, under the same rules. The owner never changes. A reader checks a group's chain with its owner's
+// identity beside it (readIdentity's `owner`).
+//
 // A passkey signs by signing a WebAuthn challenge made from a list of fingerprints (statementsChallenge in signed.js),
 // so one prompt can sign an identity document and a browser key's delegation together. Its proof:
 //   {credential, nonce, statements: [fingerprint…], response: {authenticatorData, clientDataJSON, signature, userHandle?}}
@@ -37,7 +42,7 @@ const MAX_PASSKEYS = 20;
 export const MAX_DOCUMENT = 4096;
 
 /** @typedef {{ id: string, key: string, origin: string }} Passkey */
-/** @typedef {{ v: 2, kind: "identity", seq: number, prev: string | null, origin: string, passkeys: Passkey[], recovery: string, hosting: string, closed?: true, cancels?: string }} IdentityDoc */
+/** @typedef {{ v: 2, kind: "identity", seq: number, prev: string | null, origin: string, passkeys: Passkey[], recovery?: string, hosting: string, owner?: string, closed?: true, cancels?: string }} IdentityDoc */
 /** @typedef {{ credential: string, nonce: string, statements: string[], response: { authenticatorData: string, clientDataJSON: string, signature: string, userHandle?: string } }} PasskeyProof */
 /** @typedef {{ passkey?: PasskeyProof, recovery?: string, enrolment?: { statement: string, proof: PasskeyProof, token: string } }} Signature */
 /** @typedef {{ bytes: Uint8Array, sig: Signature }} SignedDoc */
@@ -53,7 +58,13 @@ export function parseIdentity(bytes) {
   const d = decode(bytes);
   if (!d || d.v !== 2 || d.kind !== "identity" || !Number.isSafeInteger(d.seq) || d.seq < 0) return null;
   if (d.seq === 0 ? d.prev !== null : !FP_RE.test(d.prev ?? "")) return null;
-  if (!isOrigin(d.origin) || !KEY_RE.test(d.recovery ?? "") || !KEY_RE.test(d.hosting ?? "")) return null;
+  if (!isOrigin(d.origin) || !KEY_RE.test(d.hosting ?? "")) return null;
+  if (d.owner !== undefined) {
+    // A group's: its owner signs for it, so it has no passkeys or recovery key of its own.
+    if (!FP_RE.test(d.owner) || !Array.isArray(d.passkeys) || d.passkeys.length || d.recovery !== undefined) return null;
+    return d.closed !== undefined && d.closed !== true ? null : d.cancels !== undefined && !FP_RE.test(d.cancels) ? null : d;
+  }
+  if (!KEY_RE.test(d.recovery ?? "")) return null;
   if (!Array.isArray(d.passkeys) || !d.passkeys.length || d.passkeys.length > MAX_PASSKEYS) return null;
   const ids = new Set();
   for (const p of d.passkeys) {
@@ -115,7 +126,7 @@ async function checkEnrolment(person, before, after, sig, docFp) {
 }
 
 const sameKeys = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const content = (d) => ({ origin: d.origin, passkeys: d.passkeys, recovery: d.recovery, hosting: d.hosting, closed: d.closed ?? false });
+const content = (d) => ({ origin: d.origin, passkeys: d.passkeys, recovery: d.recovery ?? null, hosting: d.hosting, owner: d.owner ?? null, closed: d.closed ?? false });
 
 /** "fast" (only passkeys added and/or a new hosting key) or "slow" (anything else). */
 function classify(before, after) {
@@ -124,18 +135,36 @@ function classify(before, after) {
   return "fast";
 }
 
+/** The person who owns the group whose chain this is (its first document's `owner`), or null for a person's own chain. */
+export function ownerOf(chain) {
+  const first = Array.isArray(chain) && chain[0]?.bytes instanceof Uint8Array ? parseIdentity(chain[0].bytes) : null;
+  return first?.owner ?? null;
+}
+
 /**
  * Reads a person's chain of identity documents, as one reader sees it. `firstSeen(fingerprint)` is when this reader
  * first saw a document (seconds); `at` is now. Returns their id, the document in effect, any change still waiting and
  * when it takes effect, and `problem` if the chain stops being believable (everything up to there still counts).
+ * A group's chain needs its `owner`'s identity, as this reader reads it (readIdentity's own answer for them).
  * @param {SignedDoc[]} chain @param {(fp: string) => number} firstSeen @param {number} at
+ * @param {{ owner?: any }} [options]
  */
-export async function readIdentity(chain, firstSeen, at) {
+export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) {
   if (!Array.isArray(chain) || !chain.length) return null;
   const genesis = parseIdentity(chain[0]?.bytes);
   const genesisFp = genesis && (await fingerprintOf("identity", chain[0].bytes));
-  // The first document is signed by one of its own passkeys.
-  if (!genesis || genesis.seq !== 0 || genesis.cancels || genesis.closed || !(await signedByPasskeyOf(genesis, chain[0].sig?.passkey, genesisFp))) return null;
+  const group = Boolean(genesis?.owner);
+  // A group's owner is a person (not another group) whose identity this reader can read.
+  if (group && (!owner || owner.id !== genesis.owner || owner.problem === "closed" || owner.frozen || owner.current.owner)) return null;
+  // A group's documents are signed by a passkey of its owner's (as their identity had it when this reader first saw the
+  // document, or has it now), or with their recovery key.
+  const byOwnerPasskey = async (proof, fp) => {
+    const then = documentAt(owner, firstSeen(fp));
+    return Boolean((await signedByPasskeyOf(then, proof, fp)) || (then !== owner.current && (await signedByPasskeyOf(owner.current, proof, fp))));
+  };
+  // The first document is signed by one of its own passkeys (a group's: by its owner).
+  if (!genesis || genesis.seq !== 0 || genesis.cancels || genesis.closed) return null;
+  if (!(group ? await byOwnerPasskey(chain[0].sig?.passkey, genesisFp) : await signedByPasskeyOf(genesis, chain[0].sig?.passkey, genesisFp))) return null;
   // history: each document that came into effect, and from when (by this reader's clock), so something signed in the
   // past is checked against the identity as it was then (documentAt), not as it is now.
   const state = { id: genesisFp, current: genesis, currentFp: genesisFp, pending: null, pendingFp: null, pendingByRecovery: false, effectiveAt: null, problem: null,
@@ -153,12 +182,14 @@ export async function readIdentity(chain, firstSeen, at) {
     const { bytes, sig } = chain[i] ?? {};
     const doc = parseIdentity(bytes);
     const fp = doc && (await fingerprintOf("identity", bytes));
-    if (!doc || doc.seq !== i || doc.prev !== prevFp) { state.problem = "broken"; break; }
+    if (!doc || doc.seq !== i || doc.prev !== prevFp || (doc.owner ?? null) !== (genesis.owner ?? null)) { state.problem = "broken"; break; }
     settle(Math.min(at, firstSeen(fp)));
     if (state.current.closed) { state.problem = "closed"; break; }
     const before = state.current;
-    const byRecovery = typeof sig?.recovery === "string" && (await checkAs("identity", before.recovery, bytes, sig.recovery));
-    const byPasskey = !byRecovery && sig?.passkey && !sig.enrolment && (await signedByPasskeyOf(before, sig.passkey, fp));
+    const recoveryKey = group ? owner.current.recovery : before.recovery;
+    const byRecovery = typeof sig?.recovery === "string" && (await checkAs("identity", recoveryKey, bytes, sig.recovery));
+    const byPasskey = !byRecovery && sig?.passkey && !sig.enrolment
+      && (group ? await byOwnerPasskey(sig.passkey, fp) : await signedByPasskeyOf(before, sig.passkey, fp));
     if (state.pending) {
       // While a change waits, the only thing that counts is cancelling it: the document before it, again.
       const allowed = state.pendingByRecovery ? byRecovery : byRecovery || byPasskey;
@@ -170,7 +201,7 @@ export async function readIdentity(chain, firstSeen, at) {
     }
     if (doc.cancels) { state.problem = "unexpected"; break; }
     const kind = classify(before, doc);
-    const enrolled = !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, sig, fp));
+    const enrolled = !group && !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, sig, fp));
     if (!(byRecovery || byPasskey || enrolled)) { state.problem = "unsigned"; break; }
     // Adding passkeys (or a new hosting key) counts from when the document before it did: what those keys signed is the
     // owner's whenever a reader first meets it. Otherwise a reader who learnt the identity today (a new friend, a site
