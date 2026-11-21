@@ -41,7 +41,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [] }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -93,6 +93,12 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       <a href="/_admin">Your devices</a>. <button class="link">Done</button></form>`}
     ${identityChange && html`<p class="notice alert" id="identity-change">Your identity is changing: ${identityChangeWords(identityChange)},
       on ${fmtDate(identityChange.at)}. Not you? <a href="/_admin#identity-change">Cancel it in Your devices</a>.</p>`}
+    ${moved && html`<p class="notice alert" id="moved">You've moved to <a href="${moved.to}">${host(moved.to)}</a>. Friends' sites
+      find you there now, and this site only says where you've gone. If you haven't yet, <a href="/_admin/export">download
+      everything</a> here and bring it in there, from Import. Delete this site once you're settled.</p>`}
+    ${friendsMoving.map((f) => html`<p class="notice moving">${f.name} ${f.waiting
+      ? html`is moving to ${host(f.moving_to)} on ${fmtDate(f.moving_at)}.`
+      : html`has moved to ${host(f.moving_to)}.`}</p>`)}
     ${newDevices.devices.length > 0 && html`<form class="notice alert" method="post" action="/_admin/devices/seen" data-region="" data-inplace="remove">
       ${newDevices.devices.length === 1
         ? html`A new device was added to your site on ${fmtDate(newDevices.devices[0].created_at)}.`

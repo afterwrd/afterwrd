@@ -8,6 +8,9 @@ function day(ts) {
 
 /** What a change to the owner's identity that's waiting does, in words (keys.js identitySummary). */
 export function identityChange(pending) {
+  // A move (keys.js): the passkeys change too, but the address is what matters.
+  if (pending.moving) return `you're moving to ${new URL(pending.moving).host}, and your new site's passkey will sign for you instead`
+    + (pending.byRecovery ? " (asked with your recovery code)" : "");
   const n = (count, one) => `${count} ${one}${count === 1 ? "" : "s"}`;
   const parts = [
     pending.removed.length && `${n(pending.removed.length, "passkey")} will stop signing for you`,

@@ -46,6 +46,7 @@ import m0031 from "../migrations/0031_friend_items.sql";
 import m0032 from "../migrations/0032_notices.sql";
 import m0033 from "../migrations/0033_polls_events.sql";
 import m0034 from "../migrations/0034_signed_friends.sql";
+import m0035 from "../migrations/0035_move.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -84,6 +85,7 @@ const MIGRATIONS = [
   ["0032_notices.sql", m0032],
   ["0033_polls_events.sql", m0033],
   ["0034_signed_friends.sql", m0034],
+  ["0035_move.sql", m0035],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

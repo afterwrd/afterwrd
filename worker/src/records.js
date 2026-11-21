@@ -12,7 +12,7 @@
 // Pure: the caller says how to find identities and delegations. Never throws.
 import { contentOf, parseRecord, WITH_CONTENT } from "../public/static/records.js";
 import { checkAs, fingerprintOf, fromB64url } from "../public/static/signed.js";
-import { checkDelegation } from "./identity.js";
+import { checkDelegation, documentAt } from "./identity.js";
 
 /** What a host may sign with its hosting key rather than a person's browser key. */
 export const HOST_KINDS = new Set(["remove", "close"]);
@@ -35,7 +35,8 @@ export async function checkRecord(sent, { identityOf, delegationOf, at }) {
     const state = await identityOf(record.author);
     if (!state || state.frozen || state.problem === "closed") return null;
     let byHost = false;
-    if (record.key === state.current.hosting) {
+    // The hosting key now, or as it was then: a site that has moved since signed its removals with its old one.
+    if (record.key === state.current.hosting || record.key === documentAt(state, at).hosting) {
       // A host acting as itself: only on its own items, and only to remove or close.
       if (!HOST_KINDS.has(record.kind) || record.author !== record.host) return null;
       byHost = true;

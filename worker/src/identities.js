@@ -8,7 +8,7 @@
 // Learning someone's identity checks every document (identity.js), notes when this site first saw each (the 7 days of
 // a slow change run from then), keeps the longest chain that reads cleanly, and freezes an identity seen in two
 // different versions: someone holding one of its keys is fighting the owner, so nothing it signs is trusted.
-import { forked, readIdentity } from "./identity.js";
+import { forked, moveOf, readIdentity } from "./identity.js";
 import { checkCall } from "./signedcalls.js";
 import { siteOrigin } from "./sites.js";
 import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
@@ -75,9 +75,13 @@ export async function learnIdentity(env, chain) {
     const kept = await cleanest(known, firstSeen, at);
     return kept && { ...kept.state, frozen: Boolean(row.frozen_at) };
   }
-  await db.prepare(`INSERT INTO identities (person, origin, chain, updated_at) VALUES (?, ?, ?, ?)
-    ON CONFLICT(person) DO UPDATE SET origin = excluded.origin, chain = excluded.chain, updated_at = excluded.updated_at`)
-    .bind(state.id, state.current.origin, storedChain(found.chain), at).run();
+  // A change of address (waiting or done) is kept beside it: friends' sites switch to the new address when it's in
+  // effect here (calls.js), and Home says they're moving meanwhile.
+  const move = moveOf(state);
+  await db.prepare(`INSERT INTO identities (person, origin, chain, updated_at, moving_to, moving_at) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(person) DO UPDATE SET origin = excluded.origin, chain = excluded.chain, updated_at = excluded.updated_at,
+      moving_to = excluded.moving_to, moving_at = excluded.moving_at`)
+    .bind(state.id, state.current.origin, storedChain(found.chain), at, move?.to ?? null, move?.at ?? null).run();
   return { ...state, frozen: Boolean(row?.frozen_at) };
 }
 

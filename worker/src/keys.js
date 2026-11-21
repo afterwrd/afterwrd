@@ -21,20 +21,28 @@
 //     remove    one stops (after 7 days); Your devices also removes it from signing in, at once
 //     recovery  a new recovery code (after 7 days)
 //     cancel    a change that's waiting doesn't happen
+//     move      a new address: a new site's hosting key and passkey, from the move request that site's passkey signed
+//               (after 7 days; move.js has the new site's side, and docs/signed-conversations.md "4f in detail" the whole)
+//   GET  /_admin/keys/move#<request> agreeing to move, on the old site: the page a new site sends the owner to
+//   POST /_admin/keys/move/check     {request, proof} -> {to}: whether that's a move this site would sign
 //   POST /_admin/keys/recover/start  {change: "devices" | "cancel"} -> {doc}: signed in the browser with the recovery
 //   POST /_admin/keys/recover/finish {doc, signature}                    code's key, never a passkey
 //     devices   the passkeys this site has now are the ones that sign (after 7 days): back in after losing every device
+// A browser here that can't sign yet (it signed in before this site had the owner's identity: a move, movein.js):
+//   POST /_admin/keys/browser/start  {browserKey} -> {nonce, delegation, allow}: one prompt, as at sign-in
+//   POST /_admin/keys/browser/finish {delegation, response} -> {person, expires}
 // Adding a device that signs straight away (device links made on a device that signs):
 //   POST /_admin/keys/enrol/start    {link} -> {nonce, statement, allow}: this device's passkey allows that link's token
 //   POST /_admin/keys/enrol/finish   {statement, response}
 //   GET  /_admin/keys/join           on the new device, after its passkey: one more prompt adds it, and this browser
 //   POST /_admin/keys/join/start     {browserKey} -> {nonce, doc, delegation, allow}
 //   POST /_admin/keys/join/finish    {doc, delegation, token, response}
-import { checkDelegation, checkPasskeyProof, parseIdentity, readIdentity } from "./identity.js";
+import { checkDelegation, checkPasskeyProof, moveOf, parseIdentity, readIdentity } from "./identity.js";
+import { siteOrigin } from "./sites.js";
 import { readChallenge, safeNext, spendChallenge, withChallenge } from "./auth.js";
 import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
 import { html, json, now, randomToken } from "./util.js";
-import { joinPage, keysPage } from "./views/pages.js";
+import { joinPage, keysPage, moveOutPage } from "./views/pages.js";
 import { sha256 as sha256Hex } from "./util.js";
 
 export const DELEGATION_SECONDS = 30 * 86400; // as long as a session
@@ -110,6 +118,7 @@ export async function keepDelegation(env, { bytes, proof, credentialId, sessionH
     env.DB.prepare("DELETE FROM delegations WHERE expires_at < ?").bind(now()),
     env.DB.prepare(`INSERT OR REPLACE INTO delegations (key, bytes, proof, credential_id, session_hash, expires_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(key, b64url(bytes), JSON.stringify(proof), credentialId, sessionHash, expires, now()),
+    rememberOwn(env, own.person, key, b64url(bytes), proof, expires),
   ]);
   return { person: own.person, expires };
 }
@@ -120,18 +129,26 @@ export async function handleKeys(request, env, url, owner) {
   const next = safeNext(url.searchParams.get("next"), url);
   if (route === "GET /_admin/keys") {
     if (await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1").first()) return Response.redirect(`${url.origin}${next}`, 303);
+    if (await env.DB.prepare("SELECT 1 FROM move_in WHERE id = 1").first()) return Response.redirect(`${url.origin}/_admin/import/move`, 303);
     return html(keysPage(next));
   }
   if (route === "GET /_admin/keys/join") return html(joinPage());
+  if (route === "GET /_admin/keys/move") return html(moveOutPage());
+  // Moved away: the identity is the new site's now, and changes to it are made there (its passkeys sign it).
+  const gone = request.method === "POST" ? await ownMove(env.DB, url.origin) : null;
+  if (gone?.done) return json({ error: `You've moved to ${new URL(gone.to).host}. Change your identity there.` }, 410);
   if (route === "POST /_admin/keys/profile") return await keepProfile(env, owner, await request.json().catch(() => ({})));
   const body = await request.json().catch(() => ({}));
   try {
     if (route === "POST /_admin/keys/start") return await start(env, url, owner, body);
     if (route === "POST /_admin/keys/finish") return await finish(request, env, url, owner, body);
+    if (route === "POST /_admin/keys/move/check") return await moveCheck(env, url, body);
     if (route === "POST /_admin/keys/change/start") return await changeStart(env, url, owner, body);
     if (route === "POST /_admin/keys/change/finish") return await changeFinish(request, env, body);
     if (route === "POST /_admin/keys/recover/start") return await recoverStart(env, url, owner, body);
     if (route === "POST /_admin/keys/recover/finish") return await recoverFinish(env, body);
+    if (route === "POST /_admin/keys/browser/start") return await browserStart(env, url, body);
+    if (route === "POST /_admin/keys/browser/finish") return await browserFinish(request, env, url, owner, body);
     if (route === "POST /_admin/keys/enrol/start") return await enrolStart(env, url, body);
     if (route === "POST /_admin/keys/enrol/finish") return await enrolFinish(request, env, body);
     if (route === "POST /_admin/keys/join/start") return await joinStart(env, url, owner, body);
@@ -152,6 +169,7 @@ async function passkeysOf(env, url, owner) {
 async function start(env, url, owner, { recovery, browserKey }) {
   if (!KEY_RE.test(recovery ?? "") || !KEY_RE.test(browserKey ?? "")) return json({ error: "That didn't work. Try again." }, 400);
   if (await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1").first()) return json({ error: "Signing is already set up." }, 409);
+  if (await env.DB.prepare("SELECT 1 FROM move_in WHERE id = 1").first()) return json({ error: "You're bringing your identity here from another site. Finish that, or stop it, in Import." }, 409);
   const passkeys = await passkeysOf(env, url, owner);
   if (!passkeys.length) return json({ error: "Add a passkey first." }, 400);
   const identity = encode({ v: 2, kind: "identity", seq: 0, prev: null, origin: url.origin, passkeys, recovery,
@@ -190,20 +208,33 @@ async function finish(request, env, url, owner, { identity: identityText, delega
     env.DB.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(state.id, now()),
   ]);
   if (!made.meta.changes) return json({ error: "Signing is already set up." }, 409);
-  await env.DB.prepare(`INSERT OR REPLACE INTO delegations (key, bytes, proof, credential_id, session_hash, expires_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(key, b64url(delegation), JSON.stringify(proof), proof.credential, owner.session_hash ?? null, expires, now()).run();
+  await env.DB.batch([
+    env.DB.prepare(`INSERT OR REPLACE INTO delegations (key, bytes, proof, credential_id, session_hash, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(key, b64url(delegation), JSON.stringify(proof), proof.credential, owner.session_hash ?? null, expires, now()),
+    rememberOwn(env, state.id, key, b64url(delegation), proof, expires),
+  ]);
   return json({ person: state.id, expires });
 }
 
-/** Whether the owner has set up signing yet. */
+/**
+ * A copy of a delegation of the owner's, kept for good in known_delegations: once the browser key stops signing (signed
+ * out, removed, or its 30 days over) its row in `delegations` goes, but readers still need it to check what it signed
+ * before, and so does a site the owner moves to. It never lets the key sign here again (items.js lookupsFor).
+ */
+function rememberOwn(env, person, key, bytes, proof, expires) {
+  return env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at) VALUES (?, ?, ?, ?, ?)")
+    .bind(key, person, bytes, JSON.stringify(proof), expires);
+}
+
+/** Whether the owner has set up signing yet, or is bringing their identity here from another site (move.js). */
 export async function hasIdentity(db) {
-  return Boolean(await db.prepare("SELECT 1 FROM own_identity WHERE id = 1").first());
+  return Boolean(await db.prepare("SELECT 1 FROM own_identity WHERE id = 1 UNION ALL SELECT 1 FROM move_in WHERE id = 1 LIMIT 1").first());
 }
 
 // --- changing the identity ------------------------------------------------------------------------------------------
 
 /** A passkey's proof from what the browser sent back (auth's credentialJSON) for `statements` under `nonce`. */
-function proofFrom(response, nonce, statements) {
+export function proofFrom(response, nonce, statements) {
   const r = response?.response ?? {};
   return { credential: String(response?.id ?? ""), nonce, statements,
     response: { authenticatorData: r.authenticatorData, clientDataJSON: r.clientDataJSON, signature: r.signature, ...(r.userHandle ? { userHandle: r.userHandle } : {}) } };
@@ -229,9 +260,13 @@ async function appendDocument(env, own, entry) {
   const state = await readIdentity(chain, (f) => seen.get(f) ?? at, at);
   if (!state || state.problem) return null;
   const stored = JSON.stringify(chain.map(({ bytes, sig }) => ({ bytes: b64url(bytes), sig })));
+  const move = moveOf(state);
   const [updated] = await env.DB.batch([
     env.DB.prepare("UPDATE own_identity SET chain = ? WHERE id = 1 AND json_array_length(chain) = ?").bind(stored, own.chain.length),
     env.DB.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(fp, at),
+    // Where the owner is moving (or has moved), kept beside it so friends' calls can be told cheaply (calls.js).
+    env.DB.prepare("UPDATE own_identity SET moving_to = ?, moving_at = ? WHERE id = 1 AND json_array_length(chain) = ?")
+      .bind(move?.to ?? null, move?.at ?? null, chain.length),
   ]);
   return updated.meta.changes ? state : null;
 }
@@ -245,7 +280,7 @@ const waiting = (own) => own.state.pending
   ? json({ error: `Your identity is already changing, until ${new Date(own.state.effectiveAt * 1000).toUTCString().slice(0, 16)}. Cancel that first, or wait.` }, 409)
   : null;
 
-async function changeStart(env, url, owner, { change, credential, recovery }) {
+async function changeStart(env, url, owner, { change, credential, recovery, request, proof }) {
   const own = await ownIdentity(env.DB);
   if (!own) return json({ error: "Set up signing first." }, 409);
   const { current } = own.state;
@@ -267,6 +302,12 @@ async function changeStart(env, url, owner, { change, credential, recovery }) {
       if (left.length === current.passkeys.length) return json({ error: "That passkey doesn't sign for you." }, 404);
       if (!left.length) return json({ error: "That's the only passkey that signs for you." }, 409);
       doc = await nextDocument(own, { passkeys: left });
+    } else if (change === "move") {
+      const asked = await moveRequest(env, url, own, request, proof);
+      if (typeof asked === "string") return json({ error: asked }, 400);
+      // The new site's passkey only: the passkeys here work only at this address, which is being left. Until the move
+      // takes effect, any of them can still cancel it (identity.js), as can the recovery code, which moves unchanged.
+      doc = await nextDocument(own, { origin: asked.to, hosting: asked.hosting, passkeys: [asked.passkey] });
     } else if (change === "recovery") {
       if (!KEY_RE.test(recovery ?? "") || recovery === current.recovery) return json({ error: "That didn't work. Try again." }, 400);
       doc = await nextDocument(own, { recovery });
@@ -318,6 +359,75 @@ async function recoverFinish(env, { doc: docText, signature }) {
   const state = await appendDocument(env, own, { bytes, sig: { recovery: signature } });
   if (!state) return json({ error: "That isn't your recovery code, or something changed meanwhile." }, 400);
   return json({ ok: true, effectiveAt: state.effectiveAt });
+}
+
+// --- a browser here that can't sign yet --------------------------------------------------------------------------------
+
+async function browserStart(env, url, { browserKey }) {
+  const own = await ownIdentity(env.DB);
+  const delegation = own && (await loginDelegation(env, url, browserKey));
+  // Only passkeys that work here (they're tied to an address) and sign for the owner now.
+  const allow = own ? own.state.current.passkeys.filter((p) => p.origin === url.origin).map((p) => p.id) : [];
+  if (!delegation || !allow.length) return json({ error: "No passkey here signs for you yet. Let one from Your devices." }, 409);
+  const nonce = randomToken();
+  return withChallenge(env, "browser", nonce, json({ nonce, delegation: b64url(delegation), allow }));
+}
+
+async function browserFinish(request, env, url, owner, { delegation: text, response }) {
+  const nonce = await readChallenge(request, env, "browser");
+  const bytes = await sentDelegation(env, url, text);
+  if (!nonce || !bytes) return json({ error: "That didn't work. Try again." }, 400);
+  const proof = proofFrom(response, nonce, [await fingerprintOf("delegation", bytes)]);
+  if (!(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
+  const kept = await keepDelegation(env, { bytes, proof, credentialId: proof.credential, sessionHash: owner.session_hash ?? null });
+  return kept ? json(kept) : json({ error: "Your passkey's signature didn't check. Try again." }, 400);
+}
+
+// --- moving to a new address ---------------------------------------------------------------------------------------
+
+const MOVE_REQUEST_SECONDS = 86400;
+const CREDENTIAL_RE = /^[A-Za-z0-9_-]{1,512}$/;
+
+/**
+ * A move request a new site's page sent the owner here with (move.js makes it): {v: 2, kind: "move", from, to, hosting,
+ * passkey: {id, key, origin}, at}, signed by that passkey. Returns {to, hosting, passkey} if it's a move from here this
+ * site would sign; otherwise what's wrong, to show. The new site's own passkey must have signed it, so a new host can't
+ * slip in a key of its own for the owner to agree to without noticing.
+ */
+async function moveRequest(env, url, own, text, proof) {
+  const bytes = typeof text === "string" && text.length < 4096 ? fromB64url(text) : null;
+  const r = bytes && decode(bytes);
+  if (!r || r.v !== 2 || r.kind !== "move" || r.from !== url.origin) return "That isn't a request to move this site.";
+  const to = siteOrigin(r.to, env);
+  if (!to || to !== r.to || to === url.origin) return "That request doesn't say where to move to.";
+  const p = r.passkey;
+  if (!KEY_RE.test(r.hosting ?? "") || r.hosting === own.state.current.hosting || !p || !CREDENTIAL_RE.test(p.id ?? "")
+    || typeof p.key !== "string" || !/^[A-Za-z0-9_-]{1,1024}$/.test(p.key) || p.origin !== to) return "That request isn't one afterwrd makes.";
+  if (!Number.isSafeInteger(r.at) || Math.abs(now() - r.at) > MOVE_REQUEST_SECONDS) return "That request is too old. Ask again from your new site.";
+  const passkey = { id: p.id, key: p.key, origin: to };
+  if (!(await checkPasskeyProof(proof, passkey, await fingerprintOf("move", bytes)))) return "Your new site's passkey didn't sign that request.";
+  return { to, hosting: r.hosting, passkey };
+}
+
+/** POST /_admin/keys/move/check {request, proof}: whether the page may offer to sign this move. */
+async function moveCheck(env, url, { request, proof }) {
+  const own = await ownIdentity(env.DB);
+  if (!own) return json({ error: "Your identity isn't set up on this site, so there's nothing to move. Bring everything over with Download everything instead." }, 409);
+  const busy = waiting(own);
+  if (busy) return busy;
+  const asked = await moveRequest(env, url, own, request, proof);
+  return typeof asked === "string" ? json({ error: asked }, 400) : json({ to: asked.to });
+}
+
+/**
+ * Where the owner is moving, or has moved, as this site keeps it: {to, at, done} (done: it's in effect, so this site
+ * only says where they've gone); null if they aren't. Cheap: one row.
+ * @param {D1Database} db @param {string} origin this site's address
+ */
+export async function ownMove(db, origin) {
+  const row = await db.prepare("SELECT moving_to, moving_at FROM own_identity WHERE id = 1").first();
+  if (!row?.moving_to || row.moving_to === origin) return null;
+  return { to: String(row.moving_to), at: Number(row.moving_at), done: Number(row.moving_at) <= now() };
 }
 
 // --- a new device that signs straight away --------------------------------------------------------------------------
@@ -397,6 +507,7 @@ async function joinFinish(request, env, url, owner, { doc: docText, delegation: 
     env.DB.prepare("UPDATE credentials SET enrolment = NULL WHERE id = ?").bind(mine.id),
     env.DB.prepare(`INSERT OR REPLACE INTO delegations (key, bytes, proof, credential_id, session_hash, expires_at, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(key, b64url(delegation), JSON.stringify(proof), mine.id, owner.session_hash ?? null, expires, now()),
+    rememberOwn(env, own.person, key, b64url(delegation), proof, expires),
   ]);
   return json({ person: own.person, expires });
 }
@@ -418,6 +529,7 @@ export async function identitySummary(db) {
       added: ids(pending).filter((id) => !ids(current).includes(id)),
       removed: ids(current).filter((id) => !ids(pending).includes(id)),
       recovery: pending.recovery !== current.recovery,
+      moving: pending.origin !== current.origin ? pending.origin : null,
       byRecovery: pendingByRecovery,
       at: effectiveAt,
     },

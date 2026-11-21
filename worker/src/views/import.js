@@ -97,8 +97,48 @@ what you imported before (never what you've posted on afterwrd); the old version
 </html>`;
 }
 
-// Moving a whole afterwrd site here (src/move.js): the work happens in the browser (public/static/import/move.js).
-export function movePage({ me = null, site }) {
+// Moving a whole afterwrd site here (src/move.js, src/movein.js): first the owner's identity, by a change of address
+// their old site signs, which waits 7 days; then everything else, from Download everything. The work happens in the
+// browser (public/static/import/move.js).
+const day = (at) => new Date(at * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+
+/** The identity half of the page, by where the move is up to (movein.js moveIn). */
+function identityPart(site, moving, own) {
+  if (own && !moving) {
+    return `<p class="meta">This site has an identity of its own, so it can only take a download from a site that never set up
+signing. To move a site with its identity, start from a new site.</p>`;
+  }
+  const old = moving ? escape(new URL(moving.from).host) : "";
+  if (!moving) {
+    return `<h2>1. Your old site</h2>
+<p>Type its address. One face, fingerprint or PIN here asks to move; then you agree on your old site.</p>
+<form id="ask"><input id="from" placeholder="you.example" autocomplete="url" aria-label="Your old site's address">
+  <button class="chip primary">Ask to move</button></form>`;
+  }
+  if (moving.stage === "agree") {
+    return `<h2>1. Agree on your old site</h2>
+<p>Open <b>${old}</b>, signed in, and agree to move there. You'll come straight back here.</p>
+<div class="row"><a class="chip primary" id="agree" href="${escape(moving.agree)}">Open ${old}</a>
+  <button class="chip" data-move="check">I've agreed</button> <button class="chip" data-move="forget">Start again</button></div>`;
+  }
+  if (moving.stage === "cancelled") {
+    return `<h2>The move was cancelled</h2>
+<p>Your identity on ${old} doesn't say it's moving here any more: it was cancelled there.</p>
+<div class="row"><button class="chip" data-move="forget">Start again</button></div>`;
+  }
+  if (moving.stage === "waiting") {
+    return `<h2 id="waiting">Moving here on ${day(moving.at)}</h2>
+<p>You've agreed on ${old}. Changes of address wait 7 days, so that if it wasn't you, you can cancel it there, from Your
+devices, or with your recovery code. Your friends' sites are told meanwhile.</p>
+<p>${old} carries on as normal until then. On ${day(moving.at)}, make a Download everything there and bring it in here,
+below.</p>
+<div class="row"><button class="chip" data-move="check">Check again</button></div>`;
+  }
+  return `<p id="moved-here"><strong>Your identity has moved here from ${old}.</strong> Now bring everything over.</p>`;
+}
+
+export function movePage({ me = null, site, moving = null, own = false }) {
+  const ready = !moving || moving.stage === "ready";
   return `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -115,6 +155,8 @@ ${FAVICON}
   .picker input { margin-top: 0.5rem; max-width: 100%; }
   #go { font: inherit; font-weight: 600; padding: 0.6rem 1.2rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); cursor: pointer; }
   #go:disabled { opacity: 0.6; cursor: default; }
+  #ask { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  #ask input { flex: 1; min-width: 12rem; }
   #progress[hidden] { display: none; }
   #progress progress { width: 100%; height: 0.7rem; margin: 0.5rem 0; }
   #steps { padding-left: 1.2rem; margin: 0.5rem 0; }
@@ -128,8 +170,13 @@ ${FAVICON}
 ${ownerHeader("import", me)}
 <main>
 <h1>Move here from another afterwrd site</h1>
-<p>Bring everything from your old site to this one (${escape(new URL(site).host)}): your posts, photos and videos,
-albums, comments (yours and friends'), polls, events, and your Facebook archive.</p>
+<p>Bring yourself over from your old site to this one (${escape(new URL(site).host)}): who you are, so your friends'
+sites know it's you; your friends; your posts, photos and videos, albums, comments (yours and friends'), polls and
+events; and your Facebook archive.</p>
+<section id="identity">${identityPart(site, moving, own)}</section>
+<p id="error" role="alert"></p>
+${ready ? `<section id="everything">
+<h2>${moving ? "2. " : ""}Bring everything over</h2>
 <ol>
   <li>Make sure both sites run the same version of afterwrd: update whichever is older.</li>
   <li>On your old site, open <strong>Download everything</strong>, leave <strong>Include photos and videos</strong> ticked,
@@ -137,24 +184,23 @@ albums, comments (yours and friends'), polls, events, and your Facebook archive.
   <li>Choose that zip file here.</li>
 </ol>
 <p class="meta">Only a new site can take a move: one with nothing posted, imported or connected yet.</p>
-<p class="meta"><strong>Friends and groups don't come with it.</strong> The keys that let friends' sites and groups know
-it's you never leave your old site, so your download hasn't got them. Once you've moved, add your friends again from
-Friends, and ask your groups to invite this site. Your old site keeps working until you delete it.</p>
-<p class="meta">Your events come, but not who was invited to them, so only you see them until you invite people again.</p>
+<p class="meta"><strong>Groups don't come with it.</strong> Ask your groups to invite this site once you've moved. Your old
+site stays, saying where you've gone, until you delete it.</p>
 <p class="meta"><strong>Only move your own download.</strong> Whatever is in the zip becomes this site's, comments
-in friends' names included, so a file someone sent you could put words in other people's mouths.</p>
+in friends' names included (though any signed by them must check), so a file someone sent you could put words in
+other people's mouths.</p>
 
 <label class="picker"><strong>Your Download everything zip</strong>
   <input type="file" id="zip" accept=".zip,application/zip"></label>
 
 <button id="go" disabled>Move everything here</button>
-<p id="error" role="alert"></p>
 
 <section id="progress" hidden>
   <ol id="steps"></ol>
   <progress id="bar" max="1" value="0"></progress>
   <p id="status" class="meta"></p>
 </section>
+</section>` : ""}
 </main>
 <script src="/static/vendor/zip-2.24.0.min.js"></script>
 <script type="module" src="${asset("/static/import/move.js")}"></script>

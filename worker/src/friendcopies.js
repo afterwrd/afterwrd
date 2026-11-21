@@ -6,8 +6,9 @@
 // - commenting on it: signed in the browser, passed on by this site in a signed call, and kept in `sent` with the host's
 //   receipt (relayRecord):
 //     POST /_admin/friend/<connection>/items/<id>/records   form: sent (JSON), back
-import { callFriend, friendPerson } from "./calls.js";
-import { identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { callFriend, friendPerson, switchConnection } from "./calls.js";
+import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { ownMove } from "./keys.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
 import { parseRecord } from "../public/static/records.js";
@@ -24,6 +25,7 @@ export const PULL_SECONDS = 3600; // how often a friend's site is asked (docs/si
 // and Friends says so instead, with a way to remove them (views/friends.js). It's still asked, once an hour.
 export const QUIET_SECONDS = 86_400;
 const PAGES = 3;
+const FOLLOW_SECONDS = 14 * 86400;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
 /** Lookups for checking records from a friend's site: identities as known here; browser keys as `delegations` says. */
@@ -73,8 +75,10 @@ export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && 
  * @param {number} [at]
  */
 export function noteAnswer(db, connection, error = null, at = now()) {
+  // 409 and 410 are a site that's there, mid-move: they've moved (410), or this site isn't recognised at its new address
+  // yet (409). Not missing.
   Object.assign(connection, !error ? { reached_at: at, missing_since: null, said_no: 0 }
-    : error.status === 403 ? { missing_since: null, said_no: 0 }
+    : [403, 409, 410].includes(error.status) ? { missing_since: null, said_no: 0 }
     : { missing_since: connection.missing_since ?? at, said_no: error.status === 401 ? 1 : 0 });
   return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
     .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
@@ -89,6 +93,12 @@ export function noteAnswer(db, connection, error = null, at = now()) {
  */
 export async function pullItems(env, from, connection) {
   const failed = async (error) => {
+    // Moved here in the last fortnight: a friend's site that doesn't know this address yet hasn't followed yet (it
+    // waits its own 7 days from when it heard: calls.js). That's "not yet", not having been removed.
+    if (error.status === 401) {
+      const moved = await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1 AND moving_to = ? AND moving_at > ?").bind(from, now() - FOLLOW_SECONDS).first();
+      if (moved) error = { status: 409 };
+    }
     await env.DB.batch([
       noteAnswer(env.DB, connection, error),
       env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(now(), connection.id),
@@ -98,6 +108,9 @@ export async function pullItems(env, from, connection) {
   };
   const person = await friendPerson(env, connection);
   if (!person) return failed({ status: 0 });
+  // A friend who has moved (their identity says so, in effect here): asked at their new address from now on.
+  const known = await env.DB.prepare("SELECT json_array_length(chain) AS n, moving_to, moving_at FROM identities WHERE person = ?").bind(person).first();
+  if (known?.moving_to && known.moving_to !== connection.origin && Number(known.moving_at) <= now()) await followMove(env, connection, person);
   let since = Number(connection.items_since ?? 0);
   let count = 0;
   for (let page = 0; page < PAGES; page++) {
@@ -105,8 +118,17 @@ export async function pullItems(env, from, connection) {
     try {
       data = await callFriend(env, from, String(connection.origin), `/_p/items?since=${since}`);
     } catch (error) {
+      // Their site says they've moved: learn where from their identity there, and switch once it's in effect here.
+      if (error.status === 410 && page === 0) {
+        await fetchIdentity(env, String(connection.origin)).catch(() => null);
+        if (await followMove(env, connection, person)) return pullItems(env, from, connection);
+      }
       if (page === 0) return failed(error);
       return count;
+    }
+    // Their identity has changed since this site last read it (a new device, a move under way): read it again.
+    if (page === 0 && Number.isSafeInteger(data.identity) && data.identity > Number(known?.n ?? 0)) {
+      await fetchIdentity(env, String(connection.origin)).catch(() => null);
     }
     const statements = [noteAnswer(env.DB, connection)];
     for (const item of Array.isArray(data.items) ? data.items : []) {
@@ -183,8 +205,16 @@ export function cleanTally(t) {
   return null;
 }
 
+/** Switches `connection` to where `person`'s identity says they are now, if that's in effect here; returns whether it did. */
+async function followMove(env, connection, person) {
+  const state = await identityState(env, person);
+  if (!state || state.frozen || state.problem || state.current.origin === connection.origin) return false;
+  return switchConnection(env, connection, state.current.origin);
+}
+
 /** Asks every friend's site not asked in the last hour (in the background, from Home). */
 export async function pullFriends(env, from) {
+  if ((await ownMove(env.DB, from))?.done) return; // moved away: this site only says where (calls.js)
   const { results } = await env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
     AND COALESCE(items_checked_at, 0) < ? ORDER BY COALESCE(items_checked_at, 0) LIMIT 40`).bind(now() - PULL_SECONDS).all();
   await Promise.all(results.map((c) => pullItems(env, from, c).catch(() => null)));
@@ -196,6 +226,7 @@ export async function pullFriends(env, from) {
  * the page has gone (pullFriends).
  */
 export async function pullNew(env, from, ms = 4000) {
+  if ((await ownMove(env.DB, from))?.done) return;
   const { results } = await env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
     AND (items_checked_at IS NULL OR (reached_at IS NULL AND missing_since IS NULL AND said_no = 0)) LIMIT 10`).all();
   if (!results.length) return;

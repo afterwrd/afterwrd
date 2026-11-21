@@ -5,7 +5,7 @@
 //   POST /_admin/items/<id>/records    form: sent (JSON: a record signed in the browser, ui/sign.js), back: a comment,
 //                                      an edit, a delete, on one of the owner's own items; then on to `back`
 import { checkPhotos, removeUnusedFiles, roleAlbum } from "./posts.js";
-import { hostingKey, ownIdentity } from "./keys.js";
+import { hostingKey, ownIdentity, ownMove } from "./keys.js";
 import { identityState } from "./identities.js";
 import { listEntries, readList, takeRecord, tombstone } from "./hosted.js";
 import { parseRecord } from "../public/static/records.js";
@@ -40,8 +40,11 @@ export function lookupsFor(env) {
       return identityState(env, person);
     },
     async delegationOf(key) {
+      // The owner's keys only while they may sign here (signing out ends one at once); their keys that have stopped are
+      // kept in known_delegations only to pass on with what they signed before (keys.js rememberOwn).
       const mine = await env.DB.prepare("SELECT bytes, proof FROM delegations WHERE key = ?").bind(key).first()
-        ?? await env.DB.prepare("SELECT bytes, proof FROM known_delegations WHERE key = ?").bind(key).first();
+        ?? await env.DB.prepare(`SELECT bytes, proof FROM known_delegations WHERE key = ?
+          AND person != COALESCE((SELECT person FROM own_identity WHERE id = 1), '')`).bind(key).first();
       return mine ? { bytes: String(mine.bytes), proof: JSON.parse(String(mine.proof)) } : null;
     },
   };
@@ -100,6 +103,12 @@ async function checkNewPost(env, host, post, photos) {
 export async function handleItems(request, env, url, owner) {
   const host = await ownHost(env);
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
+  // Moved away (keys.js): nothing new here; its passkeys no longer sign for the owner anyway.
+  const gone = await ownMove(env.DB, url.origin);
+  if (gone?.done) {
+    const said = `You've moved to ${new URL(gone.to).host}: post there.`;
+    return url.pathname === "/_admin/items" ? json({ error: said }, 410) : html(messagePage(said, { href: gone.to, label: "Go there" }), 410);
+  }
   if (url.pathname === "/_admin/items") {
     const body = await request.json().catch(() => ({}));
     if (!host) return json({ error: "Set up signing first, in Your devices." }, 409);
@@ -410,12 +419,24 @@ async function removePhoto(env, host, photo, sent, changeSent) {
 export async function refreshItem(db, id) {
   const row = await db.prepare("SELECT author, content, audience FROM items WHERE id = ?").bind(id).first();
   if (!row) return;
-  const author = String(row.author);
   const entries = await listEntries(db, id);
-  const read = entries.map((e) => ({ e, r: readEntry(e) }));
   // A poll's votes, an event's details as last changed and its guests' answers (itemkinds.js).
   const guests = row.audience === "invited"
     ? (await db.prepare("SELECT person FROM item_guests WHERE item = ?").bind(id).all()).results.map((r) => String(r.person)) : null;
+  const w = itemFromList(id, row, entries, guests);
+  await db.prepare(`UPDATE items SET content = ?, earlier = ?, edited_at = ?, comments = ?, others = ?, author_last = ?, changed_at = ?,
+    version = ?, tally = ? WHERE id = ?`)
+    .bind(w.content, w.earlier, w.edited_at, w.comments, w.others, w.author_last, now(), w.version, w.tally, id).run();
+}
+
+/**
+ * An item's row as its list says it should be (refreshItem; and a site taking a move, which works every row out again
+ * rather than trust the download): {content, earlier, edited_at, comments, others, author_last, version, tally}, as
+ * stored. `row`: its author, its content as stored (used only if its first record is gone), and its audience.
+ */
+export function itemFromList(id, row, entries, guests) {
+  const author = String(row.author);
+  const read = entries.map((e) => ({ e, r: readEntry(e) }));
   const worked = workOut(read, { id, author, guests });
   const tally = worked.tally && { ...worked.tally, ...(worked.movedAt ? { moved_at: worked.movedAt } : {}) };
   let content = read[0]?.r ? { ...worked.content, text: read[0].r.content?.text ?? "" } : JSON.parse(String(row.content));
@@ -447,10 +468,8 @@ export async function refreshItem(db, id) {
   }
   comments = thread(read.map(({ e, r }) => ({ ...e, r })), { owner: author, item: id }).filter((c) => c.state === "ok").length;
   if (content.type === "event") content = { ...content, event: worked.content.event };
-  await db.prepare(`UPDATE items SET content = ?, earlier = ?, edited_at = ?, comments = ?, others = ?, author_last = ?, changed_at = ?,
-    version = ?, tally = ? WHERE id = ?`)
-    .bind(JSON.stringify(content), earlier.length ? JSON.stringify(earlier) : null, editedAt, comments, others, authorLast, now(),
-      worked.version, tally ? JSON.stringify(tally) : null, id).run();
+  return { content: JSON.stringify(content), earlier: earlier.length ? JSON.stringify(earlier) : null, edited_at: editedAt, comments,
+    others, author_last: authorLast, version: worked.version ?? null, tally: tally ? JSON.stringify(tally) : null };
 }
 
 /**

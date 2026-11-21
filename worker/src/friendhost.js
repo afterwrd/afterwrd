@@ -3,7 +3,8 @@
 //   GET  /_p/items?since=<t>   the owner's posts changed since `t` (this site's clock), oldest change first, up to 50:
 //                              each with its first record as signed, its words now, whether it has comments, its photos
 //                              (with links to their files for this friend, as before), where its list is up to, and the
-//                              delegations behind its records; and the posts deleted since. "Nothing new" reads a row or two.
+//                              delegations behind its records; the posts deleted since; and how long the owner's identity
+//                              is, so a friend's site can tell when to read it again. "Nothing new" reads a row or three.
 //   GET  /_p/items/<id>        one post's whole list, with the signed head, and the delegations, identity chains and
 //                              signed profiles of everyone in it, so a reader can check comments from people it doesn't know.
 //   POST /_p/records           {sent, delegation, profile?}: the calling site's owner's own signed record (a comment, an
@@ -101,7 +102,10 @@ export async function handleFriendItems(request, env, url, work) {
     // Up to the last change sent, but never this second: something changing later this second would otherwise be
     // missed (times are to the second), so the next ask covers this second again (taking a copy twice is harmless).
     const until = more ? Number(rows.at(-1).changed_at) : Math.min(Number(rows.at(-1)?.changed_at ?? since), Math.max(since, now() - 1));
-    return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until, more,
+    // identity: how many documents the owner's identity has, so a friend's site whose copy is shorter (a new device, a
+    // move under way) reads it again (friendcopies.js pullItems).
+    const own = await db.prepare("SELECT json_array_length(chain) AS n FROM own_identity WHERE id = 1").first();
+    return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until, more, identity: Number(own?.n ?? 0),
       delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))) });
   }
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);

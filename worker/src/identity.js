@@ -25,7 +25,11 @@
 import { verifyAuthenticationResponse } from "@simplewebauthn/server";
 import { checkAs, decode, fingerprintOf, fromB64url, sha256, b64url, statementsChallenge, utf8 } from "../public/static/signed.js";
 
-export const SLOW_SECONDS = 7 * 86400;
+export let SLOW_SECONDS = 7 * 86400;
+/** Local test sites only (app.js, with ALLOW_LOCAL_SITES and TEST_SLOW_SECONDS): a shorter wait, so a test can see one end. */
+export function testSlowSeconds(seconds) {
+  if (Number.isSafeInteger(seconds) && seconds > 0) SLOW_SECONDS = seconds;
+}
 const FP_RE = /^[A-Za-z0-9_-]{43}$/;
 const KEY_RE = /^[A-Za-z0-9_-]{43}$/; // an Ed25519 public key, 32 bytes
 const B64URL_RE = /^[A-Za-z0-9_-]+$/;
@@ -168,7 +172,11 @@ export async function readIdentity(chain, firstSeen, at) {
     const kind = classify(before, doc);
     const enrolled = !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, sig, fp));
     if (!(byRecovery || byPasskey || enrolled)) { state.problem = "unsigned"; break; }
-    if (kind === "fast" && !byRecovery) { state.current = doc; state.currentFp = fp; state.history.push({ doc, from: firstSeen(fp) }); }
+    // Adding passkeys (or a new hosting key) counts from when the document before it did: what those keys signed is the
+    // owner's whenever a reader first meets it. Otherwise a reader who learnt the identity today (a new friend, a site
+    // taking a move) would refuse yesterday's comment from the owner's second phone. Honest hosts' "taken at" times
+    // are never before the key existed, so this lets nothing in that a reader who'd watched all along would refuse.
+    if (kind === "fast" && !byRecovery) { state.current = doc; state.currentFp = fp; state.history.push({ doc, from: state.history.at(-1).from }); }
     else { state.pending = doc; state.pendingFp = fp; state.pendingByRecovery = byRecovery; state.effectiveAt = firstSeen(fp) + SLOW_SECONDS; }
     prevFp = fp;
   }
@@ -209,6 +217,24 @@ export async function checkDelegation(bytes, proof, state, at) {
     || !Number.isSafeInteger(d.expires)) return null;
   if (at > d.expires) return null;
   // Checked against the identity as it was at `at`: a passkey removed since still vouches for what it allowed before
-  // (a comment from an old laptop stays Bob's), and one removed already vouches for nothing after.
-  return (await signedByPasskeyOf(documentAt(state, at), proof, await fingerprintOf("delegation", bytes))) ? d.key : null;
+  // (a comment from an old laptop stays Bob's), and one removed already vouches for nothing after. A passkey that
+  // signs for them now vouches too: after a move, the new site's passkey signs from when that site took over, which
+  // a reader that heard of the move later than others would otherwise date a little after.
+  const statement = await fingerprintOf("delegation", bytes);
+  const then = documentAt(state, at);
+  const signed = (await signedByPasskeyOf(then, proof, statement)) || (then !== state.current && (await signedByPasskeyOf(state.current, proof, statement)));
+  return signed ? d.key : null;
+}
+
+/**
+ * Where `state`'s person is moving, or has moved: {to, at} for the newest change of address, waiting (at: when it takes
+ * effect, by this reader's clock) or done (at: when it did); null if their address has never changed.
+ */
+export function moveOf(state) {
+  if (!state) return null;
+  if (state.pending && state.pending.origin !== state.current.origin) return { to: state.pending.origin, at: state.effectiveAt, waiting: true };
+  for (let i = state.history.length - 1; i > 0; i--) {
+    if (state.history[i].doc.origin !== state.history[i - 1].doc.origin) return { to: state.history[i].doc.origin, at: state.history[i].from, waiting: false };
+  }
+  return null;
 }

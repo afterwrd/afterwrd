@@ -20,7 +20,7 @@ import * as groups from "../membership.js";
 import { ownerName } from "../sites.js";
 import { profilePictures } from "../photos.js";
 import { newDevices } from "../admin.js";
-import { identitySummary } from "../keys.js";
+import { identitySummary, ownMove } from "../keys.js";
 import { recoveredHere } from "../recover.js";
 import { newPushDevices, pushKey } from "../push.js";
 import { checkRequests, recentChecks } from "../checks.js";
@@ -749,7 +749,7 @@ async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
   const [own, friendOwn, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
     // …and their posts from before signing: theirs alone, read-only, until migration (docs/signed-conversations.md).
@@ -776,18 +776,26 @@ async function home(ctx, params) {
     first(db, "SELECT 1 AS dropped FROM settings WHERE key = 'archive_dropped'").then((row) => Boolean(row)),
     // A change to the owner's identity waiting to take effect (keys.js): shown until it does, or is cancelled.
     identitySummary(db),
+    // The owner has moved away (keys.js ownMove): this site only says where now.
+    ownMove(db, ctx.url.origin),
+    // Friends moving, or moved and not yet followed here (identities.js, calls.js).
+    all(db, `SELECT c.name, i.moving_to, i.moving_at FROM connections c JOIN identities i ON i.person = c.identity
+      WHERE c.approved_at IS NOT NULL AND i.moving_to IS NOT NULL AND i.moving_to != c.origin ORDER BY i.moving_at LIMIT 5`),
   ]);
   const identityChange = identity?.pending ?? null;
+  const moved = gone?.done ? gone : null;
+  const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
+    waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving };
   }
   return {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or

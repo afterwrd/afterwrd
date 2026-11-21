@@ -1,8 +1,12 @@
 // Moving a whole afterwrd site here (src/move.js): reads another site's Download everything zip on this computer,
 // then sends this site its photos, videos and thumbnails (skipping any already here), its rows, and asks it to put
-// them all in at once, so nothing is half-moved.
+// them all in at once, so nothing is half-moved. Before that, a site with an identity moves it (src/movein.js): this
+// site's passkey asks, and the owner agrees on their old site.
 /* global zip */
 import { MEDIA_TYPES } from "./schema.js";
+import { passkeySigns } from "../passkey.js";
+import { fingerprintOf, fromB64url } from "../signed.js";
+import { keyAllowed, newBrowserKey } from "../browserkey.js";
 
 const ROWS_PER_REQUEST_BYTES = 150_000;
 const PARALLEL = 4;
@@ -12,12 +16,46 @@ const FILE_BATCH = 200;
 const $ = (id) => document.getElementById(id);
 let chosen = null;
 
-$("zip").addEventListener("change", (e) => {
+$("zip")?.addEventListener("change", (e) => {
   chosen = /** @type {HTMLInputElement} */ (e.target).files[0] ?? null;
   $("go").disabled = !chosen;
   $("error").textContent = "";
 });
-$("go").addEventListener("click", () => run().catch(fail));
+$("go")?.addEventListener("click", () => run().catch(fail));
+
+// --- the identity: asking, then checking the old site has agreed ------------------------------------------------------
+
+$("ask")?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  $("error").textContent = "";
+  ask().catch((error) => { $("error").textContent = error.name === "NotAllowedError" ? "Cancelled, or no passkey was chosen. Try again." : error.message; });
+});
+async function ask() {
+  const start = await api("/move/identity/start", { from: $("from").value });
+  const response = await passkeySigns(start.nonce, [await fingerprintOf("move", fromB64url(start.request))], start.allow);
+  const { go } = await api("/move/identity/finish", { request: start.request, response });
+  location.assign(go);
+}
+document.addEventListener("click", (e) => {
+  const button = /** @type {HTMLElement} */ (e.target).closest?.("button[data-move]");
+  if (!button) return;
+  e.preventDefault();
+  $("error").textContent = "";
+  const what = /** @type {HTMLButtonElement} */ (button).dataset.move;
+  (what === "forget" ? api("/move/identity/forget", {}).then(() => location.reload()) : check(true))
+    .catch((error) => { $("error").textContent = error.message; });
+});
+/** Reads the old site's identity again; reloads if the move has got further. */
+async function check(saying) {
+  const { stage } = await api("/move/identity/fetch", {});
+  if (stage === "agree") {
+    if (saying) $("error").textContent = "Your old site hasn't agreed yet. Open it, and agree there.";
+    return;
+  }
+  location.reload();
+}
+// Back from agreeing on the old site: see straight away.
+if ($("agree")) check(false).catch(() => {});
 
 function step(text) {
   document.querySelector("#steps li:last-child")?.classList.add("done");
@@ -36,7 +74,7 @@ function progress(done, total, text) {
 function fail(error) {
   console.error(error);
   $("error").textContent = `${error.message} Nothing has been moved yet.`;
-  $("go").disabled = false;
+  if ($("go")) $("go").disabled = false;
   window.onbeforeunload = null;
 }
 
@@ -60,6 +98,13 @@ async function api(path, body, { method = "POST", type = "application/json", att
     if (attempt >= attempts) throw new Error(`The site kept failing (${response?.status ?? "no response"}).`);
     await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
   }
+}
+
+async function keysApi(path, body) {
+  const response = await fetch(`/_admin/keys${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `The site said ${response.status}.`);
+  return data;
 }
 
 async function eachLimited(items, limit, work) {
@@ -105,7 +150,8 @@ async function run() {
     const text = await download.text(`site/${table}.json`);
     data[table] = text ? JSON.parse(text) : [];
   }
-  progress(1, 1, `From ${new URL(about.site).host}: ${data.posts.length.toLocaleString("en-GB")} posts, ${data.media.length.toLocaleString("en-GB")} photos and videos`);
+  const postCount = data.posts.length + (data.items ?? []).filter((i) => i.type === "post").length;
+  progress(1, 1, `From ${new URL(about.site).host}: ${postCount.toLocaleString("en-GB")} posts, ${data.media.length.toLocaleString("en-GB")} photos and videos`);
 
   step("Sending photos and videos");
   const types = new Map();
@@ -147,11 +193,40 @@ async function run() {
     }
   }
 
+  // With an identity, every post's list is checked against it before anything is taken (src/movein.js).
+  if (about.person) {
+    step("Checking your posts and comments");
+    let after = "";
+    let lists = 0;
+    const total = data.lists?.filter((l) => !l.deleted_at).length ?? 0;
+    do {
+      ({ next: after } = await api("/move/verify", { about, after }));
+      lists = Math.min(total, lists + 20);
+      progress(lists, total, `${lists.toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")}`);
+    } while (after);
+  }
+
   step("Putting it all in place");
   await api("/move/finish", { about });
+  // This browser signed in before the identity was here, so it can't sign yet: one prompt, as at sign-in (keys.js).
+  if (about.person) {
+    step("Letting this browser sign for you here");
+    window.onbeforeunload = null;
+    try {
+      const key = await newBrowserKey();
+      const start = await keysApi("/browser/start", { browserKey: key.publicKey });
+      const response = await passkeySigns(start.nonce, [await fingerprintOf("delegation", fromB64url(start.delegation))], start.allow);
+      const done = await keysApi("/browser/finish", { delegation: start.delegation, response });
+      await keyAllowed(key, done.person, done.expires);
+    } catch {
+      $("error").textContent = "Everything has moved, but this browser can't sign for you yet: sign out and in again before you post.";
+    }
+  }
   document.querySelector("#steps li:last-child").classList.add("done");
   progress(1, 1, "");
-  $("status").innerHTML = 'Done: everything is here. <a href="/posts">See your posts</a>, then <a href="/friend">add your friends again</a>.';
+  $("status").innerHTML = about.person
+    ? 'Done: you\'ve moved, with your friends. Their sites find you here as they hear (within the hour), and your old site tells anyone who looks there where you\'ve gone. <a href="/">Go to Home</a>.'
+    : 'Done: everything is here. <a href="/posts">See your posts</a>, then <a href="/friend">add your friends again</a>.';
   window.onbeforeunload = null;
 }
 

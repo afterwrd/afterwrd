@@ -8,6 +8,7 @@
 import { handleFriendItems } from "./friendhost.js";
 import { receiveNotes } from "./notes.js";
 import { handleIdentity } from "./identities.js";
+import { testSlowSeconds } from "./identity.js";
 import { handleAdmin } from "./admin.js";
 import { renderArchive } from "./archive/routes.js";
 import { currentUser, handleAuth, safeNext } from "./auth.js";
@@ -57,6 +58,7 @@ const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_
 export const handle = (request, env, work) => measure(async () => {
   env = measured(env);
   testDelays(env);
+  if (env.ALLOW_LOCAL_SITES && env.TEST_SLOW_SECONDS) testSlowSeconds(Number(env.TEST_SLOW_SECONDS));
   let response;
   try {
     response = await route(request, env, work);

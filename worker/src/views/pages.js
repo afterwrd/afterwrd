@@ -225,7 +225,9 @@ what it was later.</p>
 <label class="tick"><input type="checkbox" id="kept"> <span>I've kept my recovery code somewhere safe</span></label>
 <button id="go" disabled>Continue</button>
 <p id="error" role="alert"></p>
-<p class="small" id="later"><a href="${escape(next)}">Not now</a></p>`, `
+<p class="small" id="later"><a href="${escape(next)}">Not now</a></p>
+<p class="small" id="moving">Moving here from another afterwrd site? <a href="/_admin/import/move">Bring yourself over</a>
+instead, and keep your recovery code, friends and posts.</p>`, `
   const next = ${JSON.stringify(next).replace(/</g, "\\u003c")};
   const fromSetup = location.hash === "#setup";
   if (fromSetup) document.getElementById("later").hidden = true;
@@ -284,6 +286,56 @@ export function joinPage() {
     await keys.keyAllowed(key, done.person, done.expires);
     afterPasskey(false);
   });`);
+}
+
+/**
+ * Agreeing to move, on the old site (afterwrd 2, step 4f: keys.js): a new site sent the owner here with a move request
+ * its passkey signed (?move=…). One passkey prompt here signs the change of address, which waits 7 days; then back to
+ * the new site, which carries on from there (move.js).
+ */
+export function moveOutPage() {
+  return page("Move your site", `
+<h1>Move your site</h1>
+<p id="asking">One moment…</p>
+<div id="offer" hidden>
+<p>Your identity moves to <b id="to"></b>: from then, that's the site that signs for you, friends' sites find you there,
+and your passkeys here stop signing.</p>
+<p>It takes effect in <b>7 days</b>. Until then this site carries on as normal, and you can cancel from Your devices
+here, or with your recovery code. Your friends' sites hear about it within the hour, so their 7 days start with yours.</p>
+<p>On the day, you make a Download everything here and bring it into your new site, posts, comments and friends.</p>
+<button id="go">Move to <span id="to-again"></span></button>
+</div>
+<p id="error" role="alert"></p>
+<p class="small" id="done" hidden>Done. <a id="back" href="/">Back to your new site</a></p>
+<p class="small" id="not-now"><a href="/">Not now</a></p>`, `
+  const asked = new URLSearchParams(location.search).get("move") || "";
+  let move = null;
+  try { move = JSON.parse(new TextDecoder().decode(dec(asked))); } catch {}
+  (async () => {
+    if (!move?.request || !move.proof) throw new Error("This link isn't complete. Start again from your new site.");
+    const { to } = await post("/_admin/keys/move/check", move);
+    const where = new URL(to).host;
+    document.getElementById("to").textContent = where;
+    document.getElementById("to-again").textContent = where;
+    document.getElementById("asking").hidden = true;
+    document.getElementById("offer").hidden = false;
+    run(document.getElementById("go"), async () => {
+      const [S] = await signing();
+      const start = await post("/_admin/keys/change/start", { change: "move", ...move });
+      const doc = S.fromB64url(start.doc);
+      // What the passkey is about to sign must be the move to that address.
+      if (S.decode(doc)?.origin !== to) throw new Error("Something didn't match. Try again.");
+      const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("identity", doc)]);
+      const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
+        allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
+      await post("/_admin/keys/change/finish", { doc: start.doc, response: credentialJSON(credential) });
+      document.getElementById("offer").hidden = true;
+      document.getElementById("not-now").hidden = true;
+      document.getElementById("back").href = to + "/_admin/import/move";
+      document.getElementById("done").hidden = false;
+      location.replace(to + "/_admin/import/move");
+    });
+  })().catch((e) => { document.getElementById("asking").hidden = true; document.getElementById("error").textContent = e.message; });`);
 }
 
 /** The end of a new site's setup, after its permissions (allowed or not): on to a friend's invitation, or Home. */

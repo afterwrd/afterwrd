@@ -46,7 +46,7 @@ export const TABLES = {
   post_versions: { columns: "*" },
   comment_versions: { columns: "*" },
   comments_elsewhere_versions: { columns: "*" },
-  connections: { columns: "id, origin, name, connected_at, identity", where: "approved_at IS NOT NULL" },
+  connections: { columns: "id, origin, name, created_at, connected_at, approved_at, identity", where: "approved_at IS NOT NULL" },
   // afterwrd 2: the owner's signed posts and photos, the lists that prove what happened on them, what they've signed
   // and sent to friends' posts, and their identity (public anyway). No private keys: those never leave a device or site.
   items: { columns: "*" },
@@ -58,6 +58,10 @@ export const TABLES = {
   list_pages: { columns: "*" },
   sent: { columns: "*" },
   own_identity: { columns: "person, chain" },
+  // The browser keys behind everything signed here (public halves, and what allowed them), and the identities of
+  // everyone who wrote any of it, so the download can be checked, and a site it moves to can check it (move.js).
+  known_delegations: { columns: "*" },
+  identities: { columns: "person, chain, profile" },
   // Groups: which, and what the owner posted and said in them. No keys.
   groups: { columns: "id, name, about, origin, remote_id, host_name, joined_at, role", where: "joined_at IS NOT NULL" },
   group_mine: { columns: "*" },
@@ -71,7 +75,10 @@ export async function handleExport(request, env, url, owner) {
   if (url.pathname === "/_admin/export/about") {
     // signed: how many signed posts and photos it has (afterwrd 2), which a move can't take yet (move.js).
     const signed = Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM items").first())?.n ?? 0);
-    return json({ format: 1, site: url.origin, version: pkg.version, database: DATABASE, tables: Object.keys(TABLES), signed });
+    // person: whose identity this site holds. A download that has one moves only with it (move.js, movein.js).
+    const own = await env.DB.prepare("SELECT person FROM own_identity WHERE id = 1").first();
+    return json({ format: 1, site: url.origin, version: pkg.version, database: DATABASE, tables: Object.keys(TABLES), signed,
+      ...(own ? { person: String(own.person) } : {}) });
   }
   if (url.pathname === "/_admin/export/rows") {
     const table = url.searchParams.get("table");

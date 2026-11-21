@@ -4,7 +4,8 @@
 // address (/.well-known/afterwrd): no passwords are handed over or kept. Each friend is tied to their identity when the
 // friendship is made (connect.js), or the first time it's needed (friendPerson).
 import { checkCall, signCall } from "./signedcalls.js";
-import { fetchIdentity, hostingKeyFor } from "./identities.js";
+import { fetchIdentity, hostingKeyFor, identityState } from "./identities.js";
+import { ownMove } from "./keys.js";
 import { ownHost } from "./items.js";
 import { host, ownerName, readLimited } from "./sites.js";
 
@@ -70,13 +71,35 @@ export async function callFriend(env, from, origin, path, { body = null, timeout
  */
 export async function friendCalling(request, env, url, body = null, { waiting = false } = {}) {
   const notConnected = () => Response.json({ error: "Not connected." }, { status: 401 });
+  // The owner has moved: this site only says where (410), and friends' sites switch to there (switchConnection).
+  const gone = await ownMove(env.DB, url.origin);
+  if (gone?.done) return Response.json({ error: "Moved.", moved: gone.to }, { status: 410 });
   const from = request.headers.get("Afterwrd-From") ?? "";
-  const connection = from && (await env.DB.prepare("SELECT * FROM connections WHERE origin = ? AND connected_at IS NOT NULL")
+  let connection = from && (await env.DB.prepare("SELECT * FROM connections WHERE origin = ? AND connected_at IS NOT NULL")
     .bind(from).first());
+  // A friend calling from the address their identity says they're moving to (identities.js keeps it): once that's in
+  // effect here (7 days after this site heard), they're called there, and this call counts; before, "not yet" (409),
+  // which their site takes as "ask again later", not as having been removed.
+  if (!connection && from) {
+    const moving = await env.DB.prepare(`SELECT c.* FROM connections c JOIN identities i ON i.person = c.identity
+      WHERE i.moving_to = ? AND c.connected_at IS NOT NULL`).bind(from).first();
+    if (moving) {
+      const state = await identityState(env, String(moving.identity));
+      if (!state || state.frozen || state.problem || state.current.origin !== from) {
+        return Response.json({ error: "Not moved here yet.", moving: true }, { status: 409 });
+      }
+      connection = moving;
+    }
+  }
+  // A site someone is moving to, before their posts and friends have come (movein.js): not yet, rather than "no".
+  if (!connection && (await env.DB.prepare("SELECT 1 FROM move_in WHERE id = 1").first())) {
+    return Response.json({ error: "Not moved here yet.", moving: true }, { status: 409 });
+  }
   if (!connection) return notConnected();
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
     { ownOrigin: url.origin, hostingKeyOf: (person, site) => (connection.identity && connection.identity !== person ? null : hostingKeyFor(env, person, site)) });
   if (!caller) return notConnected();
+  if (connection.origin !== from) await switchConnection(env, /** @type {Row<"connections">} */ (/** @type {unknown} */ (connection)), from);
   if (!connection.identity) {
     await env.DB.prepare("UPDATE connections SET identity = ? WHERE id = ? AND identity IS NULL").bind(caller.person, connection.id).run();
     connection.identity = caller.person;
@@ -85,6 +108,26 @@ export async function friendCalling(request, env, url, body = null, { waiting = 
     return Response.json({ error: `Waiting for ${await ownerName(env.DB)} to approve the connection.` }, { status: 403 });
   }
   return { connection: /** @type {Row<"connections">} */ (/** @type {unknown} */ (connection)), person: caller.person };
+}
+
+/**
+ * A friend whose identity has moved to `to` (in effect here: the caller checks), called there from now on. What this
+ * site kept from their old site (copies of their posts, with links to its files) goes, and is asked for again at the
+ * new address. Not if another friend is already at that address (their new site asked to be friends separately): then
+ * both stay, for the owner to sort out. Returns whether it switched.
+ * @param {Env} env @param {Row<"connections">} connection @param {string} to
+ */
+export async function switchConnection(env, connection, to) {
+  const taken = await env.DB.prepare("SELECT 1 FROM connections WHERE origin = ? AND id != ?").bind(to, connection.id).first();
+  if (taken) return false;
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE connections SET origin = ?, items_since = NULL, items_checked_at = NULL, avatar_url = NULL, avatar_exp = NULL,
+      missing_since = NULL, said_no = 0 WHERE id = ?`).bind(to, connection.id),
+    env.DB.prepare("DELETE FROM copies WHERE connection_id = ?").bind(connection.id),
+    env.DB.prepare("UPDATE identities SET origin = ? WHERE person = ?").bind(to, connection.identity),
+  ]);
+  Object.assign(connection, { origin: to, items_since: null, items_checked_at: null, avatar_url: null, avatar_exp: null, missing_since: null, said_no: 0 });
+  return true;
 }
 
 /**

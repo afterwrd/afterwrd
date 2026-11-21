@@ -108,7 +108,9 @@ three_sites() { # $1: the suite, run against three sites, each with its own data
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 2
 }
 run_feed() { three_sites feed.mjs; }
-run_move() { three_sites move.mjs; } # a whole site moved to a new one (src/move.js)
+# A whole site moved to a new one, with its identity (src/move.js, src/movein.js): a change of address waits 90 seconds
+# here rather than 7 days (TEST_SLOW_SECONDS, local sites only), so the test sees it take effect.
+run_move() { EXTRA_A="--var TEST_SLOW_SECONDS:90" EXTRA_B="--var TEST_SLOW_SECONDS:90" EXTRA_C="--var TEST_SLOW_SECONDS:90" three_sites move.mjs; }
 run_selfhosted() { # a self-hosted site (A, HOSTING=self: src/hosting.js) next to one on Cloudflare (B), and a group's site
   EXTRA_A="--var HOSTING:self" EXTRA_B="--var TEST_SELF_HOSTED:http://localhost:8787" three_sites selfhosted.mjs group
 }
