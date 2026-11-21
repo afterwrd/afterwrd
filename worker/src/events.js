@@ -3,17 +3,12 @@
 // this site as signed posts too (friendcopies.js). What's left here:
 // - the owner's events from before signing (events, post_audience, event_answers), shown to them alone, read-only,
 //   until migration turns them into signed items (docs/signed-conversations.md, step 10);
-// - group events the owner's going to, copied into events_elsewhere for the calendar (membership.js), and how a group
-//   sends one (parseSharedEvent), until groups are signed too (step 6);
 // - forgetting a removed friend (friendGone).
-import { ANSWERS, FINISHED_SQL, finishedAt, parseEvent, readEventForm, ruleDates } from "./calendar.js";
-import { siteOrigin } from "./sites.js";
+import { finishedAt, readEventForm } from "./calendar.js";
 import { now, Refusal } from "./util.js";
 import { MAX_POST_TEXT } from "./edits.js";
 import { MAX_GUESTS } from "./items.js";
 
-const KEEP_SECONDS = 30 * 86400; // copies of events from elsewhere stay this long after they're over
-const MAX_PEOPLE = 5000; // in each of an event's lists from elsewhere (going, maybe, can't): well above a big group
 const APPROVED = (c = "") => `${c}connected_at IS NOT NULL AND ${c}approved_at IS NOT NULL`;
 
 /**
@@ -136,35 +131,3 @@ async function readForSigning(env, form, zone) {
     throw error;
   }
 }
-
-// --- group events, on a member's site ----------------------------------------------------------------------------------
-
-/** Someone named in an event's lists: their name, and the site they're from (if it's a proper site address). */
-function person(p, env) {
-  const name = typeof p?.name === "string" ? p.name.replace(/\s+/g, " ").trim().slice(0, 100) || null : null;
-  const from = typeof p?.id === "string" ? siteOrigin(p.id.replace(/\/$/, ""), env) : null;
-  return { name, from };
-}
-
-/**
- * An event a group sent with a post, checked: the event (calendar.js parseEvent), who's going, who might, who can't,
- * how many were invited, and the owner here's own answer. Null if it isn't one.
- */
-export function parseSharedEvent(o, env) {
-  const event = parseEvent(o);
-  if (!event) return null;
-  const people = (list) => (Array.isArray(list) ? list.slice(0, MAX_PEOPLE) : []).map((p) => person(p, env)).filter((p) => p.name);
-  const lists = (x) => ({ going: people(x["afterwrd:going"]), maybe: people(x["afterwrd:maybe"]), cantGo: people(x["afterwrd:cantGo"]),
-    answer: ANSWERS.includes(x["afterwrd:answer"]) ? x["afterwrd:answer"] : null });
-  const invited = o["afterwrd:invited"];
-  // A repeating one (a group's): who's coming to each date, and the owner here's answer for it; only its own dates.
-  const own = new Set(event.rrule ? ruleDates(event) : []);
-  const dates = event.rrule ? (Array.isArray(o["afterwrd:dates"]) ? o["afterwrd:dates"].slice(0, 60) : [])
-    .filter((d) => typeof d?.["afterwrd:date"] === "string" && own.has(d["afterwrd:date"]))
-    .map((d) => ({ date: d["afterwrd:date"], ...lists(d) })) : [];
-  return { ...event, ...(event.rrule ? { going: [], maybe: [], cantGo: [], answer: null } : lists(o)), dates: [...new Map(dates.map((d) => [d.date, d])).values()],
-    invited: Number.isSafeInteger(invited) && invited >= 0 && invited <= 10_000 ? invited : null };
-}
-
-/** Lets go of copies of events from elsewhere long over. */
-export const oldEventsGone = (db) => db.prepare(`DELETE FROM events_elsewhere AS e WHERE ${FINISHED_SQL} < ?`).bind(now() - KEEP_SECONDS);

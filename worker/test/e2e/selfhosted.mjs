@@ -149,7 +149,14 @@ await fill(GROUP_KEY);
 await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click("#go")]);
 check("with the right code, Ann's site claims the group", /\/groups\/\d+\/members$/.test(new URL(ann.url()).pathname)
   && n(stateG, "group_members WHERE role = 'owner'") === 1, ann.url());
-check("its page says how to remove its site from the server", (await ann.$eval("#delete-command", (p) => p.textContent).catch(() => ""))
+check("…and her passkey signs its identity, as it's made", n(stateG, "own_identity") === 1 && n(stateA, "groups WHERE identity IS NOT NULL") === 1);
+// Closing it (step 6e): it goes 30 seconds after, here (TEST_CLOSE_SECONDS), then its site can be removed.
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click('button[data-group-record="close"]')]);
+const closedAt = sql(stateG, "SELECT closed_at FROM groups WHERE origin IS NULL")[0]?.closed_at;
+check("Ann closes it", Boolean(closedAt));
+await new Promise((r) => setTimeout(r, Math.max(0, (closedAt + 31) * 1000 - Date.now())));
+await ann.goto(new URL(ann.url()).href);
+check("once it's gone, its page says how to remove its site from the server", (await ann.$eval("#delete-command", (p) => p.textContent).catch(() => ""))
   .includes("docker compose exec afterwrd delete-group localhost:8790"));
 check("…and asks for no Cloudflare connection to delete it", !(await ann.$("#delete a.connect")));
 await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click("#delete-go")]);

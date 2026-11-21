@@ -15,7 +15,7 @@ import { renderArchive } from "./archive/routes.js";
 import { currentUser, handleAuth, safeNext } from "./auth.js";
 import { handleCloudflare } from "./cloudflare.js";
 import { handleConnectLink } from "./connect.js";
-import { handleGroupApi, handleJoinLink } from "./groups.js";
+import { handleGroupApi, handleJoinLink, testCloseSeconds } from "./groups.js";
 import { handleGroupItems } from "./groupposts.js";
 import { HASH_RE, mediaStore } from "./media.js";
 import { handleGroupActions, handleMember } from "./membership.js";
@@ -61,6 +61,7 @@ export const handle = (request, env, work) => measure(async () => {
   env = measured(env);
   testDelays(env);
   if (env.ALLOW_LOCAL_SITES && env.TEST_SLOW_SECONDS) testSlowSeconds(Number(env.TEST_SLOW_SECONDS));
+  if (env.ALLOW_LOCAL_SITES && env.TEST_CLOSE_SECONDS) testCloseSeconds(Number(env.TEST_CLOSE_SECONDS));
   let response;
   try {
     response = await route(request, env, work);
@@ -136,7 +137,7 @@ async function route(request, env, work) {
   // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
   if (friendCallRoute(`${request.method} ${url.pathname}`)) return handleFriendCalls(request, env, url);
   // A group the owner's in, calling with the key this site gave it.
-  if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url, work);
+  if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url);
   // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.
   if (url.pathname.startsWith("/_check/")) return handleCheck(request, env, url);
   const reading = request.method === "GET" || request.method === "HEAD";

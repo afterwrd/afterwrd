@@ -425,7 +425,9 @@ const noted = groupNotices(stateB);
 const forgedNote = await siteCall(stateG, G, `${B}/_p/notes`, { v: 2, kind: "comment", item: annPost, entry: { n: 2, fp: "x".repeat(43), taken: 1, prev: "", sent: {} }, receipt: {} });
 check("the group can't send notes that don't check", forgedNote.status === 400 && groupNotices(stateB) === noted);
 check("…nor read anything of Bob's", (await call(B, "/_p/items", asGroup)).status === 401);
-check("…nor pretend to be mid-join", (await call(B, `/_member/hello?from=${encodeURIComponent(G)}&group=1`, asGroup)).status === 401);
+check("…and there's no keyed way in left", (await call(B, `/_member/hello?from=${encodeURIComponent(G)}&group=1`, asGroup)).status === 404
+  && (await call(B, "/_member/notify", asGroup, {})).status === 404 && (await call(G, "/_group/leave", bobKey, {})).status === 404
+  && (await call(G, "/_group/posts", bobKey)).status === 404 && (await call(G, `/_group/admin/members/${bobMember}/remove`, asAnn, {})).status === 404);
 check("group actions need the owner's session", (await fetch(`${A}/_groups/${annGroup}/delete`, { method: "POST", redirect: "manual", headers: { Origin: A } })).status === 401);
 const exported = await ann.evaluate(() => fetch("/_admin/export/rows?table=groups").then((r) => r.text()));
 check("Download everything carries no group keys", !exported.includes("key") && exported.includes("Book club"));
@@ -899,15 +901,51 @@ await Promise.all([ann.waitForNavigation(), ann.click('button[data-group-record=
 check("Ann removes Cat, and Cat's site forgets the group", await waitFor(() => n(stateC, "groups") === 0));
 check("…and the group's list says so, signed by Ann", n(stateG, `lists WHERE id = '${groupDoc.person}' AND n = 8`) === 1);
 check("Cat's site no longer gets in", (await call(G, "/_p/items", catKey)).status === 401);
-check("the owner can't just leave", (await ann.evaluate((p) => fetch(p, { method: "POST" }).then((r) => r.status), `/_groups/${annGroup}/leave`)) === 400);
+check("the owner can't just leave: there's no Leave for her", !(await ann.$('button[data-group-record="leave"]')));
 
-// Deleting the group empties it, and Ann's site forgets it.
+// Cat asks again with the invite link, and Ann lets her back in.
+await join(cat, C, link);
+check("Cat can ask again after being removed", n(stateG, `group_members WHERE origin = '${C}' AND approved_at IS NULL`) === 1);
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await Promise.all([ann.waitForNavigation(), ann.click('.requests button[data-group-record="approve"]')]);
+const catAgain = sql(stateC, "SELECT id FROM groups")[0].id;
+await cat.goto(`${C}/groups/${catAgain}`);
+await comment(cat, `gi-${bobPost}`, "Still here");
+check("…and is back in", Boolean(commentFp(bobPost, "Still here")));
+
+// Closing (step 6e): Ann's browser key signs `close` on the members list. Everyone's told; for 30 days (30 seconds
+// here) it's read-only, but for people deleting what they wrote; then it goes, and Ann deletes its site.
+check("Ann can't delete the group's site before closing it", (await post(ann, `/_groups/${annGroup}/delete`, {})).status === 400);
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await Promise.all([ann.waitForNavigation(), ann.click('button[data-group-record="close"]')]);
+const closedAt = sql(stateG, "SELECT closed_at FROM groups WHERE origin IS NULL")[0]?.closed_at;
+check("Ann closes the group, signed, on its members list", Boolean(closedAt)
+  && sql(stateG, `SELECT entries FROM list_pages WHERE list = '${groupDoc.person}'`).flatMap((r) => JSON.parse(r.entries))
+    .some((e) => e.sent && JSON.parse(Buffer.from(e.sent.record, "base64url").toString()).kind === "close")
+  && (await text(ann)).includes("This group is closed"), (await text(ann)).slice(0, 300));
+check("…Cat is told, with Ann's signed close", await waitFor(() => groupNotices(stateC, "closed") === 1) && Boolean(sql(stateC, "SELECT closed_at FROM groups")[0]?.closed_at));
+await cat.goto(`${C}/activity`);
+check("…on her Notifications", (await text(cat)).includes("Ann Example closed Book club (2026)"), (await text(cat)).slice(0, 300));
+await cat.goto(`${C}/groups/${catAgain}`);
+check("Cat's group page says it's closed, with nowhere to post", (await text(cat)).includes("This group is closed") && !(await cat.$("#composer")));
+check("…she can't comment", (await relaySigned(cat, catAgain, { kind: "comment", host: groupPerson, item: bobPost, seen: point(bobPost),
+  prev: lastSent(stateC, bobPost) }, { text: "One more" })) === 400);
+check("…but can delete what she wrote", (await relaySigned(cat, catAgain, { kind: "delete", host: groupPerson, item: bobPost, seen: point(bobPost),
+  prev: lastSent(stateC, bobPost), about: commentFp(bobPost, "Still here") })) !== 400 && !commentFp(bobPost, "Still here"));
+check("the invite link stops working", (await fetch(link)).status === 404);
+check("Ann can't make a new one", (await post(ann, `/_groups/${annGroup}/link`, {})).status === 400);
+check("…nor delete its site yet", (await post(ann, `/_groups/${annGroup}/delete`, {})).status === 400);
+await pause(Math.max(0, (closedAt + 31) * 1000 - Date.now()));
+await cat.goto(`${C}/groups/${catAgain}`);
+check("30 days (here, seconds) on, it's gone for Cat", (await text(cat)).includes("closed, and gone"), (await text(cat)).slice(0, 300));
+check("…and the group's site has emptied itself", (await call(G, "/_p/items", asCat)).status === 410
+  && n(stateG, "groups") + n(stateG, "items") + n(stateG, "lists") + n(stateG, "list_pages") + n(stateG, "media") + n(stateG, "group_members") === 0);
+await Promise.all([cat.waitForNavigation(), cat.click('form[action$="/forget"] button')]);
+check("Cat takes it off her list, keeping her own record of what she signed there", n(stateC, "groups") === 0
+  && n(stateC, "sent WHERE kind = 'comment'") > 0 && n(stateC, "copies WHERE group_id IS NOT NULL") === 0);
 await ann.goto(`${A}/groups/${annGroup}/members`);
 await Promise.all([ann.waitForNavigation(), ann.click("#delete-go")]);
-check("deleting the group empties its Worker", n(stateG, "groups") + n(stateG, "items") + n(stateG, "lists") + n(stateG, "list_pages")
-  + n(stateG, "media") + n(stateG, "group_members") === 0);
-check("…and Ann's site forgets it", n(stateA, "groups") === 0 && new URL(ann.url()).pathname === "/groups");
-check("the invite link stops working", (await fetch(link)).status === 404);
+check("Ann deletes the group's site, and her site forgets it", n(stateA, "groups") === 0 && new URL(ann.url()).pathname === "/groups");
 
 check("no script errors", errors.length === 0, errors.join("; "));
 await browser.close();

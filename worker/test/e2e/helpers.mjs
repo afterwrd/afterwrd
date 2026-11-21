@@ -175,3 +175,73 @@ export async function siteCall(state, from, url, body = null, { headers = {}, at
   return fetch(url, { method: text === null ? "GET" : "POST", redirect: "manual",
     headers: { ...signed, ...(text !== null && { "Content-Type": "application/json" }), ...headers }, body: text });
 }
+
+/**
+ * A signed group (docs/signed-conversations.md, step 6), started from `page`'s site (`site`) on a group's site already
+ * running at `origin` (as /_groups/create/local does on a self-hosted server, or here), claimed, and its identity signed
+ * by the owner's passkey, as the page does after claiming. Returns its id on the owner's site.
+ * @param {import("puppeteer-core").Page} page
+ */
+export async function startSignedGroup(page, { origin, setup, name, about = "" }) {
+  return page.evaluate(async (o) => {
+    const send = async (path, body) => {
+      const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(`${path}: ${data.error ?? r.status}`);
+      return data;
+    };
+    const waiting = await send("/_groups/create/local", { origin: o.origin, setup: o.setup, name: o.name, about: o.about });
+    const id = (await send("/_groups/create/claim", { id: waiting.id })).id;
+    const [S, { passkeySigns }] = await Promise.all([import("/static/signed.js"), import("/static/passkey.js")]);
+    const start = await send(`/_groups/${id}/identity/start`, {});
+    const response = await passkeySigns(start.nonce, [await S.fingerprintOf("identity", S.fromB64url(start.doc))], start.allow);
+    await send(`/_groups/${id}/identity/finish`, { doc: start.doc, response });
+    return id;
+  }, { origin, setup, name, about });
+}
+
+/**
+ * Lets `member` (their page, on their site `memberSite`) into the owner's group `id`, the way people do: the owner
+ * makes an invite link, the member pastes it into Groups on their own site and asks (their browser signs a `join`), and
+ * the owner lets them in (signed). Returns the group's id on the member's site.
+ */
+export async function letInto(owner, ownerSite, id, member, memberSite, state) {
+  await owner.goto(`${ownerSite}/groups/${id}/members`);
+  await owner.click("#make");
+  await owner.waitForSelector("#link:not([hidden])");
+  const link = await owner.$eval("#link-url", (i) => i.value);
+  await member.goto(`${memberSite}/groups`);
+  await member.type("#join input[name=link]", link);
+  await Promise.all([member.waitForNavigation(), member.click("#join button:not([type=button])")]);
+  await Promise.all([member.waitForNavigation({ timeout: 30_000 }), member.click("#go")]);
+  await owner.goto(`${ownerSite}/groups/${id}/members`);
+  await Promise.all([owner.waitForNavigation(), owner.click('.requests button[data-group-record="approve"]')]);
+  return siteSql(state, `SELECT id FROM groups WHERE origin = (SELECT origin FROM groups ORDER BY id DESC LIMIT 1) ORDER BY id DESC LIMIT 1`)[0].id;
+}
+
+/**
+ * A new post in a signed group, signed in `page`'s browser with `content` ({type: "post", text, …}) and sent through
+ * its own site, as the composer would: {status, ...its answer}.
+ */
+export const signedGroupPost = (page, groupId, host, content) => page.evaluate(async (g, h, c) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "item", author: key.person, host: h }, { photos: [], ...c }, key);
+  const res = await fetch(`/_groups/${g}/items`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sent: made.sent, photos: [], files: [] }) });
+  return { status: res.status, ...(await res.json().catch(() => ({}))) };
+}, groupId, host, content);
+
+/**
+ * A record on a signed group's post, signed in `page`'s browser and passed on by its site, as a form would be: the
+ * status (0 for the redirect when the group took it, 400 when it didn't).
+ */
+export const signedGroupRecord = (page, groupId, fields, content = null) => page.evaluate(async (g, f, c) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const key = await savedKey();
+  const made = await makeRecord({ author: key.person, ...f }, c ?? undefined, key);
+  const body = new FormData();
+  body.set("sent", JSON.stringify(made.sent));
+  body.set("back", "/");
+  return (await fetch(`/_groups/${g}/items/${f.item}/records`, { method: "POST", body, redirect: "manual" })).status;
+}, groupId, fields, content);

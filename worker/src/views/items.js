@@ -307,7 +307,7 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
       !item.mine && may(item.author) && signedRemove(relay, "Remove this post, its photos and its comments from the group? This can’t be undone.", sign,
         { back: `/groups/${g.id}`, inplace: "remove", group: g.id })])}
   </header>
-  ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
+  ${item.text && html`<div class="text">${linkify(item.text, item.here ? [...item.mentions, { name: "here" }] : item.mentions)}</div>`}
   ${edited(item)}
   ${sign && editable && signedEdit(`edit-gi-${item.id}`, `gi-${item.id}`, relay, item.text, here, MAX_POST_TEXT, sign, { required: !n || Boolean(item.poll) })}
   ${n > 0 && html`<div class="collage collage-${Math.min(n, 4)}">

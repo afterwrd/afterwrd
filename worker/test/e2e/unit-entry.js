@@ -1,11 +1,9 @@
 // What forged.mjs tests, for run.sh to bundle.
-export { parseEdits, parseMedia } from "../../src/friends.js";
-export { markMine as markMineInGroup, parseGroupPage } from "../../src/membership.js";
+export { parseMedia } from "../../src/friends.js";
 export { callSite, siteOrigin } from "../../src/sites.js";
 export { icsFile, parseEvent, readEventForm } from "../../src/calendar.js";
 export { findOrCreateDatabase, findWorker, loadRelease } from "../../src/deploy.js";
 export { serveStatic } from "../../src/static.js";
-export { cleanMentions, noteMentions } from "../../src/mentions.js";
 export { linkify } from "../../src/views/format.js";
 export { CLIENT_ID, EARLIER_CLIENTS, grantClient } from "../../src/cloudflare.js";
 // What keys.mjs tests (afterwrd 2).

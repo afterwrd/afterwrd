@@ -7,13 +7,14 @@
 //   POST /_groups/<id>/identity/start    -> {nonce, doc, allow}: the group's first identity document (its address, its
 //                                         hosting key, and the owner), for one of the owner's passkeys here to sign
 //   POST /_groups/<id>/identity/finish   {doc, response}: sent on to the group's site, and kept here as the group's
-// The group's site, from its owner's site only (with the owner's key, as today's calls are), once:
+// The group's site, once, from its owner's site only (a signed call from the site that claimed it):
 //   POST /_group/identity                {chain, owner}: its first identity document, signed, and its owner's identity
 import { learnIdentity, parseChain } from "./identities.js";
 import { parseIdentity, readIdentity } from "./identity.js";
 import { hostingKey, ownIdentity, proofFrom } from "./keys.js";
 import { readChallenge, spendChallenge, withChallenge } from "./auth.js";
 import { callSite } from "./sites.js";
+import { bodyBytes, callFriend, siteCalling } from "./calls.js";
 import { b64url, encode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now, randomToken } from "./util.js";
 
@@ -49,8 +50,7 @@ export async function handleGroupIdentity(request, env, url, group, action) {
     const state = await readIdentity(chain, () => now(), now(), { owner: own.state });
     if (!state || state.problem || !(await spendChallenge(env, nonce))) return json({ error: "Your passkey's signature didn't check. Try again." }, 400);
     try {
-      await callSite(String(group.origin), "/_group/identity", { key: group.their_key,
-        body: { chain: stored(chain), owner: stored(own.chain) } });
+      await callFriend(env, url.origin, String(group.origin), "/_group/identity", { body: { chain: stored(chain), owner: stored(own.chain) }, timeout: 25_000 });
     } catch (error) { return json({ error: `The group's site didn't take it: ${error.message}` }, 400); }
     // Known here as any identity is (identities.js), and the group tied to it.
     await learnIdentity(env, chain, { owner: own.chain });
@@ -62,12 +62,19 @@ export async function handleGroupIdentity(request, env, url, group, action) {
 
 // --- the group's site ---------------------------------------------------------------------------------------------------
 
-/** POST /_group/identity, from the owner's site (`member`: their row in group_members). */
-export async function setGroupIdentity(request, env, url, member) {
-  if (member.role !== "owner") return json({ error: "Only the group's owner can do that." }, 403);
+/**
+ * POST /_group/identity, from the owner's site: a call signed by the site that claimed this group (its owner's row in
+ * group_members, the only one until now), whose owner's identity must name that site.
+ */
+export async function setGroupIdentity(request, env, url) {
+  const bytes = await bodyBytes(request);
+  const member = await env.DB.prepare("SELECT * FROM group_members WHERE role = 'owner' AND identity IS NULL LIMIT 1").first();
+  const caller = member && (await siteCalling(request, env, url, bytes));
+  if (!member || !caller || caller.from !== member.origin) return json({ error: "Only the group's owner can do that." }, 403);
   const db = env.DB;
   if (await db.prepare("SELECT 1 FROM own_identity WHERE id = 1").first()) return json({ error: "This group's identity is already set up." }, 409);
-  const body = await request.json().catch(() => ({}));
+  let body = {};
+  try { body = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
   const chain = parseChain(body.chain);
   const ownerChain = parseChain(body.owner);
   if (!chain || chain.length !== 1 || !ownerChain) return json({ error: "That didn't work." }, 400);

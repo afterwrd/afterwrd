@@ -104,7 +104,9 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
       continue;
     }
     // A delete or removal: the record it names keeps only its fingerprint, from now on, everywhere this site sends it.
-    if (got.record.kind === "delete" || got.record.kind === "remove") {
+    // Not on a group's members list (its id is the host's own), where removing someone is about their `join`, which
+    // stays: without it nobody could check the list (who was let in, or removed) again.
+    if ((got.record.kind === "delete" || got.record.kind === "remove") && list !== host.person) {
       const target = entries.find((e) => e.fp === got.record.about);
       if (target) {
         const targetPage = Math.floor((target.n - 1) / PAGE);

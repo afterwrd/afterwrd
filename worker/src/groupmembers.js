@@ -1,11 +1,11 @@
 // A group's signed members list, on the group's own site (afterwrd 2, step 6b; the rules are members.js). Members' sites
 // call it with signed calls (calls.js), recognised by the identity each joined with; it calls them back the same way.
-// group_members is worked out from the list as each record is taken, so the rest of the group (its posts, comments and
-// events, until step 6c) carries on reading it.
+// group_members is worked out from the list as each record is taken, so the rest of the group (its posts, notes and
+// limits) reads it.
 //   POST /_join/<token>/accept   (signed) {sent, delegation, profile}: the joiner's own `join`, through an invite link
-//   POST /_group/records         (signed, a member) {sent, delegation}: an approve, remove, role or leave
+//   POST /_group/records         (signed, a member) {sent, delegation}: an approve, remove, role, leave, or (the
+//                                owner) close (step 6e: groups.js)
 //   GET  /_group/members         …with `list`: the members list as signed, for members' sites to check
-// Groups from before (no identity) carry on with their keys until step 6e.
 import { checkCall, signCall } from "./signedcalls.js";
 import { hostingKeyFor, identityState, checkProfile } from "./identities.js";
 import { lookupsFor, ownHost } from "./items.js";
@@ -85,26 +85,29 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
   if (profile) await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(body.profile), caller.person).run();
   await env.DB.batch([
     env.DB.prepare("DELETE FROM group_members WHERE origin = ? AND approved_at IS NULL").bind(caller.from),
-    // Members who joined with an identity have no keys: placeholders, until step 6e makes the table again without them.
-    env.DB.prepare(`INSERT INTO group_members (group_id, origin, name, their_key, key_hash, identity, join_fp, created_at)
-      VALUES (?, ?, ?, '', ?, ?, ?, ?)`).bind(group.id, caller.from, (named?.name ?? "Someone").slice(0, 100), `v2-${answer.entry.fp}`,
-      caller.person, answer.entry.fp, now()),
+    env.DB.prepare(`INSERT INTO group_members (group_id, origin, name, identity, join_fp, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(group.id, caller.from, (named?.name ?? "Someone").slice(0, 100), caller.person, answer.entry.fp, now()),
   ]);
   return json({ ok: true, id: group.id, name: group.name, about: group.about, receipt: answer.receipt, person: self.person });
 }
 
 /**
- * A member's decision or leaving: `member` (their row) sent `body` ({sent, delegation}). Taken onto the members list
- * if its rules allow, then group_members brought into line. `tell(member)`: a removed member's site, told.
+ * A member's decision, their leaving, or the owner closing the group: `member` (their row) sent `body` ({sent,
+ * delegation}). Taken onto the members list if its rules allow, then group_members brought into line. `tell(member)`: a
+ * removed member's site, told. Once the group's `closed`, nothing more is taken (members.js); `onClose(entry)`: the
+ * owner's close, just taken.
  */
-export async function takeMemberRecord(env, group, member, body, { maxMembers, tell, forget }) {
+export async function takeMemberRecord(env, group, member, body, { maxMembers, tell, closed = false, onClose }) {
   const self = await groupSelf(env);
   if (!self) return json({ error: "This group isn't ready yet." }, 409);
   const got = await theirs(env, String(member.identity), body);
   if (got.error) return json({ error: got.error }, 400);
   const { record } = got;
-  if (!["approve", "remove", "role", "leave"].includes(record.kind) || record.item !== self.list) return json({ error: "That isn't about this group's members." }, 400);
-  const target = record.kind === "leave" ? member : await env.DB.prepare("SELECT * FROM group_members WHERE join_fp = ?").bind(record.about).first();
+  if (!["approve", "remove", "role", "leave", "close"].includes(record.kind) || record.item !== self.list) return json({ error: "That isn't about this group's members." }, 400);
+  if (closed) return json({ error: "This group has closed." }, 409);
+  if (record.kind === "close" && member.role !== "owner") return json({ error: "Only the group's owner can close it." }, 403);
+  const target = record.kind === "leave" || record.kind === "close" ? member
+    : await env.DB.prepare("SELECT * FROM group_members WHERE join_fp = ?").bind(record.about).first();
   if (!target) return json({ error: "They aren't in this group, or asking." }, 404);
   if (record.kind === "approve") {
     const inGroup = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NOT NULL").first();
@@ -120,8 +123,9 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
   }
   if (record.kind === "remove" || record.kind === "leave") {
     if (record.kind === "remove") await tell(target);
-    await db.batch([db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id), ...forget(db, target.origin)]);
+    await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
   }
+  if (record.kind === "close") await onClose(answer.entry);
   return json({ ok: true, receipt: answer.receipt, n: answer.entry?.n ?? null });
 }
 

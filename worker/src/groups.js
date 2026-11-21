@@ -1,88 +1,54 @@
 // A group's own Worker: afterwrd in group mode (the secret GROUP_KEY is set; see index.js). It holds one group: its
-// members' sites, and its posts, photos and comments. No one signs in here. Everyone, the person who made it
-// included, uses it from their own afterwrd site (membership.js), with the key this Worker gave that site when it
-// joined; members' sites read it when its page opens (nothing goes out to every member when someone posts), and a
-// comment sends a note only to the sites of the post's writer and of the others who've commented on it (notify.js).
-// A member's key opens this group and nothing else, and this Worker holds nothing but the group.
+// members list and its posts, each signed by whoever wrote it (afterwrd 2: docs/signed-conversations.md, step 6). No one
+// signs in here. Everyone, the person who made it included, uses it from their own afterwrd site, in calls signed by
+// that site (calls.js); it knows its members by the identity each joined with (groupmembers.js), and holds nothing but
+// the group. Its posts are at /_p/… (groupposts.js); this is the rest.
 //
 // Setting up, once, straight after its owner's site has made this Worker (groupsites.js):
-//   GET  /_group/ping             that it's running, its version, and its hosting key (afterwrd 2)
-//   POST /_group/identity         its owner's site sets its identity, once (groupidentity.js)
-//   POST /_group/claim            {origin, key, setup, name, about}: the owner's site, with the GROUP_KEY it made this
-//                                 Worker with. This Worker proves the key is that site's (its /_member/hello) and
-//                                 answers with a key for calling the group. The owner is its first member.
+//   GET  /_group/ping             that it's running, its version, and its hosting key
+//   POST /_group/claim            (signed) {setup, name, about, owner}: the owner's site, with the GROUP_KEY it made this
+//                                 Worker with; its owner's name, as they call themselves. The owner is its first member.
+//   POST /_group/identity         (signed, from the site that claimed it) its identity, once (groupidentity.js)
 // Joining, with an invite link (made by an admin; it lasts 14 days and anyone it's sent to can use it, but each use is
-// only a request):
+// only a request, and an admin lets them in, or not):
 //   GET  /_join/<token>           the page the link opens: asks where your site is, and sends you there
-//   GET  /_join/<token>/info      the group, for the joiner's site to show before they confirm
-//   POST /_join/<token>/accept    {origin, key}: the joiner's site asks to join; proved as with claiming, then an admin
-//                                 lets them in, or not
-// Members' sites, with their key (one not yet let in may only leave):
-//   GET  /_group/posts?page=n     the group, and its newest posts with photos (signed links) and comments
-//   GET  /_group/posts/<m>        one post
-//   GET  /_group/members          who's in it
-//   POST /_group/posts            a Note; its photos are signed links to the member's own site, copied here
-//   POST /_group/posts/<m>/delete       their own (an admin: anyone's)
-//   POST /_group/comments         a Note inReplyTo a post here
-//   POST /_group/comments/<n>/delete    their own (an admin: anyone's)
-//   POST /_group/(posts|comments)/<n>/edit    a Note: their own words, for 15 minutes and until someone else comments
-//                                 after it or answers it (edits.js); not an event (that's /_group/events/<m>/edit)
-//   GET  /_group/events?when=past  events still to come (or, past, the most recent), as posts with their event
-//   POST /_group/events/<m>/answer {answer}: going, maybe or no (it answers with the event's post)
-//   POST /_group/events/<m>/edit   {content, afterwrd:event}: only the member who added it
-//   POST /_group/events/<m>/cancel its writer, or an admin (as for deleting): those going are told
-// An event is a post (POST /_group/posts) with an afterwrd:event, and deleting it calls it off.
-//   POST /_group/polls/<m>/vote   {afterwrd:choices: [n…]}: the member answers a post's poll (none takes it back)
-//   POST /_group/polls/<m>/close  only whoever asked it
-// A poll is a post with an afterwrd:poll (a Question: polls.js), its words the question; it answers {id, afterwrd:poll:
-// true}, so the member's site knows it was kept. Everyone sees how many chose what; only the writer's site is told who.
-//   POST /_group/leave            (not the owner, who deletes the group instead)
+//   GET  /_join/<token>/info      the group, for the joiner's site to show (and sign their `join` by) before they confirm
+//   POST /_join/<token>/accept    (signed) the joiner's own signed `join`
+// Members' sites (signed calls; someone not yet let in may only take their request back):
+//   GET  /_group/members          who's in it, with the members list as signed
+//   POST /_group/records          a signed approve, remove, role, leave, or (the owner) close
 // Admins (the owner, and members the owner makes admins):
 //   GET  /_group/admin/members    everyone, with requests to join
-//   POST /_group/admin/members/<id>/(approve|decline|remove)    (the owner also: admin, member)
 //   POST /_group/admin/link       a new invite link (the old one stops working)
 //   POST /_group/admin/about      {name, about}
 //   POST /_group/admin/here       {on}: whether any member may use @here (mentions.js), or only the owner and admins
-// The owner:
-//   POST /_group/admin/close      empties the group and tells members' sites it's gone, a round at a time: it answers
-//                                 {remaining}, and the owner's site asks again until none are left (then deletes this
-//                                 Worker). Once closed, only the owner's key carries on (closingRound).
-import { actorId, CONTEXT, editedFields, fileUrl, groupId, groupPostId, iso, tidy } from "../public/static/activity.js";
+// Closing (step 6e): the owner's signed `close` on the members list closes the group. Every member's site is told (a
+// signed note; anyone missed sees it at their next pull), and for CLOSE_SECONDS (30 days) it answers read-only: its
+// members list, posts and threads, and members deleting what they wrote. Then it empties itself, and its owner's site
+// deletes its Worker:
+//   POST /_group/admin/end        the owner, once the 30 days are up: empties it, if it hasn't already
+// Groups made on afterwrd 1 kept their posts in group_* tables, read-only now, until migration (step 10).
+import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.js";
 import pkg from "../package.json";
-import { MAX_COMMENT } from "./archive/comments.js";
-import { ANSWERS, eventChanged, eventObject, finishedAt, GROUP_FINISHED_SQL, occurrenceOn, parseEvent, ruleDates } from "./calendar.js";
-import { ALLOWED_SQL, answerAllowance, rateWindow, TOO_MANY_ANSWERS, wasAllowed } from "./limits.js";
-import { choicesMask, isOpen, OPEN_SQL, pollFromQuestion, pollObject, readPoll, tally } from "./polls.js";
-import { signedLink } from "./friends.js";
 import { mediaStore } from "./media.js";
-import { notifyEventChange, notifyGroupComment, notifyGroupMentions } from "./notify.js";
-import { HERE, keptMentions, mentionTags, noteMentions, readMentions } from "./mentions.js";
 import { groupLinkPage, messagePage } from "./views/pages.js";
-import { callSite, KEY_RE, PROTOCOL, siteOrigin } from "./sites.js";
+import { PROTOCOL } from "./sites.js";
 import { removeUnusedFiles } from "./posts.js";
-import { signedFile } from "./share.js";
-import { html, json, now, randomToken, Refusal, sha256 } from "./util.js";
-import { editGroupComment, editGroupPost, groupCommentVersions, groupPostVersions, groupVersionsGone } from "./edits.js";
+import { html, json, now, randomToken, sha256 } from "./util.js";
 import { hostingKey } from "./keys.js";
 import { setGroupIdentity } from "./groupidentity.js";
 import { callMember, groupSelf, signedMember, signedMembers, takeJoin, takeMemberRecord } from "./groupmembers.js";
+import { outbox } from "./outbox.js";
 import { bodyBytes, siteCalling } from "./calls.js";
 
-export const MAX_MEMBERS = 40; // with the requests waiting, few enough that all can be told when the group closes
+export const MAX_MEMBERS = 1000; // besides its owner (docs/signed-conversations.md: up to 1,000 members)
 /** The member cap: MAX_MEMBERS, or in a scale test (self-hosted, with TEST_SCALE) whatever TEST_MAX_MEMBERS says. */
 export const maxMembers = (env) => (env.TEST_SCALE && env.HOSTING === "self" && Number(env.TEST_MAX_MEMBERS)) || MAX_MEMBERS;
-const MAX_WAITING = 10;
+const MAX_WAITING = 50;
 export const MAX_GROUP_PHOTOS = 8; // each is two files to copy from the member's site: within the free plan's 50 calls
 export const MAX_GROUP_TEXT = 5000;
 export const MAX_GROUP_NAME = 100;
 export const MAX_GROUP_ABOUT = 1000;
-const POSTS_PAGE = 20;
-const PAGE_COMMENTS = 20; // the newest on each post in a page of posts; a post's own page has up to POST_COMMENTS
-const POST_COMMENTS = 300;
-const UPCOMING = 100; // events still to come, in the Calendar
-const PAST = 30; // and the most recent ones that have finished
-const CHANGE_SECONDS = 300; // an event's time, place or name can change, telling those going, once every five minutes
-const MAX_SKIPS_A_DAY = 10; // dates of one repeating event called off one at a time, each telling those going that day
 const LINK_SECONDS = 14 * 86400;
 const LINK_REQUESTS = 100; // requests to join one invite link can make
 const WAITING_SECONDS = 7 * 86400; // a request to join no one has answered is dropped after this
@@ -93,7 +59,16 @@ export const THUMB_BYTES = 1_000_000;
 export const GROUP_BYTES = 1_000_000_000; // all the group's photos: free Cloudflare accounts have 5 GB for everything
 // From one member's site.
 export const POST_RATE = { count: 10, seconds: 600, daily: 50, photos: 40 };
-const COMMENT_RATE = { count: 30, seconds: 600, daily: 300 };
+// @here (mentions.js): its owner and admins may use it, or anyone if they've said so (here_anyone); either way only a
+// few a day for each member, and for the group (groupposts.js).
+export const HERE_LIMITS = { member: 3, group: 10 };
+
+// How long a closed group goes on answering (step 6e). Shorter only on local test sites (app.js, with ALLOW_LOCAL_SITES
+// and TEST_CLOSE_SECONDS), so a test can see one end.
+export let CLOSE_SECONDS = 30 * 86400;
+export function testCloseSeconds(seconds) {
+  if (Number.isSafeInteger(seconds) && seconds > 0) CLOSE_SECONDS = seconds;
+}
 
 export const cleanText = (text) => (typeof text === "string" ? text.replace(/\r\n?/g, "\n").trim() : "");
 export const cleanName = (name, fallback = "Someone") => (typeof name === "string" && name.trim() ? name.trim().slice(0, 100) : fallback);
@@ -103,6 +78,9 @@ export const isAdmin = (member) => member.role === "owner" || member.role === "a
 /** @type {(db: D1Database) => Promise<Row<"groups"> | null>} */
 export const theGroup = (db) => db.prepare("SELECT * FROM groups WHERE origin IS NULL ORDER BY id LIMIT 1").first();
 const ownerOf = (db) => db.prepare("SELECT origin, name FROM group_members WHERE role = 'owner' LIMIT 1").first();
+
+/** Whether a group (its row) has closed, and when it goes. */
+export const closedGroup = (group) => (group?.closed_at ? { at: Number(group.closed_at), goes: Number(group.closed_at) + CLOSE_SECONDS } : null);
 
 // --- what members' sites read ---------------------------------------------------------------------------------------
 
@@ -124,151 +102,23 @@ export async function groupObject(db, site, group, member) {
   ]);
   members.results.sort((a, b) => byName(a.name, b.name));
   const o = owner.results[0];
+  const closed = closedGroup(group);
   return {
     type: "Group", id: groupId(site, group.id), name: group.name, summary: group.about || undefined, published: iso(group.created_at),
     attributedTo: o ? { type: "Person", id: actorId(o.origin), name: o.name } : undefined,
     "afterwrd:members": members.results.length, "afterwrd:role": member.role,
     "afterwrd:waiting": waiting ? waiting.results[0].n : undefined,
-    // Mentions (mentions.js): who's in it, to mention (as GET /_group/members says), and who may use @here.
-    // With who they are (step 6c), for signed mentions.
+    // Mentions (mentions.js): who's in it, with who they are, to mention, and who may use @here.
     "afterwrd:people": members.results.map((m) => ({ type: "Person", id: actorId(m.origin), name: m.name, ...(m.identity && { "afterwrd:person": m.identity }) })),
     "afterwrd:hereAnyone": Boolean(group.here_anyone), "afterwrd:mayHere": isAdmin(member) || Boolean(group.here_anyone),
-  };
-}
-
-async function photoObject(env, site, f) {
-  return {
-    type: "Image", url: fileUrl(site, f.hash), mediaType: "image/jpeg", width: f.width, height: f.height,
-    "afterwrd:fetch": await signedFile(env, site, f.hash),
-    preview: { type: "Image", url: fileUrl(site, f.thumb_hash), mediaType: "image/jpeg", "afterwrd:fetch": await signedFile(env, site, f.thumb_hash) },
+    // Closed by its owner (step 6e): when, and the `close` on its members list, which members' sites check.
+    ...(closed && { "afterwrd:closedAt": iso(closed.at), "afterwrd:goesAt": iso(closed.goes), "afterwrd:close": group.closed_by ?? undefined }),
   };
 }
 
 /**
- * An event, with who's going (members only) and, for the member asking, their own answer. A repeating one has those
- * for each date that has any (`afterwrd:dates`), and none for the series as a whole.
- */
-function eventWithAnswers(e, answers, member) {
-  const mine = answers.filter((a) => a.post_id === e.post_id);
-  const lists = (date) => {
-    const people = (answer) => mine.filter((a) => a.date === date && a.answer === answer).map((a) => ({ type: "Person", id: actorId(a.origin), name: a.name }));
-    return { "afterwrd:going": people("going"), "afterwrd:maybe": people("maybe"), "afterwrd:cantGo": people("no"),
-      "afterwrd:answer": mine.find((a) => a.date === date && a.origin === member.origin)?.answer };
-  };
-  if (!e.rrule) return { ...eventObject(e), ...lists("") };
-  const dates = new Set(ruleDates(e));
-  const answered = [...new Set(mine.map((a) => a.date))].filter((d) => dates.has(d)).sort();
-  return { ...eventObject(e), "afterwrd:dates": answered.map((date) => ({ "afterwrd:date": date, ...lists(date) })) };
-}
-
-/** The dates called off one at a time, for these events (rows of group_events), as each one's `skipped`. */
-async function withSkips(db, events) {
-  const repeating = events.filter((e) => e.rrule);
-  if (!repeating.length) return events;
-  const { results } = await db.prepare("SELECT post_id, date FROM group_event_skips WHERE post_id IN (SELECT value FROM json_each(?)) ORDER BY date")
-    .bind(JSON.stringify(repeating.map((e) => e.post_id))).all();
-  return events.map((e) => ({ ...e, skipped: results.filter((x) => x.post_id === e.post_id).map((x) => x.date) }));
-}
-
-/**
- * Posts as Notes, each with its photos, its event if it's one, and its newest `comments` (and how many there are in
- * all). Whoever wrote each is named with their own site. Comments are limited so a page always fits what members'
- * sites will read (2 MB).
- */
-async function groupNotes(env, site, group, posts, member, comments = PAGE_COMMENTS, { names = false } = {}) {
-  const db = env.DB;
-  if (!posts.length) return [];
-  const marks = posts.map(() => "?").join(",");
-  const ids = posts.map((p) => p.id);
-  const [photos, newest, events, answers, polls, votes] = await db.batch([
-    db.prepare(`SELECT * FROM group_photos WHERE post_id IN (${marks}) ORDER BY id`).bind(...ids),
-    // Each post's newest comments, walking group_comments_post from the newest down and stopping there: picking them
-    // from all of them read every comment on the page's posts. (How many there are is kept on the post: comment_count.)
-    db.prepare(`SELECT c.* FROM json_each(?) p CROSS JOIN group_comments c ON c.id IN
-      (SELECT id FROM group_comments WHERE post_id = p.value ORDER BY created_at DESC, id DESC LIMIT ?)
-      ORDER BY c.created_at, c.id`).bind(JSON.stringify(ids), comments),
-    db.prepare(`SELECT * FROM group_events WHERE post_id IN (${marks})`).bind(...ids),
-    // The answers and votes first, each member looked up by (group_id, origin), the members' only index: matched by
-    // origin alone, SQLite read every member for each page (CROSS JOIN keeps that order).
-    db.prepare(`SELECT a.post_id, a.origin, a.date, a.answer, m.name FROM group_answers a
-      CROSS JOIN group_members m ON m.group_id = ? AND m.origin = a.origin AND m.approved_at IS NOT NULL
-      WHERE a.post_id IN (${marks}) ORDER BY a.answered_at, m.name`).bind(group.id, ...ids),
-    db.prepare(`SELECT * FROM group_polls WHERE post_id IN (${marks})`).bind(...ids),
-    db.prepare(`SELECT v.post_id, v.origin AS voter, v.choices, m.name FROM group_poll_votes v
-      CROSS JOIN group_members m ON m.group_id = ? AND m.origin = v.origin AND m.approved_at IS NOT NULL
-      WHERE v.post_id IN (${marks}) ORDER BY v.voted_at, m.name`).bind(group.id, ...ids),
-  ]);
-  const author = (row) => ({ type: "Person", id: actorId(row.origin), name: row.author_name });
-  const kept = await withSkips(db, events.results);
-  // What edited posts and comments said before (edits.js).
-  const postsEarlier = await groupPostVersions(db, posts.filter((p) => p.edited_at).map((p) => p.id));
-  const commentsEarlier = await groupCommentVersions(db, newest.results.filter((c) => c.edited_at).map((c) => c.id));
-  return Promise.all(posts.map(async (p) => {
-    const address = groupPostId(site, group.id, p.id);
-    const thread = newest.results.filter((c) => c.post_id === p.id);
-    const event = kept.find((e) => e.post_id === p.id);
-    const poll = polls.results.find((q) => q.post_id === p.id);
-    return {
-      type: "Note", id: address, attributedTo: author(p), context: groupId(site, group.id), published: iso(p.created_at),
-      mediaType: "text/plain", content: p.text ?? "", ...editedFields({ ...p, earlier: postsEarlier.get(p.id) }), ...mentionFields(p),
-      "afterwrd:event": event ? eventWithAnswers(event, answers.results, member) : undefined,
-      // Who chose what goes only to whoever asked, and only with the post on its own (so a page of posts stays small).
-      "afterwrd:poll": poll ? pollObject(tally(poll, votes.results.filter((v) => v.post_id === p.id),
-        { viewer: member.origin, names: names && p.origin === member.origin })) : undefined,
-      attachment: await Promise.all(photos.results.filter((f) => f.post_id === p.id).map((f) => photoObject(env, site, f))),
-      replies: {
-        type: "Collection", totalItems: p.comment_count ?? 0,
-        items: thread.map((c) => ({ type: "Note", id: `${address}#c${c.id}`, attributedTo: author(c), inReplyTo: address,
-          published: iso(c.created_at), mediaType: "text/plain", content: c.text, ...mentionFields(c),
-          ...editedFields({ ...c, earlier: commentsEarlier.get(c.id) }) })),
-      },
-    };
-  }));
-}
-
-/** Who a post or comment mentions (mentions.js), as a note says it: Mention tags, and "afterwrd:here". */
-function mentionFields(row) {
-  const list = readMentions(row.mentions);
-  const tags = mentionTags(list);
-  return { ...(tags.length && { tag: tags }), ...(list.some((m) => m.origin === HERE) && { "afterwrd:here": true }) };
-}
-
-async function groupPage(env, site, group, member, page) {
-  const db = env.DB;
-  const rows = await db.prepare("SELECT * FROM group_posts WHERE group_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-    .bind(group.id, POSTS_PAGE, (page - 1) * POSTS_PAGE).all();
-  // Kept by the database as posts come and go (migrations/0024_group_counts.js): counting read every post.
-  const total = group.post_count;
-  return tidy({
-    "@context": CONTEXT, type: "OrderedCollectionPage", context: await groupObject(db, site, group, member), totalItems: total,
-    "afterwrd:page": page, "afterwrd:hasNext": page * POSTS_PAGE < total,
-    orderedItems: await groupNotes(env, site, group, rows.results, member),
-  });
-}
-
-async function groupPost(env, site, group, member, id, comments = POST_COMMENTS) {
-  const post = await env.DB.prepare("SELECT * FROM group_posts WHERE id = ? AND group_id = ?").bind(Number(id), group.id).first();
-  if (!post) return null;
-  const [note] = await groupNotes(env, site, group, [post], member, comments, { names: true });
-  return tidy({ "@context": CONTEXT, ...note, context: await groupObject(env.DB, site, group, member) });
-}
-
-/** Events still to come, soonest first; or (`past`) the most recent that have finished, latest first. */
-async function groupEvents(env, site, group, member, past) {
-  const db = env.DB;
-  const { results } = await db.prepare(`SELECT p.* FROM group_events e JOIN group_posts p ON p.id = e.post_id AND p.group_id = ?
-    WHERE ${GROUP_FINISHED_SQL} ${past ? "<" : ">="} ? ORDER BY e.starts_at ${past ? "DESC" : "ASC"}, p.id LIMIT ?`)
-    .bind(group.id, now(), past ? PAST : UPCOMING).all();
-  return tidy({
-    "@context": CONTEXT, type: "OrderedCollection", context: await groupObject(db, site, group, member), totalItems: results.length,
-    orderedItems: await groupNotes(env, site, group, results, member, 0),
-  });
-}
-
-/**
- * Who's in the group. For an admin (`all`), requests to join too, with the numbers to act on them by. With an identity
- * (step 6b), also the members list as signed (`afterwrd:list`), for the member's site to check and sign by, and each
- * member's identity and join.
+ * Who's in the group. For an admin (`all`), requests to join too. With the members list as signed (`afterwrd:list`),
+ * for the member's site to check and sign by, and each member's identity and join.
  */
 async function groupMembers(env, site, group, member, { all = false } = {}) {
   const db = env.DB;
@@ -281,71 +131,11 @@ async function groupMembers(env, site, group, member, { all = false } = {}) {
       "afterwrd:joinedAt": iso(m.approved_at), ...(all && { "afterwrd:member": m.id, "afterwrd:waiting": !m.approved_at }),
       ...(m.identity && { "afterwrd:person": m.identity, "afterwrd:join": m.join_fp ?? undefined }),
     })),
-    ...(member.identity && { "afterwrd:list": await signedMembers(env) }),
+    "afterwrd:list": await signedMembers(env),
   });
 }
 
-// --- posting and commenting -----------------------------------------------------------------------------------------
-
-// @here (mentions.js): its owner and admins may use it, or anyone if they've said so (here_anyone); either way only a
-// few a day for each member, and for the group. The group's allowance only holds back ordinary members, so they can't
-// use it all and leave the admins without.
-export const HERE_LIMITS = { member: 3, group: 10 };
-
-/**
- * Who a member's post or comment (`note`, its words `text`) mentions: only members, and @here if they may use it now.
- * Using @here takes one of the day's allowance there and then, in the same statement as the check (so two sent at once
- * can't both slip past); release() gives it back if what it was in isn't kept after all.
- * @returns {Promise<{ mentions: import("./mentions.js").Mention[], release: () => Promise<void>, error: string | null, status: number }>}
- */
-async function groupMentions(env, group, member, note, text) {
-  const db = env.DB;
-  const asked = noteMentions(note, text, env, { here: true });
-  let release = async () => {};
-  if (asked.some((m) => m.origin === HERE)) {
-    if (!isAdmin(member) && !group.here_anyone) return { mentions: [], release, error: "Only the group's admins can use @here.", status: 403 };
-    const at = now();
-    const taken = await db.prepare(`INSERT INTO here_log (member_id, at) SELECT ?1, ?2
-      WHERE (SELECT COUNT(*) FROM here_log WHERE member_id = ?1 AND at > ?2 - 86400) < ?3
-        AND (?5 OR (SELECT COUNT(*) FROM here_log WHERE at > ?2 - 86400) < ?4)
-      RETURNING rowid`).bind(member.id, at, HERE_LIMITS.member, HERE_LIMITS.group, isAdmin(member) ? 1 : 0).first();
-    if (!taken) return { mentions: [], release, error: "@here has been used a lot today. Mention people by name instead.", status: 429 };
-    release = async () => { await db.prepare("DELETE FROM here_log WHERE rowid = ?").bind(taken.rowid).run(); };
-    await db.prepare("DELETE FROM here_log WHERE at < ?").bind(at - 2 * 86400).run();
-  }
-  const people = asked.filter((m) => m.origin !== HERE && m.origin !== member.origin).map((m) => m.origin);
-  const { results } = people.length ? await db.prepare(`SELECT origin FROM group_members WHERE group_id = ? AND approved_at IS NOT NULL
-    AND origin IN (SELECT value FROM json_each(?))`).bind(group.id, JSON.stringify(people)).all() : { results: [] };
-  const members = new Set(results.map((r) => r.origin));
-  return { mentions: asked.filter((m) => m.origin === HERE || members.has(m.origin)), release, error: null, status: 200 };
-}
-
-const tooMany = (what) => ({ error: `That's a lot of ${what} for now. Try again later.`, status: 429 });
-
-/**
- * The photos in a member's post: each a signed link to a file on their own site, exactly (see friends.js), with its
- * thumbnail. Returns { photos } or { error }.
- */
-export function memberPhotos(attachments, origin) {
-  if (attachments === undefined) return { photos: [] };
-  if (!Array.isArray(attachments) || attachments.length > MAX_GROUP_PHOTOS) return { error: `Up to ${MAX_GROUP_PHOTOS} photos in a group post.` };
-  const side = (n) => Number.isSafeInteger(n) && n > 0 && n <= 20_000;
-  const file = (url) => (typeof url === "string" && url.startsWith(`${origin}/files/`) ? url.slice(`${origin}/files/`.length) : "");
-  const photos = [];
-  for (const a of attachments) {
-    const hash = file(a?.url);
-    const thumb = file(a?.preview?.url);
-    const src = /^[0-9a-f]{64}$/.test(hash) && signedLink(origin, a["afterwrd:fetch"], hash);
-    const thumbSrc = /^[0-9a-f]{64}$/.test(thumb) && signedLink(origin, a.preview["afterwrd:fetch"], thumb);
-    const size = a?.["afterwrd:size"];
-    if (a?.type !== "Image" || !src || !thumbSrc || !side(a.width) || !side(a.height) || !Number.isSafeInteger(size) || size <= 0) {
-      return { error: "Unexpected photo details." };
-    }
-    if (size > PHOTO_BYTES) return { error: "That photo is too big for a group." };
-    photos.push({ hash, thumb_hash: thumb, width: a.width, height: a.height, size, src, thumbSrc });
-  }
-  return { photos };
-}
+// --- photos, copied from members' sites ---------------------------------------------------------------------------------
 
 /** A body that stops with an error after `limit` bytes. */
 function capped(body, limit) {
@@ -384,418 +174,89 @@ export async function copyPhotos(env, photos) {
   }
 }
 
-/**
- * A member's new post. The post and its photos are saved first, in one statement that checks the member's limits
- * (posts, photos a day) and the group's room for photos; then the photos are copied from the member's site, and if
- * that fails the post goes again, with any files it brought. Returns { id } or { error, status }.
- */
-async function createPost(env, group, member, { text, photos, event = null, poll = null, mentions = [] }) {
-  const db = env.DB;
-  if (text.length > MAX_GROUP_TEXT) return { error: `Posts can be up to ${MAX_GROUP_TEXT} characters.`, status: 400 };
-  if (poll && !text) return { error: "Write the question your poll asks.", status: 400 };
-  if (poll && event) return { error: "A post can be an event or a poll, not both.", status: 400 };
-  if (!text && !photos.length && !event) return { error: "Write something or add a photo.", status: 400 };
-  if (event && finishedAt(event) < now()) return { error: "That event would already be over.", status: 400 };
-  if (event?.rrule && firstOver(event, now())) return { error: "Its first date would already be over.", status: 400 };
-  const at = now();
-  const bytes = photos.reduce((n, f) => n + f.size + THUMB_BYTES, 0);
-  const saved = await db.prepare(`INSERT INTO group_posts (group_id, origin, author_name, text, created_at, mentions)
-      SELECT ?1, ?2, ?3, ?4, ?5, ?13
-      WHERE (SELECT COUNT(*) FROM group_posts WHERE origin = ?2 AND created_at > ?5 - ?6) < ?7
-        AND (SELECT COUNT(*) FROM group_posts WHERE origin = ?2 AND created_at > ?5 - 86400) < ?8
-        AND (SELECT COUNT(*) FROM group_photos f JOIN group_posts p ON p.id = f.post_id
-          WHERE p.origin = ?2 AND p.created_at > ?5 - 86400) + ?9 <= ?10
-        AND (SELECT COALESCE(SUM(size), 0) FROM group_photos) + ?11 <= ?12
-      RETURNING id`).bind(group.id, member.origin, member.name, text || null, at, rateWindow(POST_RATE.seconds), POST_RATE.count,
-      POST_RATE.daily, photos.length, POST_RATE.photos, bytes, GROUP_BYTES, keptMentions(mentions)).first();
-  const id = saved?.id;
-  if (!id) return { error: "That's a lot of posts or photos for now, or the group is full of photos. Try again later.", status: 429 };
-  try {
-    // Its event, and its photos, referenced before they're copied, so a file can't be cleared away while it's arriving.
-    const rows = [
-      ...photos.map((f) => db.prepare(`INSERT INTO group_photos (post_id, hash, thumb_hash, width, height, size)
-        VALUES (?, ?, ?, ?, ?, ?)`).bind(id, f.hash, f.thumb_hash, f.width, f.height, f.size + THUMB_BYTES)),
-      ...(event ? [db.prepare(`INSERT INTO group_events (post_id, title, starts_at, ends_at, all_day, time_zone, place, rrule, last_ends_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, event.title, event.starts_at, event.ends_at, event.all_day, event.time_zone, event.place,
-        event.rrule ?? null, event.rrule ? finishedAt(event) : null)] : []),
-      ...(poll ? [db.prepare("INSERT INTO group_polls (post_id, options, multiple, closes_at) VALUES (?, ?, ?, ?)")
-        .bind(id, JSON.stringify(poll.options), poll.multiple, poll.closes_at)] : []),
-    ];
-    if (rows.length) await db.batch(rows);
-    await copyPhotos(env, photos);
-  } catch (error) {
-    await deletePost(env, null, group, null, id);
-    return { error: error.message, status: 400 };
-  }
-  return { id };
-}
-
-/**
- * Deletes a post, its comments, its photos (the files too) and its event (those going to it are told it's off, if it
- * was still to come). Its writer, an admin (not the owner's), or (member null) this Worker.
- */
-async function deletePost(env, site, group, member, id) {
-  const db = env.DB;
-  const post = await db.prepare("SELECT * FROM group_posts WHERE id = ? AND group_id = ?").bind(Number(id), group.id).first();
-  if (!post || (member && !(await mayDelete(db, member, post.origin)))) return false;
-  const event = await db.prepare("SELECT * FROM group_events WHERE post_id = ?").bind(post.id).first();
-  if (member && event && !event.cancelled_at && finishedAt(event) > now()) {
-    await notifyEventChange(env, site, group, post, { ...event, cancelled_at: now() }, { kind: "cancelled", name: member.name, from: member.origin });
-  }
-  const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos WHERE post_id = ?").bind(post.id).all();
-  await db.batch([
-    db.prepare("DELETE FROM group_comments WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_photos WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_answers WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_event_skips WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_events WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_poll_votes WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_polls WHERE post_id = ?").bind(post.id),
-    db.prepare("DELETE FROM group_posts WHERE id = ?").bind(post.id),
-    ...groupVersionsGone(db),
-  ]);
-  await removeUnusedFiles(env, photos.flatMap((f) => [f.hash, f.thumb_hash]));
-  return true;
-}
-
-/** Whether `member` may delete something written from `origin`: their own; an admin, anyone's but the owner's; the owner, anything. */
-async function mayDelete(db, member, origin) {
-  if (origin === member.origin || member.role === "owner") return true;
-  if (member.role !== "admin") return false;
-  return (await ownerOf(db))?.origin !== origin;
-}
-
-/**
- * A comment on a post; tells the members who'll want to know, and those it mentions (notifyGroupMentions, from the
- * route). Returns { id, post } or { error, status }.
- */
-async function addComment(env, site, group, member, postId, text, mentions = []) {
-  const db = env.DB;
-  if (!text || text.length > MAX_COMMENT) return { error: `Comments need 1 to ${MAX_COMMENT} characters.`, status: 400 };
-  const post = await db.prepare("SELECT * FROM group_posts WHERE id = ? AND group_id = ?").bind(Number(postId), group.id).first();
-  if (!post) return { error: "That post isn't there any more.", status: 404 };
-  const at = now();
-  const row = await db.prepare(`INSERT INTO group_comments (post_id, origin, author_name, text, created_at, mentions)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?9
-    WHERE (SELECT COUNT(*) FROM group_comments WHERE origin = ?2 AND created_at > ?5 - ?6) < ?7
-      AND (SELECT COUNT(*) FROM group_comments WHERE origin = ?2 AND created_at > ?5 - 86400) < ?8
-    RETURNING id`).bind(post.id, member.origin, member.name, text, at, rateWindow(COMMENT_RATE.seconds), COMMENT_RATE.count, COMMENT_RATE.daily,
-    keptMentions(mentions)).first();
-  if (!row) return tooMany("comments");
-  await notifyGroupComment(env, site, group, post, { id: row.id, name: member.name, text, from: member.origin, mentions });
-  return { id: row.id, post };
-}
-
-async function deleteComment(db, group, member, id) {
-  const comment = await db.prepare(`SELECT c.* FROM group_comments c JOIN group_posts p ON p.id = c.post_id
-    WHERE c.id = ? AND p.group_id = ?`).bind(Number(id), group.id).first();
-  if (!comment || !(await mayDelete(db, member, comment.origin))) return false;
-  await db.batch([db.prepare("DELETE FROM group_comments WHERE id = ?").bind(comment.id), ...groupVersionsGone(db)]);
-  return true;
-}
-
-// --- events -------------------------------------------------------------------------------------------------------------
-
-/** An event's post and the event (with the dates of a repeating one called off), if it's in this group. */
-async function findEvent(db, group, id) {
-  const row = await db.prepare(`SELECT p.*, e.title, e.starts_at, e.ends_at, e.all_day, e.time_zone, e.place, e.cancelled_at, e.changed_at,
-    e.rrule FROM group_events e JOIN group_posts p ON p.id = e.post_id WHERE e.post_id = ? AND p.group_id = ?`).bind(Number(id), group.id).first();
-  if (!row) return null;
-  const [event] = await withSkips(db, [{ post_id: row.id, title: row.title, starts_at: row.starts_at, ends_at: row.ends_at,
-    all_day: row.all_day, time_zone: row.time_zone, place: row.place, cancelled_at: row.cancelled_at, rrule: row.rrule }]);
-  return { post: row, event };
-}
-
-/**
- * Which date of an event `date` names: for a repeating one, one of its dates (as calendar.js occurrences gives it);
- * for a one-off, '' (or nothing). Returns { date: the occurrence } or { error }.
- */
-function whichDate(event, date) {
-  if (!event.rrule) return date === undefined || date === null || date === "" ? { date: occurrenceOn(event, "") } : { error: "That event doesn't repeat." };
-  const found = typeof date === "string" && occurrenceOn(event, date);
-  return found ? { date: found } : { error: date ? "That isn't one of its dates." : "This event repeats: say which date. (Your site may need updating.)" };
-}
-
-/** When one date of an event (calendar.js occurrences) is over. */
-const dateOver = (event, o) => finishedAt({ ...event, rrule: null, starts_at: o.starts_at, ends_at: o.ends_at });
-
-/** Whether a repeating event's first date is over at `at`. */
-const firstOver = (event, at) => dateOver(event, occurrenceOn(event, ruleDates(event)[0])) < at;
-
-/** A member says whether they're going (to one date, if it repeats). Returns an error message, or null. */
-async function answerEvent(db, group, member, id, answer, date) {
-  if (!ANSWERS.includes(answer)) return "Going, maybe, or can't go?";
-  const found = await findEvent(db, group, id);
-  if (!found) return "That event isn't there any more.";
-  if (found.event.cancelled_at) return "That event has been called off.";
-  const which = whichDate(found.event, date);
-  if (which.error) return which.error;
-  if (which.date.cancelled) return "That date has been called off.";
-  if (dateOver(found.event, which.date) < now()) return "That event is over.";
-  // Within their allowance of answers (limits.js), checked in the same transaction.
-  const at = now();
-  const allowance = answerAllowance(db, member.origin, at);
-  await db.batch([...allowance.statements, db.prepare(`INSERT INTO group_answers (post_id, origin, date, answer, answered_at)
-    SELECT ?1, ?3, ?5, ?4, ?2 WHERE ${STILL_MEMBER_SQL} AND ${ALLOWED_SQL("?6")}
-    AND NOT EXISTS (SELECT 1 FROM group_event_skips WHERE post_id = ?1 AND date = ?5)
-    ON CONFLICT (post_id, origin, date) DO UPDATE SET answer = excluded.answer, answered_at = excluded.answered_at`)
-    .bind(found.post.id, at, member.origin, answer, which.date.date, allowance.token)]);
-  return (await wasAllowed(db, allowance.token)) ? null : TOO_MANY_ANSWERS;
-}
-
-/**
- * The member who added an event changes it (only they can: it's in their name). If anything but the words about it
- * changed, those going, or who might, are told. Returns an error message, or null.
- */
-async function editEvent(env, site, group, member, id, { text, event }) {
-  const db = env.DB;
-  const found = await findEvent(db, group, id);
-  if (!found || found.post.origin !== member.origin) return "Only whoever added an event can change it.";
-  if (found.event.cancelled_at) return "That event has been called off.";
-  if (text.length > MAX_GROUP_TEXT) return `Posts can be up to ${MAX_GROUP_TEXT} characters.`;
-  const at = now();
-  if (finishedAt(found.event) < at) return "That event is over.";
-  if (finishedAt(event) < at) return "That event would already be over.";
-  // A repeating one can't be moved to start on a day that's already over (its time of day can change, under way or not).
-  if (event.rrule && ruleDates(event)[0] !== ruleDates(found.event)[0] && firstOver(event, at)) return "Its first date would already be over.";
-  const changed = eventChanged(found.event, event);
-  // Each change sends a note to everyone going: not more than one every few minutes, checked and recorded in one
-  // statement, so requests sent together can't all get through.
-  if (changed) {
-    const ok = await db.prepare(`UPDATE group_events SET changed_at = ?1 WHERE post_id = ?2 AND (changed_at IS NULL OR changed_at <= ?1 - ?3)
-      RETURNING post_id`).bind(at, found.post.id, CHANGE_SECONDS).first();
-    if (!ok) return "You've just changed this event. Try again in a few minutes.";
-  }
-  await db.batch([
-    db.prepare(`UPDATE group_events SET title = ?, starts_at = ?, ends_at = ?, all_day = ?, time_zone = ?, place = ?, rrule = ?, last_ends_at = ?
-      WHERE post_id = ?`).bind(event.title, event.starts_at, event.ends_at, event.all_day, event.time_zone, event.place, event.rrule ?? null,
-      event.rrule ? finishedAt(event) : null, found.post.id),
-    db.prepare("UPDATE group_posts SET text = ? WHERE id = ?").bind(text || null, found.post.id),
-  ]);
-  if (changed) {
-    await notifyEventChange(env, site, group, found.post, { ...event, skipped: found.event.skipped }, { kind: "changed", name: member.name, from: member.origin });
-    // Then (those going have been told) answers and dates called off that are for dates it no longer has go.
-    const dates = JSON.stringify(ruleDates(event));
-    await db.batch([
-      db.prepare("DELETE FROM group_answers WHERE post_id = ? AND date NOT IN (SELECT value FROM json_each(?))").bind(found.post.id, dates),
-      db.prepare("DELETE FROM group_event_skips WHERE post_id = ? AND date NOT IN (SELECT value FROM json_each(?))").bind(found.post.id, dates),
-    ]);
-  }
-  return null;
-}
-
-/** SQL: the member ?3 is still in the group, checked as an answer's kept, so one sent as they leave isn't left behind. */
-const STILL_MEMBER_SQL = "EXISTS (SELECT 1 FROM group_members WHERE origin = ?3 AND approved_at IS NOT NULL)";
-
-/** Someone who's left or been removed: their answers (to events and polls) go too, so rejoining starts afresh. */
-const forgetAnswers = (db, origin) => [
-  db.prepare("DELETE FROM group_answers WHERE origin = ?").bind(origin),
-  db.prepare("DELETE FROM group_poll_votes WHERE origin = ?").bind(origin),
-];
-
-// --- polls ---------------------------------------------------------------------------------------------------------------
-
-/** A member answers the poll in post `id` (`list`: the options' numbers; none takes it back). An error message, or null. */
-async function answerPoll(db, group, member, id, list) {
-  const poll = await db.prepare(`SELECT q.* FROM group_polls q JOIN group_posts p ON p.id = q.post_id
-    WHERE q.post_id = ? AND p.group_id = ?`).bind(Number(id), group.id).first();
-  if (!poll) return "That poll isn't there any more.";
-  if (!isOpen(poll)) return "That poll has closed.";
-  const mask = choicesMask(list, poll);
-  if (mask === null) return poll.multiple ? "Those aren't options in this poll." : "Pick one of the options.";
-  // Within their allowance of answers (limits.js), checked in the same transaction as the answer.
-  const at = now();
-  const allowance = answerAllowance(db, member.origin, at);
-  const binds = [poll.post_id, at, member.origin, mask, allowance.token];
-  const tooMany = async () => ((await wasAllowed(db, allowance.token)) ? null : TOO_MANY_ANSWERS);
-  if (!mask) {
-    // Taking an answer back, too, only while it's open: an answer still there afterwards means it had closed.
-    await db.batch([...allowance.statements, db.prepare(`DELETE FROM group_poll_votes WHERE post_id = ?1 AND origin = ?3
-      AND ${OPEN_SQL("group_polls")} AND ${ALLOWED_SQL("?5")}`).bind(poll.post_id, at, member.origin, mask, allowance.token)]);
-    const left = await db.prepare("SELECT 1 FROM group_poll_votes WHERE post_id = ? AND origin = ?").bind(poll.post_id, member.origin).first();
-    return left ? (await tooMany()) ?? "That poll has closed." : null;
-  }
-  // Only while it's open, and while they're still a member (removed or left mid-request, nothing's left behind).
-  const results = await db.batch([...allowance.statements, db.prepare(`INSERT INTO group_poll_votes (post_id, origin, choices, voted_at)
-    SELECT ?1, ?3, ?4, ?2 WHERE ${OPEN_SQL("group_polls")} AND ${STILL_MEMBER_SQL} AND ${ALLOWED_SQL("?5")}
-    ON CONFLICT (post_id, origin) DO UPDATE SET choices = excluded.choices, voted_at = excluded.voted_at
-    RETURNING post_id`).bind(...binds)]);
-  return results.at(-1).results.length ? null : (await tooMany()) ?? "That poll has closed.";
-}
-
-/** Whoever asked a poll closes it. An error message, or null. */
-async function closePoll(db, group, member, id) {
-  const post = await db.prepare("SELECT * FROM group_posts WHERE id = ? AND group_id = ?").bind(Number(id), group.id).first();
-  if (!post || post.origin !== member.origin) return "Only whoever asked can close a poll.";
-  await db.prepare("UPDATE group_polls SET closed_at = ? WHERE post_id = ? AND closed_at IS NULL").bind(now(), post.id).run();
-  return null;
-}
-
-/**
- * Calls an event off (or, with `date`, one date of a repeating one): whoever added it, or an admin (as for deleting
- * it). Those going, or who might, are told (to that date, for one date).
- */
-async function cancelEvent(env, site, group, member, id, date) {
-  const db = env.DB;
-  const found = await findEvent(db, group, id);
-  if (!found || !(await mayDelete(db, member, found.post.origin))) return "That isn't yours to call off.";
-  if (found.event.cancelled_at) return null;
-  const at = now();
-  if (date !== undefined && date !== null && date !== "") {
-    const which = whichDate(found.event, date);
-    if (which.error) return which.error;
-    if (dateOver(found.event, which.date) < at) return "That date is over.";
-    // Only the first of requests sent together calls it off, and tells people; and at most a few dates a day, as each
-    // tells everyone going that day (checked in the same statement).
-    if (!(await db.prepare(`INSERT INTO group_event_skips (post_id, date, cancelled_at) SELECT ?1, ?2, ?3
-      WHERE (SELECT COUNT(*) FROM group_event_skips WHERE post_id = ?1 AND cancelled_at > ?3 - 86400) < ?4
-      ON CONFLICT DO NOTHING RETURNING post_id`).bind(found.post.id, which.date.date, at, MAX_SKIPS_A_DAY).first())) {
-      const already = await db.prepare("SELECT 1 FROM group_event_skips WHERE post_id = ? AND date = ?").bind(found.post.id, which.date.date).first();
-      return already ? null : `You can call off up to ${MAX_SKIPS_A_DAY} dates of an event a day. Try again tomorrow.`;
-    }
-    await notifyEventChange(env, site, group, found.post, { ...found.event, skipped: [...found.event.skipped, which.date.date] },
-      { kind: "cancelled", name: member.name, from: member.origin, date: which.date.date });
-    return null;
-  }
-  if (finishedAt(found.event) < at) return "That event is over.";
-  // Only the first of requests sent together calls it off, and tells people.
-  if (!(await db.prepare("UPDATE group_events SET cancelled_at = ? WHERE post_id = ? AND cancelled_at IS NULL RETURNING post_id")
-    .bind(at, found.post.id).first())) return null;
-  await notifyEventChange(env, site, group, found.post, { ...found.event, cancelled_at: at }, { kind: "cancelled", name: member.name, from: member.origin });
-  return null;
-}
-
 // --- running the group ------------------------------------------------------------------------------------------------
 
 /** Tells a member's site it's no longer in the group, if it can be reached. */
-const tellRemoved = (env, member) => (member.identity ? callMember(env, member, "/_member/removed", {})
-  : callSite(member.origin, "/_member/removed", { key: member.their_key, body: {} })).catch(() => {});
-
-/** An admin's decision about someone; returns an error message, or null. */
-async function decide(env, group, admin, id, action) {
-  const db = env.DB;
-  const member = await db.prepare("SELECT * FROM group_members WHERE id = ? AND group_id = ?").bind(Number(id), group.id).first();
-  if (!member || member.id === admin.id || member.role === "owner") return "You can't do that.";
-  if (!member.approved_at && member.created_at < now() - WAITING_SECONDS) return "That request has expired.";
-  // Admins are the owner's choice, and only the owner can remove one.
-  if ((member.role === "admin" || action === "admin" || action === "member") && admin.role !== "owner") return "Only the group's owner can do that.";
-  if (action === "approve") {
-    if (member.approved_at) return null;
-    const done = await db.prepare(`UPDATE group_members SET approved_at = ?1 WHERE id = ?2
-      AND (SELECT COUNT(*) FROM group_members WHERE group_id = ?3 AND approved_at IS NOT NULL) < ?4`)
-      .bind(now(), member.id, group.id, maxMembers(env) + 1).run();
-    return done.meta.changes ? null : `The group is full: it can have up to ${maxMembers(env)} members besides its owner.`;
-  }
-  if (action === "admin" || action === "member") {
-    if (!member.approved_at) return "Let them in first.";
-    await db.prepare("UPDATE group_members SET role = ? WHERE id = ?").bind(action, member.id).run();
-    return null;
-  }
-  // Decline a request, or remove someone. What they posted stays, as on Facebook; an admin can delete it.
-  await tellRemoved(env, member);
-  await db.batch([db.prepare("DELETE FROM group_members WHERE id = ?").bind(member.id), ...forgetAnswers(db, member.origin)]);
-  return null;
-}
-
-// Members' sites told the group's gone per round of closing: well inside a request's 50 calls out (removing the
-// group's photos is calls to objects, which don't count).
-const CLOSING_ROUND = 30;
+const tellRemoved = (env, member) => callMember(env, member, "/_member/removed", {}).then((r) => r.body?.cancel()).catch(() => {});
 
 /**
- * Empties the group, then tells the first of its members' sites; returns how many are left to tell. Who's left (their
- * site and key) waits in settings, with the owner's key's hash, for the owner's site to ask for the next round
- * (closingRound): a group of any size can be closed, each round being a new request with its own 50 calls. Only those
- * two settings and the closed mark stay, and only until the owner's site deletes the group.
+ * The owner's `close`, just taken onto the members list (`entry`): the group is closed from now. No more invite links;
+ * every member's site is told with a signed note (groupposts.js groupNoteFor), and it goes CLOSE_SECONDS from now.
  */
-async function close(env, group, owner) {
+async function closed(env, origin, group, entry) {
   const db = env.DB;
-  const { results: members } = await db.prepare("SELECT origin, their_key FROM group_members WHERE id != ? ORDER BY id").bind(owner.id).all();
-  const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos UNION ALL SELECT hash, thumb_hash FROM media WHERE item_id IS NOT NULL").all();
-  const setting = (key, value) => db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").bind(key, value);
   await db.batch([
-    ...["group_comments", "group_comment_versions", "group_photos", "group_answers", "group_event_skips", "answer_log", "group_poll_votes", "group_polls",
+    db.prepare("UPDATE groups SET closed_at = ?, closed_by = ? WHERE id = ? AND closed_at IS NULL").bind(entry.taken, entry.fp, group.id),
+    db.prepare("DELETE FROM group_links"),
+  ]);
+  const self = await groupSelf(env);
+  await outbox(env).sendNote({ origin, kind: "closed", item: self.list, fp: entry.fp, audience: "members" });
+}
+
+/**
+ * Empties a closed group, once its 30 days are up: its posts, photos, lists, members and links all go. Only the closed
+ * mark stays (so it can't be claimed again), until its owner's site deletes its Worker. Groups from before signing
+ * (group_*) are emptied too: nobody can read them here any more.
+ */
+async function empty(env) {
+  const db = env.DB;
+  if (await db.prepare("SELECT 1 FROM settings WHERE key = 'group_closed'").first()) return;
+  const { results: photos } = await db.prepare("SELECT hash, thumb_hash FROM group_photos UNION ALL SELECT hash, thumb_hash FROM media WHERE item_id IS NOT NULL").all();
+  await db.batch([
+    ...["group_comments", "group_comment_versions", "group_photos", "group_answers", "group_event_skips", "group_poll_votes", "group_polls",
       "group_events", "group_posts", "group_post_versions", "group_links", "group_members", "groups",
-      // Its signed posts (step 6c), and every list, its members list too (closing properly, with its 30 days, is 6e).
-      "items", "item_photos", "lists", "list_pages", "checkpoints", "here_log"]
-      .map((table) => db.prepare(`DELETE FROM ${table}`)),
+      "items", "item_photos", "lists", "list_pages", "checkpoints", "here_log"].map((table) => db.prepare(`DELETE FROM ${table}`)),
     db.prepare("DELETE FROM media WHERE item_id IS NOT NULL"),
-    // So it can't be claimed again, should its Worker outlast this (its owner's site deletes it next).
-    setting("group_closed", "1"),
-    setting("group_closer", owner.key_hash),
-    setting("group_farewells", JSON.stringify(members.map((m) => ({ origin: m.origin, their_key: m.their_key })))),
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_closed', '1')"),
   ]);
   await removeUnusedFiles(env, photos.flatMap((f) => [f.hash, f.thumb_hash]));
-  return tellNext(db);
-}
-
-/** Tells the next round of members' sites the group's gone; returns how many are left. */
-async function tellNext(db) {
-  const row = await db.prepare("SELECT value FROM settings WHERE key = 'group_farewells'").first();
-  const left = row ? JSON.parse(row.value) : [];
-  const now = left.slice(0, CLOSING_ROUND);
-  const later = left.slice(CLOSING_ROUND);
-  // Saved before telling, so a round cut short doesn't tell anyone twice (one that can't be reached isn't asked again).
-  if (later.length) await db.prepare("UPDATE settings SET value = ? WHERE key = 'group_farewells'").bind(JSON.stringify(later)).run();
-  else await db.prepare("DELETE FROM settings WHERE key IN ('group_farewells', 'group_closer')").run();
-  await Promise.all(now.map(tellRemoved));
-  return later.length;
 }
 
 /**
- * A closed group's next round of telling members (close), for its owner's site only: null if this isn't one (the
- * request goes on as any other, and is refused, as the group has no members now).
+ * Whether this group has gone: emptied, or closed more than CLOSE_SECONDS ago (and so emptied now). Every request but a
+ * ping and its identity asks first.
  */
-async function closingRound(request, env) {
+export async function groupGone(env) {
   const db = env.DB;
-  const match = /^Bearer (\S+)$/.exec(request.headers.get("Authorization") ?? "");
-  if (!match || !KEY_RE.test(match[1])) return null;
-  const closer = await db.prepare("SELECT value FROM settings WHERE key = 'group_closer'").first();
-  if (!closer || closer.value !== await sha256(match[1])) return null;
-  return json({ ok: true, remaining: await tellNext(db) });
+  if (await db.prepare("SELECT 1 FROM settings WHERE key = 'group_closed'").first()) return true;
+  const group = await theGroup(db);
+  const shut = closedGroup(group);
+  if (!shut || shut.goes > now()) return false;
+  await empty(env);
+  return true;
 }
 
-/** Proves `key` belongs to the site at `origin`, and was made there for joining (or claiming) this group. */
-async function proveSite(url, origin, key, groupNumber) {
-  try {
-    return await callSite(origin, `/_member/hello?from=${encodeURIComponent(url.origin)}&group=${groupNumber}`, { key });
-  } catch (error) {
-    throw new Error(`Couldn't confirm your site: ${error.message}`);
-  }
-}
-
-/** The owner's site claims the group, once, with the GROUP_KEY it made this Worker with. */
+/** The owner's site claims the group, once, in a signed call, with the GROUP_KEY it made this Worker with. */
 async function claim(request, env, url) {
   const db = env.DB;
-  const body = await request.json().catch(() => ({}));
+  const bytes = await bodyBytes(request);
+  let body = {};
+  try { body = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
   if (typeof body.setup !== "string" || (await sha256(body.setup)) !== (await sha256(env.GROUP_KEY))) return json({ error: "Not this group's key." }, 403);
   if (await theGroup(db) || await db.prepare("SELECT 1 FROM settings WHERE key = 'group_closed'").first()) {
     return json({ error: "This group is already set up." }, 409);
   }
-  const origin = siteOrigin(body.origin, env);
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller || caller.from === url.origin) return json({ error: "Your site's signature didn't check. Is it on the same version of afterwrd?" }, 401);
   const name = typeof body.name === "string" ? body.name.trim().slice(0, MAX_GROUP_NAME) : "";
-  if (!origin || origin === url.origin || !KEY_RE.test(body.key ?? "") || !name) return json({ error: "That doesn't look like an afterwrd site." }, 400);
-  let them;
-  try {
-    them = await proveSite(url, origin, body.key, 1);
-  } catch (error) {
-    return json({ error: error.message }, 400);
-  }
-  const key = randomToken();
+  if (!name) return json({ error: "Give the group a name." }, 400);
   const about = cleanText(body.about).slice(0, MAX_GROUP_ABOUT) || null;
-  // Group 1, always: its addresses are <this site>/groups/1/….
+  const owner = cleanName(body.owner);
+  // Group 1, always: its addresses are <this site>/groups/1/…. Its owner is recognised by their identity once the
+  // group has its own (groupidentity.js), and until then, for that alone, by the site that claimed it.
   await db.batch([
     db.prepare("INSERT INTO groups (id, name, about, created_at) VALUES (1, ?, ?, ?)").bind(name, about, now()),
-    db.prepare(`INSERT INTO group_members (group_id, origin, name, their_key, key_hash, role, created_at, approved_at)
-      VALUES (1, ?, ?, ?, ?, 'owner', ?, ?)`).bind(origin, cleanName(them.name), body.key, await sha256(key), now(), now()),
+    db.prepare(`INSERT INTO group_members (group_id, origin, name, role, created_at, approved_at)
+      VALUES (1, ?, ?, 'owner', ?, ?)`).bind(caller.from, owner, now(), now()),
   ]);
-  return json({ key, id: 1, name, about, owner: cleanName(them.name) });
+  return json({ id: 1, name, about, owner });
 }
 
 // --- the invite link, opened by someone and used by their site ---------------------------------------------------------
 
 async function linkedGroup(db, token) {
   return db.prepare(`SELECT g.*, l.token_hash FROM group_links l JOIN groups g ON g.id = l.group_id AND g.origin IS NULL
-    WHERE l.token_hash = ? AND l.expires_at > ? AND l.requests < ?`).bind(await sha256(token), now(), LINK_REQUESTS).first();
+    WHERE l.token_hash = ? AND l.expires_at > ? AND l.requests < ? AND g.closed_at IS NULL`).bind(await sha256(token), now(), LINK_REQUESTS).first();
 }
 
 export async function handleJoinLink(request, env, url) {
@@ -803,214 +264,78 @@ export async function handleJoinLink(request, env, url) {
   if (!match) return new Response("Not found", { status: 404 });
   const [, token, action] = match;
   const db = env.DB;
-  const group = await linkedGroup(db, token);
+  const self = await groupSelf(env);
+  const group = self && !(await groupGone(env)) ? await linkedGroup(db, token) : null;
   if (!group) {
     const message = "This invite link has expired. Ask whoever sent it for a new one.";
     return action ? json({ error: message }, 404) : html(messagePage(message, { href: "https://afterwrd.app/", label: "About afterwrd" }), 404);
   }
   const owner = await ownerOf(db);
   if (request.method === "GET" && !action) return html(groupLinkPage(group.name, owner?.name ?? "Someone"));
-  // afterwrd 2 (step 6b): a group with an identity says which, and where its members list is up to, for the joiner's
-  // browser to sign its `join` (members.js).
+  // Which group it is, and where its members list is up to, for the joiner's browser to sign its `join` (members.js).
   if (request.method === "GET" && action === "/info") {
-    const self = await groupSelf(env);
-    const list = self && (await db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(self.list).first());
-    return json({ id: group.id, name: group.name, about: group.about, owner: owner?.name,
-      ...(self && { person: self.person, members: list && Number(list.n) > 0 ? { n: Number(list.n), h: String(list.head) } : null }) });
+    const list = await db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(self.list).first();
+    return json({ id: group.id, name: group.name, about: group.about, owner: owner?.name, person: self.person,
+      members: list && Number(list.n) > 0 ? { n: Number(list.n), h: String(list.head) } : null });
   }
   if (request.method !== "POST" || action !== "/accept") return new Response("Not found", { status: 404 });
-
-  // With an identity: the joiner's own signed `join`, in a call signed by their site.
-  if (await groupSelf(env)) {
-    const bytes = await bodyBytes(request);
-    let signed = {};
-    try { signed = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
-    if (!signed?.sent) return json({ error: "This group needs your site to be on the same version of afterwrd. Update it, then try again." }, 400);
-    const counted = await db.prepare("UPDATE group_links SET requests = requests + 1 WHERE token_hash = ? AND requests < ?")
-      .bind(group.token_hash, LINK_REQUESTS).run();
-    if (!counted.meta.changes) return json({ error: "This invite link has been used too many times. Ask for a new one." }, 429);
-    const caller = await siteCalling(request, env, url, bytes);
-    if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
-    if (await db.prepare("SELECT 1 FROM group_members WHERE origin = ? AND approved_at IS NOT NULL").bind(caller.from).first()) {
-      return json({ error: "You're already in this group." }, 409);
-    }
-    return takeJoin(env, group, caller, signed, { maxWaiting: MAX_WAITING });
-  }
-
-  const body = await request.json().catch(() => ({}));
-  const origin = siteOrigin(body.origin, env);
-  if (!origin || origin === url.origin || !KEY_RE.test(body.key ?? "")) return json({ error: "That doesn't look like an afterwrd site." }, 400);
-  // Each request is counted against the link before this Worker calls anyone, and old unanswered requests go.
+  // The joiner's own signed `join`, in a call signed by their site. Each request is counted against the link before
+  // this site checks (or fetches) anything, and old unanswered requests go.
+  const bytes = await bodyBytes(request);
+  let signed = {};
+  try { signed = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
+  if (!signed?.sent) return json({ error: "This group needs your site to be on the same version of afterwrd. Update it, then try again." }, 400);
   const counted = await db.prepare("UPDATE group_links SET requests = requests + 1 WHERE token_hash = ? AND requests < ?")
     .bind(group.token_hash, LINK_REQUESTS).run();
   if (!counted.meta.changes) return json({ error: "This invite link has been used too many times. Ask for a new one." }, 429);
   await db.prepare("DELETE FROM group_members WHERE approved_at IS NULL AND created_at < ?").bind(now() - WAITING_SECONDS).run();
-  let them;
-  try {
-    them = await proveSite(url, origin, body.key, group.id);
-  } catch (error) {
-    return json({ error: error.message }, 400);
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
+  if (await db.prepare("SELECT 1 FROM group_members WHERE origin = ? AND approved_at IS NOT NULL").bind(caller.from).first()) {
+    return json({ error: "You're already in this group." }, 409);
   }
-  const existing = await db.prepare("SELECT approved_at FROM group_members WHERE group_id = ? AND origin = ?").bind(group.id, origin).first();
-  if (existing?.approved_at) return json({ error: "You're already in this group." }, 409);
-  // A request, waiting for an admin; asking again replaces it. The number waiting is checked as it's saved.
-  const key = randomToken();
-  const at = now();
-  await db.prepare("DELETE FROM group_members WHERE group_id = ? AND origin = ? AND approved_at IS NULL").bind(group.id, origin).run();
-  const row = await db.prepare(`INSERT INTO group_members (group_id, origin, name, their_key, key_hash, created_at)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6
-    WHERE (SELECT COUNT(*) FROM group_members WHERE group_id = ?1 AND approved_at IS NULL) < ?7
-    RETURNING id`).bind(group.id, origin, cleanName(them.name), body.key, await sha256(key), at, MAX_WAITING).first();
-  if (!row) return json({ error: "Too many people are waiting to join this group. Try again later." }, 429);
-  return json({ key, id: group.id, name: group.name, about: group.about, owner: owner?.name });
+  return takeJoin(env, group, caller, signed, { maxWaiting: MAX_WAITING });
 }
 
 // --- members' sites --------------------------------------------------------------------------------------------------
 
-/** @returns {Promise<Row<"group_members"> | null>} the member whose key this request carries, or null */
-async function memberFrom(request, env) {
-  const match = /^Bearer (\S+)$/.exec(request.headers.get("Authorization") ?? "");
-  if (!match || !KEY_RE.test(match[1])) return null;
-  return env.DB.prepare("SELECT * FROM group_members WHERE key_hash = ?").bind(await sha256(match[1])).first();
-}
-
 export async function handleGroupApi(request, env, url) {
   const route = `${request.method} ${url.pathname}`;
   const db = env.DB;
-  // hosting: the key this site signs with as host (afterwrd 2), for its owner's passkey to name in its identity.
+  // hosting: the key this site signs with as host, for its owner's passkey to name in its identity.
   if (route === "GET /_group/ping") return json({ afterwrd: "group", version: pkg.version, protocol: PROTOCOL, hosting: (await hostingKey(env)).publicKey });
   if (route === "POST /_group/claim") return claim(request, env, url);
-
-  if (route === "POST /_group/admin/close") {
-    const round = await closingRound(request, env);
-    if (round) return round;
-  }
-  const member = (await memberFrom(request, env)) ?? (await signedMember(request, env, url));
-  const group = member && await theGroup(db);
+  // Its identity, once, from the site that claimed it (its owner's: the only member until it has one).
+  if (route === "POST /_group/identity") return setGroupIdentity(request, env, url);
+  const gone = await groupGone(env);
+  const member = await signedMember(request, env, url);
+  const group = member && !gone ? await theGroup(db) : null;
+  // Once it's gone, its owner's site may still ask it to empty itself (it has), before deleting its Worker.
+  if (gone && route === "POST /_group/admin/end") return json({ ok: true });
+  if (gone) return json({ error: "This group has closed." }, 410);
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
-  if (route === "POST /_group/leave") {
-    if (member.role === "owner") return json({ error: "You own this group: delete it instead." }, 400);
-    await db.batch([db.prepare("DELETE FROM group_members WHERE id = ?").bind(member.id), ...forgetAnswers(db, member.origin)]);
-    return json({ ok: true });
-  }
-  // Someone still waiting (step 6b) may take back their request: a signed `leave` (members.js only lets them do that).
-  if (!member.approved_at && member.identity && route === "POST /_group/records") {
-    return takeMemberRecord(env, group, member, await request.json().catch(() => ({})),
-      { maxMembers: maxMembers(env), tell: (m) => tellRemoved(env, m), forget: forgetAnswers });
-  }
+  const shut = closedGroup(group);
+  const record = (body) => takeMemberRecord(env, group, member, body, { maxMembers: maxMembers(env), closed: Boolean(shut),
+    tell: (m) => tellRemoved(env, m), onClose: (entry) => closed(env, url.origin, group, entry) });
+  // Someone still waiting may take back their request: a signed `leave` (members.js only lets them do that).
+  if (!member.approved_at && route === "POST /_group/records") return record(await request.json().catch(() => ({})));
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
-  if (route === "POST /_group/identity") return setGroupIdentity(request, env, url, member);
-
   const site = url.origin;
-  // A group with an identity (step 6c) has signed posts only (groupposts.js, at /_p/…): nothing goes in the old tables.
-  if (/^(GET|POST) \/_group\/(posts|comments|events|polls)(\/|$)/.test(route) && (await groupSelf(env))) {
-    return json({ error: "This group's posts are signed: your site needs updating to read or write them." }, 410);
-  }
-  const one = /^(GET|POST) \/_group\/(posts|comments)\/(\d{1,15})(\/delete|\/edit)?$/.exec(route);
-  if (route === "GET /_group/posts") {
-    const page = Math.min(10_000, Math.max(1, Number.parseInt(url.searchParams.get("page"), 10) || 1));
-    return json(await groupPage(env, site, group, member, page));
-  }
   if (route === "GET /_group/members") return json(await groupMembers(env, site, group, member));
-  // afterwrd 2 (step 6b): a member's signed decision about someone, or their leaving (groupmembers.js).
-  if (route === "POST /_group/records" && member.identity) {
-    return takeMemberRecord(env, group, member, await request.json().catch(() => ({})),
-      { maxMembers: maxMembers(env), tell: (m) => tellRemoved(env, m), forget: forgetAnswers });
-  }
-  if (one?.[1] === "GET" && one[2] === "posts" && !one[4]) {
-    const post = await groupPost(env, site, group, member, one[3]);
-    return post ? json(post) : json({ error: "That post isn't there any more." }, 404);
-  }
-  if (one?.[1] === "POST" && one[4] === "/edit") {
-    const note = await request.json().catch(() => ({}));
-    try {
-      if (note?.type !== "Note") throw new Refusal("Expected a Note.", 400);
-      if (one[2] === "posts") await editGroupPost(db, group.id, member.origin, one[3], note.content, MAX_GROUP_TEXT);
-      else await editGroupComment(db, group.id, member.origin, one[3], note.content, MAX_COMMENT);
-    } catch (error) {
-      if (error instanceof Refusal) return json({ error: error.message }, error.status);
-      throw error;
-    }
-    return json({ ok: true });
-  }
-  if (one?.[1] === "POST" && one[4]) {
-    const done = one[2] === "posts" ? await deletePost(env, site, group, member, one[3]) : await deleteComment(db, group, member, one[3]);
-    return done ? json({ ok: true }) : json({ error: "That isn't yours, or it's already gone." }, 404);
-  }
-  if (route === "POST /_group/posts") {
-    const note = await request.json().catch(() => ({}));
-    if (note?.type !== "Note") return json({ error: "Expected a Note." }, 400);
-    const { photos, error } = memberPhotos(note.attachment, member.origin);
-    if (error) return json({ error }, 400);
-    const event = note["afterwrd:event"] === undefined ? null : parseEvent(note["afterwrd:event"]);
-    if (note["afterwrd:event"] !== undefined && (!event || event.cancelled_at)) return json({ error: "Unexpected event details." }, 400);
-    const asked = note["afterwrd:poll"] === undefined ? { poll: null } : readPoll(pollFromQuestion(note["afterwrd:poll"]));
-    if (asked.error) return json({ error: asked.error }, 400);
-    const text = cleanText(note.content);
-    const mentioned = await groupMentions(env, group, member, note, text);
-    if (mentioned.error) return json({ error: mentioned.error }, mentioned.status);
-    const made = await createPost(env, group, member, { text, photos, event, poll: asked.poll, mentions: mentioned.mentions });
-    if (made.error) {
-      await mentioned.release();
-      return json({ error: made.error }, made.status);
-    }
-    await notifyGroupMentions(env, site, group, { id: made.id }, { name: member.name, text, mentions: mentioned.mentions, from: member.origin });
-    return json({ id: groupPostId(site, group.id, made.id), "afterwrd:poll": asked.poll ? true : undefined,
-      "afterwrd:rrule": event?.rrule ? true : undefined });
-  }
-  if (route === "GET /_group/events") return json(await groupEvents(env, site, group, member, url.searchParams.get("when") === "past"));
-  const polled = /^POST \/_group\/polls\/(\d{1,15})\/(vote|close)$/.exec(route);
-  if (polled) {
-    const body = await request.json().catch(() => ({}));
-    const trouble = polled[2] === "vote" ? await answerPoll(db, group, member, polled[1], body?.["afterwrd:choices"])
-      : await closePoll(db, group, member, polled[1]);
-    if (trouble) return json({ error: trouble }, trouble === TOO_MANY_ANSWERS ? 429 : 400);
-    // The post as it is now, so the member's site can show it.
-    return json(await groupPost(env, site, group, member, polled[1], 0));
-  }
-  const ev = /^POST \/_group\/events\/(\d{1,15})\/(answer|edit|cancel)$/.exec(route);
-  if (ev) {
-    const body = await request.json().catch(() => ({}));
-    let trouble;
-    if (ev[2] === "answer") {
-      trouble = await answerEvent(db, group, member, ev[1], body?.answer, body?.date);
-    } else if (ev[2] === "cancel") {
-      trouble = await cancelEvent(env, site, group, member, ev[1], body?.date);
-    } else {
-      const event = parseEvent(body?.["afterwrd:event"]);
-      trouble = !event || event.cancelled_at ? "Unexpected event details."
-        : await editEvent(env, site, group, member, ev[1], { text: cleanText(body.content), event });
-    }
-    if (trouble) return json({ error: trouble }, trouble === TOO_MANY_ANSWERS ? 429 : 400);
-    // The event as it is now, so the member's site can keep its copy.
-    return json(await groupPost(env, site, group, member, ev[1], 0));
-  }
-  if (route === "POST /_group/comments") {
-    const note = await request.json().catch(() => ({}));
-    const base = groupPostId(site, group.id, "");
-    const reply = typeof note?.inReplyTo === "string" && note.inReplyTo.startsWith(base) ? note.inReplyTo.slice(base.length) : "";
-    if (note?.type !== "Note" || !/^\d{1,15}$/.test(reply)) return json({ error: "That isn't a post in this group." }, 404);
-    const text = cleanText(note.content);
-    const mentioned = await groupMentions(env, group, member, note, text);
-    if (mentioned.error) return json({ error: mentioned.error }, mentioned.status);
-    const made = await addComment(env, site, group, member, reply, text, mentioned.mentions);
-    if (made.error) {
-      await mentioned.release();
-      return json({ error: made.error }, made.status);
-    }
-    await notifyGroupMentions(env, site, group, made.post, { comment: made.id, name: member.name, text, mentions: mentioned.mentions, from: member.origin });
-    return json({ id: `${groupPostId(site, group.id, reply)}#c${made.id}` });
-  }
+  // A member's signed decision about someone, their leaving, or the owner closing the group (groupmembers.js).
+  if (route === "POST /_group/records") return record(await request.json().catch(() => ({})));
 
   // Running the group.
   if (!url.pathname.startsWith("/_group/admin/")) return json({ error: "Not found." }, 404);
   if (!isAdmin(member)) return json({ error: "Only the group's admins can do that." }, 403);
   if (route === "GET /_group/admin/members") return json(await groupMembers(env, site, group, member, { all: true }));
-  const decision = /^POST \/_group\/admin\/members\/(\d{1,15})\/(approve|decline|remove|admin|member)$/.exec(route);
-  if (decision) {
-    const trouble = await decide(env, group, member, decision[1], decision[2]);
-    return trouble ? json({ error: trouble }, 400) : json({ ok: true });
+  if (route === "POST /_group/admin/end") {
+    if (member.role !== "owner") return json({ error: "Only the group's owner can do that." }, 403);
+    if (!shut || shut.goes > now()) return json({ error: "Close the group first: it goes 30 days after." }, 409);
+    await empty(env);
+    return json({ ok: true });
   }
+  if (shut) return json({ error: "This group has closed." }, 409);
   if (route === "POST /_group/admin/link") {
     const token = randomToken();
     await db.batch([
@@ -1033,10 +358,6 @@ export async function handleGroupApi(request, env, url) {
     await db.prepare("UPDATE groups SET name = ?, about = ? WHERE id = ?")
       .bind(name, cleanText(body.about).slice(0, MAX_GROUP_ABOUT) || null, group.id).run();
     return json({ ok: true });
-  }
-  if (route === "POST /_group/admin/close") {
-    if (member.role !== "owner") return json({ error: "Only the group's owner can delete it." }, 403);
-    return json({ ok: true, remaining: await close(env, group, member) });
   }
   return json({ error: "Not found." }, 404);
 }

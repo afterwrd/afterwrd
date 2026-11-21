@@ -19,7 +19,7 @@ import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.j
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
 import { ID_RE, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf, listOf } from "./lists.js";
-import { MAX_GROUP_PHOTOS } from "./groups.js";
+import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
 import { pushAllowed } from "./notify.js";
@@ -125,8 +125,11 @@ async function trim(env, group) {
 
 /** Asks every signed group's site not asked in the last hour (in the background, from Home). */
 export async function pullGroups(env, from) {
+  // Not a group that's closed and gone (its 30 days are up: groups.js), whose copies go now.
+  await env.DB.prepare("DELETE FROM copies WHERE group_id IN (SELECT id FROM groups WHERE closed_at < ?)").bind(now() - CLOSE_SECONDS).run();
   const { results } = await env.DB.prepare(`SELECT * FROM groups WHERE identity IS NOT NULL AND joined_at IS NOT NULL AND origin IS NOT NULL
-    AND COALESCE(items_checked_at, 0) < ? ORDER BY COALESCE(items_checked_at, 0) LIMIT 20`).bind(now() - PULL_SECONDS).all();
+    AND COALESCE(closed_at, ?2) >= ?2 AND COALESCE(items_checked_at, 0) < ?1 ORDER BY COALESCE(items_checked_at, 0) LIMIT 20`)
+    .bind(now() - PULL_SECONDS, now() - CLOSE_SECONDS).all();
   await Promise.all(results.map((g) => pullGroup(env, from, g).catch(() => null)));
 }
 
@@ -447,6 +450,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     }
     return json({ ok: true }, 202);
   }
+  if (note.kind === "closed") return groupClosed(env, url, group, me, note);
   if (!["comment", "change", "calloff"].includes(note.kind)) return json({ error: "That didn't work." }, 400);
   const { entry, receipt } = note;
   const item = String(note.item ?? "");
@@ -512,6 +516,36 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
       notifyLater(env, url.origin, work, { title: String(group.name), text: `${cancelled ? "Called off" : "Changed"}: ${words}`,
         hidden: cancelled ? "Called off an event you're going to" : "Changed an event you're going to", url: link(item), tag: `event-g${g}-${item}` });
     }
+  }
+  return json({ ok: true }, 202);
+}
+
+/**
+ * The group's owner closed it (step 6e: groups.js): their `close` on its members list, with the group's receipt for
+ * it, checked. The group's marked closed here (it goes 30 days after), and the owner told on Notifications.
+ */
+async function groupClosed(env, url, group, me, note) {
+  const host = String(group.identity);
+  const { entry, receipt } = note;
+  if (!Number.isSafeInteger(entry?.n) || entry.n < 1 || !Number.isSafeInteger(entry.taken) || !ID_RE.test(entry.fp ?? "") || typeof entry.prev !== "string") {
+    return json({ error: "That didn't work." }, 400);
+  }
+  const state = await identityState(env, host);
+  if (!state?.current.owner) return json({ error: "The group's identity couldn't be checked." }, 400);
+  const head = await headOf({ host, list: host, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
+  const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list: host });
+  if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
+  const signed = await learnPeople(env, note.people);
+  const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
+  // Only the group's owner closes it.
+  if (!got || got.fp !== entry.fp || got.record.kind !== "close" || got.record.host !== host || got.record.item !== host
+    || got.record.author !== String(state.current.owner)) return json({ error: "That doesn't check." }, 400);
+  const g = Number(group.id);
+  const marked = await env.DB.prepare("UPDATE groups SET closed_at = ?, closed_by = ? WHERE id = ? AND (closed_by IS NULL OR closed_by != ?)")
+    .bind(entry.taken, entry.fp, g, entry.fp).run();
+  if (marked.meta.changes && got.record.author !== me.person) {
+    const actor = (await namesFor(env.DB, [got.record.author])).get(got.record.author) ?? signed.get(got.record.author) ?? groupSays(note, got.record.author);
+    await keepNotice(env.DB, { kind: "closed", fp: entry.fp, group: g, item: host, target: "", actor, text: String(group.name) });
   }
   return json({ ok: true }, 202);
 }

@@ -5,8 +5,8 @@
 //   POST /_groups/join           {link, sent}: asking to join, with it (membership.js)
 //   POST /_groups/<id>/point     -> {host, item, seen, prev, role_at}: what a record about the group's members says it
 //                                saw, from the list as this site has checked it
-//   POST /_groups/<id>/records   {sent}: an approve, remove, role or leave, passed on
-// And a group with an identity calls this site's /_member/… with signed calls (signedGroup).
+//   POST /_groups/<id>/records   {sent}: an approve, remove, role, leave or (its owner) close, passed on
+// And a group calls this site's /_member/… with signed calls (signedGroup).
 import { callFriend } from "./calls.js";
 import { checkCall } from "./signedcalls.js";
 import { checkProfile, fetchIdentity, hostingKeyFor, identityState, learnIdentity, parseChain } from "./identities.js";
@@ -43,11 +43,12 @@ async function ready(env, sent, kinds, list) {
     ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) } };
 }
 
-/** Keeps the owner's own copy of what they sent a group, with its receipt. */
+/** Keeps the owner's own copy of what they sent a group, with its receipt; returns its fingerprint. */
 async function keepSent(env, record, sent, receipt) {
+  const fp = await fingerprintOf("record", fromB64url(sent.record));
   await env.DB.prepare("INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(await fingerprintOf("record", fromB64url(sent.record)), record.host, record.item, record.kind, JSON.stringify(sent),
-      receipt ? JSON.stringify(receipt) : null, now()).run();
+    .bind(fp, record.host, record.item, record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
+  return fp;
 }
 
 /** Asks to join a group with an identity (`info`: linkInfo's answer), with the owner's signed `join`. Returns its id here. */
@@ -83,6 +84,12 @@ export async function checkMembers(env, group, data) {
     const learnt = chain && (await learnIdentity(env, chain));
     if (learnt?.id === p && info.profile) await checkProfile(info.profile, learnt);
   }
+  // A group with nobody in it yet but its owner has nothing on its list, and nothing for the group to sign.
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  if (!entries.length) {
+    if (data.owner !== state.current.owner) throw new Refusal("The group's members list doesn't check.");
+    return { entries: [], upTo: 0, head: "", problem: null, rules: new MemberRules({ host: person, list: person, owner: String(data.owner) }) };
+  }
   const checked = await checkList({ host: person, hostingKey: state.current.hosting, list: person, owner: String(data.owner ?? ""), Kind: MemberRules,
     entries: Array.isArray(data.entries) ? data.entries : [], signedHead: data.signedHead,
     lookups: { identityOf: (p) => identityState(env, p), delegationOf: async (key) => data.delegations?.[key] ?? null } });
@@ -109,13 +116,12 @@ export async function waitingPoint(env, group) {
   return { host: group.identity, item: group.identity, seen: { n: head.n, h: head.head }, prev: String(row.fp), role_at: null };
 }
 
-/** POST /_groups/<id>/records: the owner's signed record about the group's members, passed on. */
+/** POST /_groups/<id>/records: the owner's signed record about the group's members, passed on. Returns {record, fp}. */
 export async function relayGroupRecord(env, group, sent, send) {
-  const { record, body } = await ready(env, sent, ["approve", "remove", "role", "leave"], String(group.identity));
+  const { record, body } = await ready(env, sent, ["approve", "remove", "role", "leave", "close"], String(group.identity));
   let reply;
   try { reply = await send("/_group/records", body); } catch (error) { throw new Refusal(error.message); }
-  await keepSent(env, record, sent, reply.receipt ?? null);
-  return record;
+  return { record, fp: await keepSent(env, record, sent, reply.receipt ?? null) };
 }
 
 /**

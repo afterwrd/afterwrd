@@ -9,7 +9,7 @@ import { createECDH, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, letInto, settled, siteSql as sql, setUpSigning, startSignedGroup } from "./helpers.mjs";
 import { signCall } from "../../src/signedcalls.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -349,15 +349,17 @@ check("…and Cat can't read it any more", (await asCat(`/_p/items/${key}`)).sta
 check("…and is told, when next her site asks, that she may no longer see it", (await asCat("/_p/items?since=0")).data.gone.includes(key)
   && !(await asBob("/_p/items?since=0")).data.gone.includes(key));
 
-// --- a group's events on the calendar too -----------------------------------------------------------------------------------------
+// --- a group's events on the calendar too (signed: docs/signed-conversations.md, step 6) -------------------------------------------
 
-const waiting = await post(ann, "/_groups/create/local", { origin: G, setup: GROUP_KEY, name: "Walkers", about: "" });
-const annGroup = (await post(ann, "/_groups/create/claim", { id: waiting.id })).id;
+const annGroup = await startSignedGroup(ann, { origin: G, setup: GROUP_KEY, name: "Walkers" });
+const groupPerson = sql(stateG, "SELECT person FROM own_identity")[0].person;
+const groupItem = (title) => sql(stateG, "SELECT id, content, tally FROM items WHERE type = 'post'").find((r) => JSON.parse(r.content).event?.title === title);
 await ann.goto(`${A}/groups/${annGroup}/calendar?month=${picnicMonth}`);
 check("a group's calendar is a month grid too", Boolean(await ann.$(".calendar .cal-grid")));
 await ann.$eval("details.add-event", (d) => { d.open = true; });
 await fill(ann, "details.add-event", { title: "Hill walk", day: ahead(12), time: "09:30" });
 await Promise.all([ann.waitForNavigation(), ann.click("details.add-event button.primary")]);
+check("…and adding one there signs it, for the group to host", Boolean(groupItem("Hill walk")));
 await ann.goto(`${A}/groups/${annGroup}/calendar?month=${ahead(12).slice(0, 7)}`);
 check("…with the group's event on its day", (await text(ann, ".calendar")).includes("Hill walk"));
 await ann.goto(`${A}/events?month=${picnicMonth}`);
@@ -377,20 +379,9 @@ check("the Week view shows that week, day by day", (await text(ann, ".cal-week")
 await ann.goto(`${A}/events?view=list`);
 check("the List view shows everything coming up", (await text(ann, ".cal-upcoming")).includes("Picnic") && (await text(ann, ".cal-upcoming")).includes("Hill walk"));
 
-// --- repeating events, in a group --------------------------------------------------------------------------------------------------
+// --- repeating events, in a group (step 6d: a list per date) --------------------------------------------------------------------------
 
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await ann.click("#make");
-await ann.waitForSelector("#link:not([hidden])");
-const joinLink = await ann.$eval("#link-url", (i) => i.value);
-await bob.goto(`${B}/groups`);
-await bob.type("#join input[name=link]", joinLink);
-await Promise.all([bob.waitForNavigation(), bob.click("#join button:not([type=button])")]);
-await Promise.all([bob.waitForNavigation({ timeout: 30_000 }), bob.click("#go")]);
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
-const bobGroup = sql(stateB, "SELECT id FROM groups")[0].id;
-const bobGroupKey = sql(stateB, "SELECT their_key FROM groups")[0].their_key;
+const bobGroup = await letInto(ann, A, annGroup, bob, B, stateB);
 check("Bob joins Ann's group", n(stateG, "group_members WHERE approved_at IS NOT NULL") === 2);
 
 const clubDays = [14, 21, 28, 35].map(ahead);
@@ -407,22 +398,19 @@ const invalid = await ann.$eval("details.add-event form", (f) => [...f.elements]
 check("the repeating event's form is complete", !invalid, invalid);
 // Sent as its button would (a click can land on the sticky header when the long form scrolls under it).
 await Promise.all([ann.waitForNavigation(), ann.$eval("details.add-event form", (f) => f.requestSubmit(f.querySelector("button.primary")))]);
-const club = sql(stateG, "SELECT * FROM group_events WHERE title = 'Book club'")[0];
-check("Ann adds a weekly event; the group keeps its rule", club?.rrule === `FREQ=WEEKLY;UNTIL=${clubDays[3].replace(/-/g, "")}` && club.last_ends_at > club.starts_at, JSON.stringify(club));
-check("…and she's going to its first date", sql(stateG, `SELECT date FROM group_answers WHERE post_id = ${club.post_id}`).map((r) => r.date).join() === clubDays[0]);
+const club = groupItem("Book club");
+const clubEvent = () => JSON.parse(groupItem("Book club").content).event;
+const clubTally = () => JSON.parse(groupItem("Book club").tally ?? "{}");
+check("Ann adds a weekly event, its rule signed into her post", clubEvent()?.rrule === `FREQ=WEEKLY;UNTIL=${clubDays[3].replace(/-/g, "")}`, JSON.stringify(club));
 
-await bob.goto(`${B}/groups/${bobGroup}/posts/${club.post_id}`);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${club.id}`);
 check("Bob sees how it repeats, and every date", (await text(bob, ".event")).includes("Every week on") && (await bob.$$(".event-dates li")).length === 4);
 await Promise.all([settled(bob), bob.click(`#d-${clubDays[1]} .answers button[value="going"]`)]);
-check("Bob says he's going to the second date only", sql(stateG, `SELECT date, answer FROM group_answers WHERE post_id = ${club.post_id} AND origin = '${B}'`)
-  .map((r) => `${r.date}:${r.answer}`).join() === `${clubDays[1]}:going`);
-check("…his site keeps that date", sql(stateB, `SELECT date FROM events_elsewhere WHERE post_id = ${club.post_id}`).map((r) => r.date).join() === clubDays[1]);
-await bob.goto(`${B}/groups/${bobGroup}/posts/${club.post_id}`);
+check("Bob says he's going to the second date only", clubTally().dates?.[clubDays[1]]?.answers && Object.keys(clubTally().dates).join() === clubDays[1]);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${club.id}?date=${clubDays[1]}`);
 check("…and its guest list names him there, and not on the others", /Going\s+You/.test(await text(bob, `#d-${clubDays[1]}`))
   && !(await text(bob, `#d-${clubDays[2]}`)).includes("You"));
-check("an answer to a repeating event without a date is refused", (await call(G, `/_group/events/${club.post_id}/answer`, bobGroupKey, { answer: "going" })).status === 400);
-check("…as is one to a date it doesn't have", (await call(G, `/_group/events/${club.post_id}/answer`, bobGroupKey, { answer: "going", date: ahead(15) })).status === 400);
-const ics2 = await bob.evaluate((p) => fetch(p).then((r) => r.text()), `/groups/${bobGroup}/posts/${club.post_id}/event.ics`);
+const ics2 = await bob.evaluate((p) => fetch(p).then((r) => r.text()), `/groups/${bobGroup}/posts/${club.id}/event.ics`);
 // Each later date's moment (RDATE): a rule from a start in UTC would drift by an hour when the clocks change.
 const rdates = (ics) => (/^RDATE:(.*)$/m.exec(ics.replace(/\r\n /g, ""))?.[1] ?? "").split(",").filter(Boolean);
 check("its calendar file lists every date", rdates(ics2).length === 3 && !/RRULE/.test(ics2), ics2.slice(0, 400));
@@ -433,59 +421,44 @@ check("Bob's List shows each date, marked going or not", listed.length === 4 && 
 // Calling off one date.
 phoneBefore = bobPhone.length;
 check("nothing since reached Bob's phone: not forged notes, answers, comments, or a group's new event", phoneBefore === 2, String(phoneBefore));
-await ann.goto(`${A}/groups/${annGroup}/posts/${club.post_id}`);
+await ann.goto(`${A}/groups/${annGroup}/posts/${club.id}`);
 await Promise.all([settled(ann), ann.click(`#d-${clubDays[1]} .call-off-date button`)]);
-check("Ann calls off the second date", n(stateG, `group_event_skips WHERE post_id = ${club.post_id} AND date = '${clubDays[1]}'`) === 1
-  && !sql(stateG, `SELECT cancelled_at FROM group_events WHERE post_id = ${club.post_id}`)[0].cancelled_at);
-check("Bob, going that day, is told", await waitFor(() => n(stateB, `group_inbox WHERE kind = 'cancelled' AND date = '${clubDays[1]}'`) === 1));
+check("Ann calls off the second date", clubTally().dates?.[clubDays[1]]?.off && !clubEvent().cancelled);
+check("Bob, going that day, is told", await waitFor(() => n(stateB, `notices WHERE kind = 'cancelled' AND target LIKE '%?date=${clubDays[1]}'`) === 1));
 check("…on his phone too", await phoneTold(phoneBefore), String(bobPhone.length));
-check("…his copy of that date is off", Boolean(sql(stateB, `SELECT cancelled_at FROM events_elsewhere WHERE post_id = ${club.post_id}`)[0]?.cancelled_at));
+check("…his copy of the event has that date off", JSON.parse(sql(stateB, `SELECT content FROM copies WHERE id = '${club.id}'`)[0].content).event.skipped?.includes(clubDays[1]));
 await bob.goto(`${B}/activity`);
 check("…and Notifications say one date's off", (await text(bob)).includes("called off one date of an event you're going to"));
-await bob.goto(`${B}/groups/${bobGroup}/posts/${club.post_id}`);
-check("the other dates go on", (await bob.$$(".event-dates li.off")).length === 1 && Boolean(await bob.$(`#d-${clubDays[2]} .answers`)));
-check("no answer is taken for the date that's off", (await call(G, `/_group/events/${club.post_id}/answer`, bobGroupKey, { answer: "maybe", date: clubDays[1] })).status === 400);
-const icsOff = await bob.evaluate((p) => fetch(p).then((r) => r.text()), `/groups/${bobGroup}/posts/${club.post_id}/event.ics`);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${club.id}`);
+check("the other dates go on, and the one that's off takes no answers", (await bob.$$(".event-dates li.off")).length === 1
+  && Boolean(await bob.$(`#d-${clubDays[2]} .answers`)) && !(await bob.$(`#d-${clubDays[1]} .answers`)));
+const icsOff = await bob.evaluate((p) => fetch(p).then((r) => r.text()), `/groups/${bobGroup}/posts/${club.id}/event.ics`);
 check("…and the calendar file leaves it out", rdates(icsOff).join() === rdates(ics2).slice(1).join(), icsOff.slice(0, 400));
-// A group can't pass off a change as calling a date off, or move a series to start on a day that's over.
-const groupKeyForBob = sql(stateG, `SELECT their_key FROM group_members WHERE origin = '${B}'`)[0].their_key;
-const clubNote = (change, date) => call(B, "/_member/notify", groupKeyForBob, { type: "Update", "afterwrd:change": change, "afterwrd:date": date,
-  actor: { type: "Person", name: "Ann Example" }, object: { type: "Note", id: `${G}/groups/1/posts/${club.post_id}`,
-    "afterwrd:event": { type: "Event", name: "Book club", startTime: new Date(club.starts_at * 1000).toISOString(),
-      endTime: new Date(club.ends_at * 1000).toISOString(), "afterwrd:timeZone": "Europe/London", "afterwrd:rrule": club.rrule } } });
-check("a 'changed' note naming one date is refused", (await clubNote("changed", clubDays[2])).status === 400);
-const annGroupKey = sql(stateA, "SELECT their_key FROM groups")[0].their_key;
-const weekAgo = new Date(Date.now() - 7 * 86400_000);
-const pastStart = await call(G, `/_group/events/${club.post_id}/edit`, annGroupKey, { type: "Note", content: "", "afterwrd:event": {
-  type: "Event", name: "Book club", startTime: weekAgo.toISOString(), "afterwrd:timeZone": "Europe/London",
-  "afterwrd:rrule": `FREQ=WEEKLY;UNTIL=${clubDays[3].replace(/-/g, "")}` } });
-check("…and a series can't be moved to start on a day that's over", pastStart.status === 400);
 
-// Changing the time moves every date, and Bob's copies with it.
+// Changing the time moves every date, and Bob's copy with it.
 await Promise.all([settled(bob), bob.click(`#d-${clubDays[2]} .answers button[value="maybe"]`)]);
-await ann.goto(`${A}/groups/${annGroup}/posts/${club.post_id}/edit`);
+await ann.goto(`${A}/groups/${annGroup}/posts/${club.id}/edit`);
 check("the change form keeps how it repeats", (await ann.$eval("select[name=repeat]", (el) => el.value)) === "weekly"
   && (await ann.$eval("input[name=repeat_until]", (i) => i.value)) === clubDays[3]);
 await ann.$eval("input[name=start_time]", (i) => { i.value = "19:30"; });
 phoneBefore = bobPhone.length;
 await Promise.all([ann.waitForNavigation(), ann.click(".event-form button.primary")]);
-check("Bob, who might go, is told it changed", await waitFor(() => n(stateB, "group_inbox WHERE kind = 'changed'") >= 1));
+check("Bob, who might go, is told it changed", await waitFor(() => n(stateB, "notices WHERE kind = 'changed' AND group_id IS NOT NULL") >= 1));
 check("…on his phone too", await phoneTold(phoneBefore), String(bobPhone.length));
-const copies = sql(stateB, `SELECT date, starts_at FROM events_elsewhere WHERE post_id = ${club.post_id} ORDER BY date`);
 const londonTime = (t) => new Date(t * 1000).toLocaleTimeString("en-GB", { timeZone: "Europe/London", hour: "2-digit", minute: "2-digit" });
-check("…and each of his dates moves to 19:30", copies.length === 2 && copies.every((c) => londonTime(c.starts_at) === "19:30"), JSON.stringify(copies));
-// In the group too: a member answering over and over runs out of answers for a while.
-const groupFlips = [];
-for (let i = 0; i < 32; i++) groupFlips.push((await call(G, `/_group/events/${club.post_id}/answer`, bobGroupKey, { answer: i % 2 ? "going" : "maybe", date: clubDays[3] })).status);
-check("a member answering again and again is limited", groupFlips.includes(429) && groupFlips.indexOf(429) <= 30, groupFlips.join(","));
-// And calling off one date at a time is limited to a few a day per event.
+check("…and his copy moves to 19:30", londonTime(JSON.parse(sql(stateB, `SELECT content FROM copies WHERE id = '${club.id}'`)[0].content).event.starts_at) === "19:30");
+// Calling off one date at a time is limited to a few a day per event (each tells everyone going that day).
+const real = groupItem("Book club").tally;
+const busy = JSON.parse(real);
 const nowS = Math.floor(Date.now() / 1000);
-sql(stateG, `INSERT INTO group_event_skips (post_id, date, cancelled_at) VALUES ${Array.from({ length: 9 }, (_, i) => `(${club.post_id}, '2000-01-0${i + 1}', ${nowS})`).join(", ")}`);
-const eleventh = await call(G, `/_group/events/${club.post_id}/cancel`, annGroupKey, { date: clubDays[3] });
-check("calling off an eleventh date in a day is refused", eleventh.status === 400 && (await eleventh.json()).error.includes("up to 10 dates"));
-sql(stateG, `DELETE FROM group_event_skips WHERE date LIKE '2000-%'`);
+for (let i = 1; i <= 9; i++) busy.dates[`2000-01-0${i}`] = { answers: {}, off: { by: groupPerson, at: nowS }, list: null };
+sql(stateG, `UPDATE items SET tally = '${JSON.stringify(busy).replace(/'/g, "''")}' WHERE id = '${club.id}'`);
+await ann.goto(`${A}/groups/${annGroup}/posts/${club.id}`);
+await Promise.all([settled(ann), ann.click(`#d-${clubDays[3]} .call-off-date button`)]);
+check("calling off an eleventh date in a day is refused", !JSON.parse(groupItem("Book club").tally).dates?.[clubDays[3]]?.off);
+sql(stateG, `UPDATE items SET tally = '${real.replace(/'/g, "''")}' WHERE id = '${club.id}'`);
 await bob.setViewport({ width: 390, height: 844 });
-await bob.goto(`${B}/groups/${bobGroup}/posts/${club.post_id}`);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${club.id}`);
 await bob.screenshot({ path: `${OUT}/events-repeating-phone.png`, fullPage: true });
 await bob.setViewport({ width: 1280, height: 800 });
 
@@ -509,7 +482,7 @@ phoneBefore = bobPhone.length;
 await Promise.all([settled(ann), ann.click('.event form[data-sign="event-cancel"] button')]);
 check("Ann calls it off, in a signed change", JSON.parse(sql(stateA, `SELECT content FROM items WHERE id = '${key}'`)[0].content).event.cancelled === true
   && (await eventIn(ann))?.off);
-check("Bob is told", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled'") === 1));
+check("Bob is told", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled' AND connection_id IS NOT NULL") === 1));
 check("…on his phone too", await phoneTold(phoneBefore), String(bobPhone.length));
 check("…his copy says so", JSON.parse(copyOf(stateB, key).content).event.cancelled === true);
 await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
@@ -532,15 +505,15 @@ check("Download everything includes events, answers and who they're for", export
 await ann.click("article.own header details.more summary");
 await Promise.all([settled(ann), ann.click("article.own header .delete")]);
 check("deleting it takes its event and who it was for", n(stateA, `items WHERE id = '${quiz}'`) === 0 && n(stateA, `item_guests WHERE item = '${quiz}'`) === 0);
-check("…and tells Bob it's off", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled'") === 2 && n(stateB, `copies WHERE id = '${quiz}'`) === 0));
+check("…and tells Bob it's off", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled' AND connection_id IS NOT NULL") === 2 && n(stateB, `copies WHERE id = '${quiz}'`) === 0));
 
 // Removing a friend forgets what they were invited to, on both sides.
 await ann.goto(`${A}/friend/${bobId}/posts`);
 await ann.$eval('form[action$="/disconnect"]', (f) => f.requestSubmit());
 await waitFor(() => n(stateA, `connections WHERE id = ${bobId}`) === 0);
 check("removing Bob forgets his invitations and answers", n(stateA, `item_guests WHERE connection_id = ${bobId}`) === 0 && answerOf(key, stateB) === null);
-check("…and his site forgets Ann's events (not the group's)", await waitFor(() => n(stateB, "copies") === 0)
-  && n(stateB, "events_elsewhere WHERE group_id IS NOT NULL") > 0);
+check("…and his site forgets Ann's events (not the group's)", await waitFor(() => n(stateB, "copies WHERE connection_id IS NOT NULL") === 0)
+  && n(stateB, "copies WHERE group_id IS NOT NULL") > 0);
 
 check("no script errors", errors.length === 0, errors.join("; "));
 pushService.close();

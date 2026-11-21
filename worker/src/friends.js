@@ -30,23 +30,6 @@ export function parseMedia(m, site) {
   };
 }
 
-/**
- * Whether, and how, something was edited: { edited_at, earlier: [{text, replaced_at}] } (both empty if not). At most
- * 20 earlier versions, each no longer than `max`, oldest first, none replaced before it was written or after it was
- * last changed.
- */
-export function parseEdits(item, created, max) {
-  const editedAt = seconds(item?.updated);
-  if (editedAt === null || editedAt < created) return { edited_at: null, earlier: [] };
-  const list = Array.isArray(item["afterwrd:earlier"]) ? item["afterwrd:earlier"].slice(-20) : [];
-  const earlier = list.flatMap((v) => {
-    const at = seconds(v?.["afterwrd:replaced"]);
-    const words = typeof v?.content === "string" && v.content.length <= max ? v.content : null;
-    return words !== null && at !== null && at >= created && at <= editedAt ? [{ text: words, replaced_at: at }] : [];
-  });
-  return { edited_at: editedAt, earlier };
-}
-
 /** One of their Facebook posts, as their site sent it; null if it isn't one. */
 export function parseNote(note, site) {
   const key = own(site, note?.id, "/posts/");

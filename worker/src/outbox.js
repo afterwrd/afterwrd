@@ -1,11 +1,11 @@
 // Notes waiting to go to other sites, sent a batch at a time by this Durable Object's alarm (and, apart from them, in a
 // separate object of this class named "vault", the few secrets the site keeps for automatic updates: auto.js, the vault
-// table below): fat notes about signed posts to friends' sites (notes.js: POST /_p/notes, signed) and, in a group's
-// Worker, notes to its members' sites (notify.js: POST /_member/notify, with the member's key). One request may only
-// call 50 other sites on Cloudflare's free plan; batches of 40, one after another, let a post reach any number of
-// friends. A site that can't be reached is tried again later and then given up on; a site that says no (it's
-// disconnected, or doesn't want the note) isn't asked again. Notes hold the connection or member, not its address or
-// key: those are looked up when sending, so a disconnect (or a member leaving) stops them at once.
+// table below): fat notes about signed posts to friends' sites, or, in a group's Worker, to its members' sites (notes.js,
+// groupposts.js: POST /_p/notes, signed). One request may only call 50 other sites on Cloudflare's free plan; batches of
+// 40, one after another, let a post reach any number of friends. A site that can't be reached is tried again later and
+// then given up on; a site that says no (it's disconnected, or doesn't want the note) isn't asked again. Notes hold the
+// connection or member, not its address: that's looked up when sending, so a disconnect (or a member leaving) stops
+// them at once.
 //
 // One more object of this class, named "site", holds the site's whole database and answers its requests, right next
 // to the data (docs/site-object-plan.md). The other objects reach that database through it (sqlite.js remote).
@@ -24,23 +24,17 @@ import { groupNoteFor } from "./groupposts.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
-const RETRY_SECONDS = [60, 300, 1800, 7200, 21600];
 // Fat notes about signed posts (notes.js): a friend's site that can't be reached is tried again for about two days.
 const NOTE_RETRY_SECONDS = [60, 300, 1800, 7200, 21600, 43200, 86400];
 const DONE = Number.MAX_SAFE_INTEGER; // a fat note's `due` once everyone's had it (only retries may be left)
 
 export const outbox = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
 
-// Who each kind of keyed note goes to: its table here, how to find their site and key, and where to send it. (Groups'
-// only, until groups are signed too: docs/signed-conversations.md, step 6.)
-const MEMBERS = "SELECT id, origin, their_key, identity FROM group_members WHERE approved_at IS NOT NULL AND id IN";
-const KINDS = {
-  member_notes: { column: "member_id", path: "/_member/notify", sql: MEMBERS },
-};
 // Queues there once were: for messages between friends and in groups' chats (gone in 0.47.0); friends to fetch again
-// (refreshes, then refresh_queue); and notes and invitations to friends' sites before posts were signed (notes,
-// invites: gone in step 4e). Anything still waiting in them goes, unsent.
-const GONE = ["messages", "group_messages", "member_messages", "refreshes", "refresh_queue", "notes", "invites"];
+// (refreshes, then refresh_queue); notes and invitations to friends' sites before posts were signed (notes, invites:
+// gone in step 4e); and notes to groups' members with their keys (member_notes: gone in step 6e). Anything still
+// waiting in them goes, unsent.
+const GONE = ["messages", "group_messages", "member_messages", "refreshes", "refresh_queue", "notes", "invites", "member_notes"];
 
 /** While the site's database is being moved into its object (sitecopy.js): a page or a JSON error, and nothing done. */
 function moving(request) {
@@ -70,12 +64,6 @@ export class Outbox extends DurableObject {
     const counted = measured(env);
     this.env = { ...counted, DB: remote(counted) };
     for (const table of GONE) this.sql.exec(`DROP TABLE IF EXISTS ${table}`);
-    for (const [table, { column }] of Object.entries(KINDS)) {
-      this.sql.exec(`CREATE TABLE IF NOT EXISTS ${table} (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ${column} INTEGER NOT NULL, body TEXT NOT NULL,
-        tries INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
-      )`);
-    }
     // Secrets the site keeps for itself (auto.js), only ever in the object named "vault", never the "outbox" one: the
     // background grant's refresh token, which changes at every use (so it can't be a Worker secret: changing one makes
     // a new version), and the key its own update steps carry. Here rather than in D1, so they're never in an export, a
@@ -186,18 +174,6 @@ export class Outbox extends DurableObject {
     await this.wake(at);
   }
 
-  /** Queues `body` for each group member id (in a group's Worker, members' sites). */
-  sendToMembers(memberIds, body) {
-    return this.queue("member_notes", memberIds, body);
-  }
-
-  async queue(table, ids, body) {
-    const text = JSON.stringify(body);
-    const at = Date.now();
-    for (const id of ids) this.sql.exec(`INSERT INTO ${table} (${KINDS[table].column}, body, due) VALUES (?, ?, ?)`, id, text, at);
-    await this.wake(at);
-  }
-
   /** Sees that the alarm goes off by `at`, even if it was set for later (a retry hours away). */
   async wake(at) {
     const alarm = await this.ctx.storage.getAlarm();
@@ -217,8 +193,7 @@ export class Outbox extends DurableObject {
     }
     let room = BATCH;
     room -= await this.sendNotes(room);
-    for (const table of Object.keys(KINDS)) room -= await this.sendDue(table, room);
-    const next = Math.min(...[...Object.keys(KINDS), "fat_notes", "note_retries"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t} WHERE due < ?`, DONE).one().due ?? Infinity));
+    const next = Math.min(...["fat_notes", "note_retries"].map((t) => this.sql.exec(`SELECT MIN(due) AS due FROM ${t} WHERE due < ?`, DONE).one().due ?? Infinity));
     if (next !== Infinity) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 1000));
   }
 
@@ -328,37 +303,5 @@ export class Outbox extends DurableObject {
     return calls.length;
   }
 
-  /** Sends up to `limit` notes from `table` that are due; returns how many it tried. */
-  async sendDue(table, limit) {
-    if (limit <= 0) return 0;
-    const { column, path, sql } = KINDS[table];
-    const at = Date.now();
-    const due = this.sql.exec(`SELECT * FROM ${table} WHERE due <= ? ORDER BY id LIMIT ?`, at, limit).toArray();
-    const ids = [...new Set(due.map((n) => n[column]))];
-    const { results } = ids.length ? await this.env.DB.prepare(`${sql} (${ids.map(() => "?").join(",")})`).bind(...ids).all() : { results: [] };
-    const recipients = new Map(results.map((c) => /** @type {[any, any]} */ ([c.id, c])));
-    await Promise.all(due.map(async (note) => {
-      const to = recipients.get(note[column]);
-      let delivered = false;
-      let again = Boolean(to);
-      if (to) {
-        try {
-          // A member who joined with an identity (step 6b) is called with a signed call; one from before, with its key.
-          const response = to.identity ? await callMember(this.env, to, path, JSON.parse(String(note.body)))
-            : await fetch(`${to.origin}${path}`, {
-              method: "POST", redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
-              headers: { Authorization: `Bearer ${to.their_key}`, "Content-Type": "application/json" }, body: note.body,
-            });
-          await response.body?.cancel();
-          delivered = response.ok;
-          again = response.status >= 500 || response.status === 429; // anything else won't change by asking again
-        } catch {} // unreachable: try again later
-      }
-      const finished = delivered || !again || note.tries >= RETRY_SECONDS.length;
-      if (finished) this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, note.id);
-      else this.sql.exec(`UPDATE ${table} SET tries = tries + 1, due = ? WHERE id = ?`, at + RETRY_SECONDS[note.tries] * 1000, note.id);
-    }));
-    return due.length;
-  }
 }
 

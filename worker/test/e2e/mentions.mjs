@@ -8,7 +8,7 @@
 import { createECDH, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { count as n, settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, letInto, settled, siteCall, siteSql as sql, setUpSigning, signedGroupPost, signedGroupRecord, startSignedGroup } from "./helpers.mjs";
 import { signCall } from "../../src/signedcalls.js";
 import { signHead } from "../../src/lists.js";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -96,7 +96,6 @@ async function mention(page, box, typed) {
   return offered;
 }
 const mentionsField = (page, form) => page.$eval(`${form} input[name=mentions]`, (i) => JSON.parse(i.value)).catch(() => []);
-const groupInbox = (state, kind) => n(state, `group_inbox WHERE kind = '${kind}'`);
 /** Home opened until a friend's card has `words`, as its copy of their posts catches up (feed.js). */
 async function friendCard(page, site, words) {
   let id = null;
@@ -303,32 +302,21 @@ check("a comment note whose receipt doesn't check is refused", (await asBob({ v:
 check("…and nothing's kept", notices(stateA, "mention") === mentionsBefore);
 check("an unsigned note is refused", (await fetch(`${A}/_p/notes`, { method: "POST", headers: { "Afterwrd-From": B }, body: "{}" })).status === 401);
 
-// --- in a group ---------------------------------------------------------------------------------------------------------
+// --- in a group (signed: docs/signed-conversations.md, step 6) ----------------------------------------------------------
 
-const waiting = await post(ann, "/_groups/create/local", { origin: G, setup: GROUP_KEY, name: "Walkers", about: "" });
-const annGroup = (await post(ann, "/_groups/create/claim", { id: waiting.id })).id;
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await ann.click("#make");
-await ann.waitForSelector("#link:not([hidden])");
-const link = await ann.$eval("#link-url", (i) => i.value);
-for (const [page, site] of [[bob, B], [cat, C]]) {
-  await page.goto(`${site}/groups`);
-  await page.type("#join input[name=link]", link);
-  await Promise.all([page.waitForNavigation(), page.click("#join button:not([type=button])")]);
-  await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("#go")]);
-}
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
+const annGroup = await startSignedGroup(ann, { origin: G, setup: GROUP_KEY, name: "Walkers" });
+const bobGroup = await letInto(ann, A, annGroup, bob, B, stateB);
+const catGroup = await letInto(ann, A, annGroup, cat, C, stateC);
 check("the group has three members", n(stateG, "group_members WHERE approved_at IS NOT NULL") === 3);
-const bobGroup = sql(stateB, "SELECT id FROM groups")[0].id;
-const catGroup = sql(stateC, "SELECT id FROM groups")[0].id;
+const groupPerson = sql(stateG, "SELECT person FROM own_identity")[0].person;
+const groupNotices = (state, kind) => n(state, `notices WHERE group_id IS NOT NULL AND kind = '${kind}'`);
+const here = (words) => ({ type: "post", text: words, here: true });
 
 await cat.goto(`${C}/groups/${catGroup}`);
 const catOffered = await mention(cat, "#composer textarea", "@");
 check("in a group, the @ list is its members, without @here for a member", catOffered.includes("@Bob Example") && catOffered.includes("@Ann Example")
   && !catOffered.includes("@here"), catOffered.join());
-const refused = await post(cat, `/_groups/${catGroup}/posts`, { text: "Hello @here", mentions: [{ name: "here", origin: "here" }] });
+const refused = await signedGroupPost(cat, catGroup, groupPerson, here("Hello @here"));
 check("…and the group refuses @here from a member", refused.status === 400 && /Only the group's admins can use @here/.test(refused.error ?? ""), JSON.stringify(refused));
 
 await ann.goto(`${A}/groups/${annGroup}`);
@@ -336,13 +324,13 @@ const annOffered = await mention(ann, "#composer textarea", "@he");
 check("its owner is offered @here", annOffered.join() === "@here", annOffered.join());
 await ann.type("#composer textarea", "the walk's moved to 7");
 await Promise.all([ann.waitForNavigation({ timeout: 60_000 }), ann.click("#composer button.post")]);
-check("@here tells everyone else in the group", await waitFor(() => groupInbox(stateB, "here") === 1 && groupInbox(stateC, "here") === 1));
+check("@here tells everyone else in the group", await waitFor(() => groupNotices(stateB, "here") === 1 && groupNotices(stateC, "here") === 1));
 check("…on Bob's phone, and not Cat's (mentions off)", await waitFor(() => toPhone("bob") === 3) && toPhone("cat") === 1, `${toPhone("bob")} ${toPhone("cat")}`);
-check("…and not the writer", groupInbox(stateA, "here") === 0);
+check("…and not the writer", groupNotices(stateA, "here") === 0);
 await bob.goto(`${B}/groups/${bobGroup}`);
 check("…shown as a mention in the group", (await bob.$eval("article.in-group strong.mention", (s) => s.textContent).catch(() => "")) === "@here");
 await bob.goto(`${B}/activity`);
-check("…and on Notifications", (await text(bob)).includes("Ann Example wrote to everyone (@here) in a post in Walkers"));
+check("…and on Notifications", (await text(bob)).includes("Ann Example wrote to everyone (@here) in a post in Walkers"), (await text(bob)).slice(0, 300));
 
 // Ann lets anyone use it; Cat can then, a few times a day.
 await ann.goto(`${A}/groups/${annGroup}/members`);
@@ -350,38 +338,26 @@ await ann.click("#here input[name=anyone]");
 await Promise.all([ann.waitForNavigation(), ann.click("#here button")]);
 check("the owner can let anyone use @here", n(stateG, "groups WHERE here_anyone = 1") === 1 && await ann.$eval("#here input[name=anyone]", (i) => i.checked));
 const heres = [];
-for (let i = 0; i < 4; i++) heres.push(await post(cat, `/_groups/${catGroup}/posts`, { text: `Lifts? @here (${i})`, mentions: [{ name: "here", origin: "here" }] }));
+for (let i = 0; i < 4; i++) heres.push(await signedGroupPost(cat, catGroup, groupPerson, here(`Lifts? @here (${i})`)));
 check("…then a member can, three times a day", heres.slice(0, 3).every((r) => r.status === 200), JSON.stringify(heres.slice(0, 3)));
 check("…and no more", heres[3].status === 400 && /used a lot today/.test(heres[3].error ?? ""), JSON.stringify(heres[3]));
-check("…each telling the others", await waitFor(() => groupInbox(stateB, "here") === 4));
+check("…each telling the others", await waitFor(() => groupNotices(stateB, "here") === 4));
 
-// Mentioning by name in a group: members only.
-const gPost = sql(stateG, "SELECT id FROM group_posts ORDER BY id LIMIT 1")[0].id;
-const named = await bob.evaluate(async (g, p, c) => {
-  const body = new URLSearchParams({ post: String(p), text: "@Cat Example and @Zed Stranger, thoughts?", back: `/groups/${g}`,
-    mentions: JSON.stringify([{ name: "Cat Example", origin: c }, { name: "Zed Stranger", origin: "https://zed.example" }]) });
-  return (await fetch(`/_groups/${g}/comments`, { method: "POST", body, redirect: "manual" })).type;
-}, bobGroup, gPost, C);
-check("a group comment can mention a member by name", named === "opaqueredirect" && await waitFor(() => groupInbox(stateC, "mention") === 1));
-check("…and the group keeps only members' mentions", sql(stateG, "SELECT mentions FROM group_comments").every((c) => !(c.mentions ?? "").includes("zed.example"))
-  && sql(stateG, "SELECT mentions FROM group_comments").some((c) => (c.mentions ?? "").includes(C)));
-
-// One member mentioning the same person tells them a few times a day at most (notify.js MENTION_PAIR_DAILY).
-const catMentionsBefore = groupInbox(stateC, "mention");
-for (let i = 0; i < 7; i++) {
-  await bob.evaluate(async (g, p, c, n) => {
-    const body = new URLSearchParams({ post: String(p), text: `@Cat Example again (${n})`, back: `/groups/${g}`,
-      mentions: JSON.stringify([{ name: "Cat Example", origin: c }]) });
-    await fetch(`/_groups/${g}/comments`, { method: "POST", body, redirect: "manual" });
-  }, bobGroup, gPost, C, i);
-}
-await new Promise((r) => setTimeout(r, 4000));
-check("one member can't keep telling the same person", groupInbox(stateC, "mention") - catMentionsBefore === 4,
-  String(groupInbox(stateC, "mention") - catMentionsBefore));
+// Mentioning by name in a group: members only, by who they are.
+const gPost = sql(stateG, "SELECT id FROM items WHERE type = 'post' ORDER BY created_at LIMIT 1")[0].id;
+const point = (id) => { const r = sql(stateG, `SELECT n, head FROM lists WHERE id = '${id}'`)[0]; return { n: r.n, h: r.head }; };
+const catPerson = sql(stateC, "SELECT person FROM own_identity")[0].person;
+const outsider = "z".repeat(43);
+const sayTo = (people, words) => signedGroupRecord(bob, bobGroup, { kind: "comment", host: groupPerson, item: gPost, seen: point(gPost),
+  prev: sql(stateB, `SELECT fp FROM sent WHERE item = '${gPost}' ORDER BY created_at DESC, rowid DESC LIMIT 1`)[0]?.fp ?? null, mentions: people.map((p) => p.person) },
+  { text: words, mentions: people });
+check("a group comment mentioning someone who isn't in it is refused", (await sayTo([{ name: "Zed Stranger", person: outsider }], "@Zed Stranger, thoughts?")) === 400);
+check("…and one mentioning a member, by who they are, tells them", (await sayTo([{ name: "Cat Example", person: catPerson }], "@Cat Example, thoughts?")) !== 400
+  && await waitFor(() => groupNotices(stateC, "mention") === 1));
 // The group's @here allowance holds back ordinary members only: with it used up, Ann (its owner) can still.
 sql(stateG, `INSERT INTO here_log (member_id, at) VALUES ${Array.from({ length: 10 }, () => "(999, strftime('%s','now'))").join(",")}`);
-const bobHere = await post(bob, `/_groups/${bobGroup}/posts`, { text: "Again @here", mentions: [{ name: "here", origin: "here" }] });
-const annHere = await post(ann, `/_groups/${annGroup}/posts`, { text: "Admins can still @here", mentions: [{ name: "here", origin: "here" }] });
+const bobHere = await signedGroupPost(bob, bobGroup, groupPerson, here("Again @here"));
+const annHere = await signedGroupPost(ann, annGroup, groupPerson, here("Admins can still @here"));
 check("with the group's @here allowance used, members can't, but its admins can", bobHere.status === 400 && annHere.status === 200,
   `${JSON.stringify(bobHere)} ${JSON.stringify(annHere)}`);
 

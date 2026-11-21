@@ -1,10 +1,10 @@
 // Events (events.js, calendar.js): an event on a post, its answers and guests, the form, and the calendars (Events,
 // and a group's). Views only draw: they read nothing and change nothing.
 
-import { dateKey, datesOf, dayName, eventDay, eventDays, eventFormValues, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
+import { dateKey, datesOf, dayName, eventDay, eventDays, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
 import { asset, icon } from "./nav.js";
 import { html, raw } from "./html.js";
-import { groupBase, groupHead, mayDelete } from "./groups.js";
+import { groupBase, groupHead } from "./groups.js";
 import { groupItemCard } from "./items.js";
 import { page } from "./layout.js";
 
@@ -99,73 +99,6 @@ export function guestsBlock(ctx, p) {
     <span class="name">${g.name}</span> <span class="meta">${answer ? answers[answer] : waiting(g)}</span>
   </li>`)}</ul>` : html`<p class="meta">Nobody.</p>`}
 </details>`;
-}
-
-/** An event in a group post (see eventBlock; one that repeats, repeatingBlock). */
-export function groupEventBlock(ctx, g, p, { full = false } = {}) {
-  const base = `${groupBase(g)}/posts/${p.id}`;
-  if (p.event.rrule) return repeatingBlock(ctx, g, p, { full });
-  return eventBlock(ctx, p.event, { href: base, full, answer: { action: `/_groups/${g.id}/events/${p.id}/answer` }, ics: `${base}/event.ics`,
-    edit: p.mine && `${base}/edit`, cancel: mayDelete(g, p) && `/_groups/${g.id}/events/${p.id}/cancel`,
-    cancelNote: "Call this event off? Everyone going will be told." });
-}
-
-/**
- * A repeating event in a group post: how it repeats, and its next date (or the one asked for, ?date=) with who's
- * coming and the owner's answer to it. `full` (its own page): every date still to come, each answered on its own, with
- * who's coming and, for whoever may, calling off that date; then adding it to a calendar, changing it, calling it all
- * off.
- */
-function repeatingBlock(ctx, g, p, { full = false }) {
-  const e = p.event;
-  const base = `${groupBase(g)}/posts/${p.id}`;
-  const back = ctx.url.pathname + ctx.url.search;
-  const at = Date.now() / 1000;
-  const asked = ctx.url.searchParams.get("date");
-  // On its own page, every date; on a card, only those still to come (or the one asked for) are worked out.
-  const dates = datesOf(e, full || asked ? {} : { from: at }).map((d) => ({ ...d, over: finishedAt(d) < at }));
-  if (!dates.length) dates.push(...datesOf(e).slice(-1).map((d) => ({ ...d, over: true })));
-  const next = dates.find((d) => d.date === asked) ?? dates.find((d) => !d.over && !d.cancelled_at) ?? dates.at(-1);
-  const over = dates.every((d) => d.over);
-  const names = (list) => list.map((x, i) => (x.from === ctx.url.origin ? (i ? "you" : "You") : x.name)).join(", ");
-  const counts = (d) => [d.going.length && `${d.going.length} going`, d.maybe.length && `${d.maybe.length} maybe`].filter(Boolean).join(" · ");
-  const answers = (d, label) => html`<form method="post" action="/_groups/${g.id}/events/${p.id}/answer" class="answers" aria-label="${label}" data-inplace>
-    <input type="hidden" name="back" value="${back}"><input type="hidden" name="date" value="${d.date}">
-    ${ANSWER_LABELS.map(([value, words]) => html`<button class="chip${d.answer === value ? " primary" : ""}" name="answer" value="${value}"
-      aria-pressed="${d.answer === value ? "true" : "false"}">${words}</button>`)}
-  </form>`;
-  const open = (d) => !e.cancelled_at && !d.cancelled_at && !d.over;
-  return html`<div class="event repeating${e.cancelled_at ? " cancelled" : ""}">
-  <div class="event-head">
-    ${dateTile(next)}
-    <div class="event-what">
-      <a class="event-title" href="${base}">${e.title}</a>
-      ${e.cancelled_at ? html`<span class="badge as-written">Called off</span>` : over ? html`<span class="badge as-written">Over</span>` : ""}
-      <p class="meta">${repeatWords(e)}${e.place && html`<br>${e.place}`}</p>
-      ${!over && !e.cancelled_at && html`<p class="meta">${next.date === asked ? "" : "Next: "}<time>${eventWhen(next, ctx.zone)}</time>${next.cancelled_at ? " · called off" : ""}
-        ${counts(next) && ` · ${counts(next)}`}</p>`}
-    </div>
-  </div>
-  ${!full && open(next) && answers(next, `Are you going on ${dayName(eventDayParts(next))}?`)}
-  ${full && html`<ol class="event-dates">${dates.filter((d) => !d.over).map((d) => html`<li id="d-${d.date}" class="${d.cancelled_at ? "off" : ""}">
-    <div class="date-line"><time>${eventWhen(d, ctx.zone)}</time>
-      ${d.cancelled_at ? html`<span class="badge as-written">Called off</span>` : counts(d) && html`<span class="meta">${counts(d)}</span>`}</div>
-    ${open(d) && answers(d, `Are you going on ${dayName(eventDayParts(d))}?`)}
-    ${(d.going.length > 0 || d.maybe.length > 0 || d.cantGo.length > 0) && html`<dl class="answered">
-      ${[["Going", d.going], ["Maybe", d.maybe], ["Can't go", d.cantGo]].filter(([, list]) => list.length)
-        .map(([label, list]) => html`<dt>${label}</dt><dd>${names(list)}</dd>`)}</dl>`}
-    ${open(d) && mayDelete(g, p) && html`<form method="post" action="/_groups/${g.id}/events/${p.id}/cancel" data-inplace class="call-off-date"
-      data-confirm="Call off ${dayName(eventDayParts(d))}? Everyone going that day will be told. The other dates stay." data-confirm-ok="Call it off">
-      <input type="hidden" name="back" value="${back}"><input type="hidden" name="date" value="${d.date}"><button class="chip">Call off this date</button></form>`}
-  </li>`)}</ol>
-  <div class="actions-row">
-    ${!e.cancelled_at && html`<a class="chip" href="${base}/event.ics" download>${raw(icon("calendar"))}<span>Add to my calendar</span></a>`}
-    ${p.mine && !e.cancelled_at && !over && html`<a class="chip" href="${base}/edit">Change it</a>`}
-    ${mayDelete(g, p) && !e.cancelled_at && !over && html`<form method="post" action="/_groups/${g.id}/events/${p.id}/cancel" data-inplace
-      data-confirm="Call off every date of this event? Everyone going to any of them will be told." data-confirm-ok="Call it all off">
-      <input type="hidden" name="back" value="${back}"><button class="chip">Call it all off</button></form>`}
-  </div>`}
-</div>`;
 }
 
 /**
@@ -434,7 +367,7 @@ function invitationCard(ctx, e) {
 }
 
 /** Events: invitations to answer, the owner's calendar, and making an event. */
-export function eventsPage(ctx, { view, month, day, week, items, invitations, friends, unreachable, notAsked = 0, pushKey }) {
+export function eventsPage(ctx, { view, month, day, week, items, invitations, friends, pushKey }) {
   return page(ctx, "Events", html`
 <div class="feed-head">
   <h1>Events</h1>
@@ -444,10 +377,6 @@ ${invitations.length > 0 && html`<section class="invitations">
   <h2>Invitations</h2>
   <ul class="invitation-list">${invitations.map((e) => invitationCard(ctx, e))}</ul>
 </section>`}
-${unreachable.length > 0 && html`<p class="notice">Couldn't reach ${unreachable.join(", ")} just now: only the events you've said
-you'll go to there are shown.</p>`}
-${notAsked > 0 && html`<p class="meta">You're in a lot of groups: for ${notAsked} of them, only the events you've said you'll go to
-are shown here. Each group's own calendar shows them all.</p>`}
 ${calendarSwitch("/events", view)}
 ${view === "month" ? html`${calendarGrid(ctx, items, { month, day, base: "/events" })}${calendarList(ctx, items, { month, day })}`
     : view === "week" ? html`<section class="calendar" aria-labelledby="cal-week">${weekHead(ctx, week, "/events")}
@@ -496,9 +425,9 @@ function notificationsSwitch(pushKey) {
  * A group's calendar: a month of its events on the grid, the month's (or a chosen day's) events under it to answer,
  * and adding one. The group lists 100 to come and the 30 most recent; earlier months may be missing some.
  */
-export function groupCalendarPage(ctx, { membership: g, outdated, group: info, upcoming, past, view, month, day, week, from, to, signed = false }) {
+export function groupCalendarPage(ctx, { membership: g, group: info, upcoming, past, view, month, day, week, from, to }) {
   if (info) g.ownerFrom = info.ownerFrom;
-  // A signed group's events (step 6c) are its posts, drawn as they are on its page, and added signed.
+  // A group's events are its posts, drawn as they are on its page, and added signed.
   const ownerPerson = info?.people?.find((p) => p.origin === info.ownerFrom)?.person ?? null;
   const base = `${groupBase(g)}/calendar`;
   const posts = [...past.slice().reverse(), ...upcoming];
@@ -510,8 +439,7 @@ export function groupCalendarPage(ctx, { membership: g, outdated, group: info, u
   const shown = posts.filter(want);
   // A month before the oldest event the group still lists (past is newest first) may have had others.
   const missing = past.length >= 30 && monthAround(month).key < eventDays(past.at(-1).event)[0].slice(0, 7);
-  const card = (p) => (signed ? groupItemCard(ctx, g, p, { ownerPerson })
-    : html`<article class="card social in-group" id="gp${p.id}" data-region="">${groupEventBlock(ctx, g, p)}</article>`);
+  const card = (p) => groupItemCard(ctx, g, p, { ownerPerson });
   const at = Date.now() / 1000;
   // The month: the grid, then its events as cards to answer; a week, or what's to come: each date as a row.
   const shownView = view === "week" ? html`<section class="calendar" aria-labelledby="cal-week">${weekHead(ctx, week, base)}
@@ -524,30 +452,14 @@ ${missing && html`<p class="meta">The group only lists its 30 most recent events
 ${shown.length ? html`<div class="feed">${shown.map(card)}</div>` : html`<p class="empty">${day ? "Nothing on that day." : "Nothing this month."}</p>`}`;
   return page(ctx, `${info?.name ?? g.name}: calendar`, html`
 ${groupHead(ctx, g, info, "calendar")}
-${outdated ? html`<p class="notice">This group's site needs updating before it can have a calendar. ${g.role === "owner"
-    ? html`You can update it from your <a href="/_admin/update">Update</a> page.` : "Its owner can update it from their Update page."}</p>` : html`
-<details class="card add-event" ${!upcoming.length && raw("open")}>
+${!g.closed_at && html`<details class="card add-event" ${!upcoming.length && raw("open")}>
   <summary>Add an event</summary>
   <p class="meta">Everyone in the group will see it here. No one is sent anything about it; those who say they're
   going, or might, are told if it changes or is called off.</p>
-  ${signed ? eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event", repeats: true,
-    sign: ` data-sign="event-new" data-sign-host="${g.identity}" data-sign-group="${g.id}" data-sign-to="/_groups/${g.id}/items"` })
-    : eventForm({ action: `/_groups/${g.id}/events`, back: base, submit: "Add the event", repeats: true })}
-</details>
+  ${eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event", repeats: true,
+    sign: ` data-sign="event-new" data-sign-host="${g.identity}" data-sign-group="${g.id}" data-sign-to="/_groups/${g.id}/items"` })}
+</details>`}
 ${calendarSwitch(base, view)}
-${shownView}`}`);
+${shownView}`);
 }
 
-/** Changing an event the owner here added. */
-export function groupEventEditPage(ctx, { membership: g, group: info, post }) {
-  g.ownerFrom = info.ownerFrom;
-  return page(ctx, `${info.name}: change the event`, html`
-${groupHead(ctx, g, info, "calendar")}
-<section class="card">
-  <h2>Change the event</h2>
-  <p class="meta">If you change its name, time or place, those going, or who might, are told. Times are in
-  ${post.event.time_zone.replace(/_/g, " ")} time.</p>
-  ${eventForm({ action: `/_groups/${g.id}/events/${post.id}/edit`, back: `${groupBase(g)}/posts/${post.id}`,
-    values: eventFormValues(post.event), text: post.text ?? "", submit: "Save", repeats: true })}
-</section>`);
-}

@@ -12,12 +12,14 @@
 //                                 steps before claiming: on a self-hosted server (hosting.js), one made there by a
 //                                 command, from the address and setup code it gave; or, testing, one on this computer
 // And for a group this site made (its owner only):
-//   POST /_groups/<id>/delete     the group tells its members it's closing, then its Worker and database go
+//   POST /_groups/<id>/delete     once it's closed and its 30 days are up (groups.js), or it never got going: the group
+//                                 is asked to empty itself, then its Worker and database go
 // Updating groups to this site's version is on the Update page (update.js), with the same connection.
 import pkg from "../package.json";
 import { tokenFor } from "./cloudflare.js";
 import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, uploadAssets, workerSettings } from "./deploy.js";
-import { claimGroup, forgetGroup } from "./membership.js";
+import { claimGroup, forgetGroup, groupGoneHere } from "./membership.js";
+import { callFriend } from "./calls.js";
 import { cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
 import { ownerName, siteOrigin } from "./sites.js";
 import { json, now, randomToken } from "./util.js";
@@ -135,7 +137,7 @@ async function create(request, env, url, path, body) {
 /** A row for a group Worker that's waiting to be claimed: it holds the GROUP_KEY until then (membership.js). */
 async function waitingRow(db, { origin, setup, name, about, script = "", account = "", database = null }) {
   if (typeof setup !== "string" || !setup || typeof name !== "string" || !name.trim()) throw new Error("Unexpected details.");
-  const row = await db.prepare(`INSERT INTO groups (name, about, created_at, origin, remote_id, host_name, their_key, role, script, account, database)
+  const row = await db.prepare(`INSERT INTO groups (name, about, created_at, origin, remote_id, host_name, setup, role, script, account, database)
     VALUES (?, ?, ?, ?, 1, ?, ?, 'owner', ?, ?, ?) RETURNING id`).bind(name.trim().slice(0, MAX_GROUP_NAME),
     cleanText(about).slice(0, MAX_GROUP_ABOUT) || null, now(), origin, await ownerName(db), setup, script, account, database).first();
   return row.id;
@@ -145,18 +147,24 @@ async function waitingRow(db, { origin, setup, name, about, script = "", account
 export const isGroupWorker = (settings, group) => Boolean(settings && group.database && existingDatabase(settings) === group.database);
 
 /**
- * Deletes a group this site made: the group tells its members' sites, then its Worker and database are deleted. Only
- * that Worker (still bound to the database made for it) and that database, never anything else that has its name. A
- * group with no Worker (self-hosted, or testing) is told to close and empty itself, and then forgotten here.
+ * Deletes a group this site made: once it's closed and its 30 days are up (its members have been told, and had their
+ * time: groups.js), or if it never got going. The group is asked to empty itself (it has, if anyone's asked it since),
+ * then its Worker and database are deleted: only that Worker (still bound to the database made for it) and that
+ * database, never anything else that has its name. A group with no Worker here (self-hosted, or testing) is forgotten
+ * here once it's emptied (a command removes it from the server).
  */
 async function remove(request, env, url, group, body) {
+  void body;
   if (group.role !== "owner") throw new Error("Only the group's owner can delete it.");
+  if (group.joined_at && !groupGoneHere(group)) {
+    throw new Error(group.identity ? "Close the group first: its site can be deleted 30 days after." : "This group is from before signing: it's kept as it is for now.");
+  }
   if (group.script) {
     const token = tokenFor(request);
     if (!ACCOUNT_RE.test(group.account ?? "") || !group.database) throw new Error("Unexpected details.");
     // Check the token can do it before anything's emptied.
     const settings = await workerSettings(token, group.account, group.script);
-    if (group.joined_at) await fetchClose(group);
+    if (group.joined_at) await askToEnd(env, url, group);
     if (isGroupWorker(settings, group)) {
       // force: a Worker with stored data (its photos, its notes waiting) is only deleted with it.
       await api(token, `/accounts/${group.account}/workers/scripts/${group.script}?force=true`, { method: "DELETE" });
@@ -167,37 +175,20 @@ async function remove(request, env, url, group, body) {
       if (error.status !== 404) throw error; // already gone (a deletion that stopped halfway, tried again)
     }
   } else if (group.joined_at) {
-    await fetchClose(group); // a group's site on a self-hosted server (its data goes by a command there), or testing here
+    await askToEnd(env, url, group); // a group's site on a self-hosted server (its files go by a command there), or testing here
   }
   await forgetGroup(env.DB, group);
   return json({ ok: true });
 }
 
 /**
- * Closes the group: it empties itself and tells its members' sites, a round at a time, saying how many are left
- * (groups.js close); asked again until none are, each round being a new request for the group, with its own 50 calls.
- * A round that gets no answer (or a server error) is asked for again, up to twice running: safe, as the group saves
- * who's left before telling them, and once closed it carries on for the owner's key. At most CLOSING_CALLS calls (30
- * told in each), so this request stays inside its own 50. A group that's already gone, refuses, stays unreachable, or
- * is from before rounds (it answers no `remaining`) is deleted all the same.
+ * Asks a closed group's site to empty itself (groups.js POST /_group/admin/end), in a call signed by this site. One
+ * that's gone already, or can't be reached, is deleted all the same.
  */
-const CLOSING_CALLS = 40;
-async function fetchClose(group) {
-  let failed = 0;
-  for (let call = 0; call < CLOSING_CALLS; call++) {
-    const response = await fetch(`${group.origin}/_group/admin/close`, {
-      method: "POST", redirect: "manual", signal: AbortSignal.timeout(20_000), body: "{}",
-      headers: { Authorization: `Bearer ${group.their_key}`, "Content-Type": "application/json" },
-    }).catch(() => null);
-    if (!response || response.status >= 500) {
-      await response?.body?.cancel();
-      if (++failed > 2) return;
-      continue;
-    }
-    failed = 0;
-    const answer = response.ok ? await response.json().catch(() => null) : (await response.body?.cancel(), null);
-    if (!(Number(answer?.remaining) > 0)) return;
-  }
+async function askToEnd(env, url, group) {
+  try {
+    await callFriend(env, url.origin, String(group.origin), "/_group/admin/end", { body: {}, timeout: 20_000 });
+  } catch {} // already gone, or not answering: its Worker goes anyway
 }
 
 /** POST /_groups/create/… and /_groups/<id>/delete (the Origin check is done by the caller, membership.js). */

@@ -339,7 +339,8 @@ export function copyFromRow(r, { names = new Map(), me = null } = {}) {
     version: content.version ?? String(r.id), tally,
     poll: content.poll ? pollShown(content.poll, tally, { viewer: me, names, me }) : null,
     event: content.event ? eventShown(content, tally, { viewer: me, names, me, version: content.version ?? null, invited: tally?.invited ?? null }) : null,
-    author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [], earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
+    author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [],
+    here: content.here === true, earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
     edited_at: r.edited_at ? Number(r.edited_at) : null, comments: Number(r.comments), created_at: Number(r.created_at),
     checked: r.checked_n ? { n: Number(r.checked_n), head: String(r.checked_head) } : null };
 }

@@ -202,10 +202,8 @@ export function finishedAt(e) {
   return e.ends_at ?? e.starts_at + 3 * 3600;
 }
 
-/** The same, in SQL, for a row of events or events_elsewhere called `e` (one-off events, or one date of one). */
+/** The same, in SQL, for a row of events called `e` (the owner's from before signing). */
 export const FINISHED_SQL = "(CASE WHEN e.all_day THEN COALESCE(e.ends_at, e.starts_at) + 86400 ELSE COALESCE(e.ends_at, e.starts_at + 10800) END)";
-/** The same for a row of group_events called `e`, which may repeat: last_ends_at is when its last date finishes. */
-export const GROUP_FINISHED_SQL = `COALESCE(e.last_ends_at, ${FINISHED_SQL})`;
 
 /** "London time", for a time zone shown to someone who may be elsewhere. */
 const zoneName = (zone) => (zone.includes("/") ? `${zone.split("/").pop().replace(/_/g, " ")} time` : zone);
@@ -558,8 +556,6 @@ export function occurrences(e, { from = null, to = null } = {}) {
 /** Whether an event has this date (YYYY-MM-DD, or '' for a one-off). Cheap. */
 export const hasDate = (e, date) => ruleDates(e).includes(date);
 
-/** One date of an event with its times ({ date, starts_at, ends_at, cancelled }), or null if it hasn't that date. */
-export const occurrenceOn = (e, date) => (hasDate(e, date) ? occurrence(e, date) : null);
 
 /** One date of an event as an event of its own (its times, and whether it's off), for the calendar; null if it isn't one. */
 export function onDate(e, date) {

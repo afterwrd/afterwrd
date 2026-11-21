@@ -14,7 +14,7 @@ const EXTENSIONS = {
 const TABLES = ["settings", "facebook_people", "albums", "posts", "facebook_post_tags", "facebook_comments",
   "facebook_reactions", "media", "facebook_tagged_photos", "comments", "comments_elsewhere", "polls", "poll_votes",
   "connections", "friend_links", "users", "groups", "group_mine", "post_versions", "comment_versions",
-  "comments_elsewhere_versions", "events", "event_answers", "post_audience", "events_elsewhere",
+  "comments_elsewhere_versions", "events", "event_answers", "post_audience",
   // afterwrd 2: signed posts and photos, their lists, and what the owner has signed and sent (src/export.js).
   "items", "item_photos", "lists", "list_pages", "sent", "own_identity", "item_guests"];
 /** JSON from base64url (a signed record's content), or null. */
@@ -299,16 +299,6 @@ function documents(t) {
       type: "Group", id: groupId(g.origin, g.remote_id), name: g.name, summary: g.about || undefined,
       "afterwrd:owner": { type: "Person", name: g.host_name }, "afterwrd:role": g.role || undefined, "afterwrd:joinedAt": iso(g.joined_at),
     })), { name: "Groups you're in (each is its own site, which keeps everything in it)" }),
-    // Friends' events you were invited to, and groups' events you said you'd go to, as your site last heard of them.
-    ...(t.events_elsewhere.length ? { "events-elsewhere.json": collection([...t.events_elsewhere].sort((a, b) => a.starts_at - b.starts_at).map((e) => {
-      const g = e.group_id ? t.groups.find((x) => x.id === e.group_id) : null;
-      const c = e.connection_id ? t.connections.find((x) => x.id === e.connection_id) : null;
-      return { ...eventFields(e),
-        url: c ? postId(c.origin, e.post_key) : g ? groupPostId(g.origin, g.remote_id, e.post_id) : undefined,
-        attributedTo: c ? friend(c.id) : undefined, context: g ? groupId(g.origin, g.remote_id) : undefined,
-        "afterwrd:date": e.date || undefined, // which date of a repeating group event
-        "afterwrd:answer": e.answer ?? undefined, "afterwrd:invitedAt": iso(e.invited_at ?? undefined) };
-    }), { name: "Friends' and groups' events on your calendar" }) } : {}),
     "groups-elsewhere.json": collection([...signedInGroups(), ...[...t.group_mine].sort((a, b) => b.created_at - a.created_at).map((m) => {
       const post = groupPostId(m.site, m.remote_group, m.post_id);
       return {

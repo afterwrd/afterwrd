@@ -6,7 +6,7 @@
 //   node polls.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, letInto, settled, siteSql as sql, setUpSigning, startSignedGroup } from "./helpers.mjs";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -251,65 +251,46 @@ await Promise.all([settled(ann), ann.click(`#i-${multiId} header .delete`)]);
 check("deleting a post deletes its poll and votes", n(stateA, `items WHERE id = '${multiId}'`) === 0 && n(stateA, `list_pages WHERE list = '${multiId}'`) === 0
   && n(stateA, "items WHERE content LIKE '%\"poll\"%'") === 1);
 
-// --- in a group ---------------------------------------------------------------------------------------------------------
+// --- in a group (signed: docs/signed-conversations.md, step 6; polls are public, decision 10) ---------------------------
 
-const waiting = await post(ann, "/_groups/create/local", { origin: G, setup: GROUP_KEY, name: "Walkers", about: "" });
-const annGroup = (await post(ann, "/_groups/create/claim", { id: waiting.id })).id;
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await ann.click("#make");
-await ann.waitForSelector("#link:not([hidden])");
-const link = await ann.$eval("#link-url", (i) => i.value);
-for (const [page, site] of [[bob, B], [cat, C]]) {
-  await page.goto(`${site}/groups`);
-  await page.type("#join input[name=link]", link);
-  await Promise.all([page.waitForNavigation(), page.click("#join button:not([type=button])")]);
-  await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("#go")]);
-}
-await ann.goto(`${A}/groups/${annGroup}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
+const annGroup = await startSignedGroup(ann, { origin: G, setup: GROUP_KEY, name: "Walkers" });
+const bobGroup = await letInto(ann, A, annGroup, bob, B, stateB);
+const catGroup = await letInto(ann, A, annGroup, cat, C, stateC);
 check("the group has three members", n(stateG, "group_members WHERE approved_at IS NOT NULL") === 3);
-const bobGroup = sql(stateB, "SELECT id FROM groups")[0].id;
-const catGroup = sql(stateC, "SELECT id FROM groups")[0].id;
 
 await bob.goto(`${B}/groups/${bobGroup}`);
 await ask(bob, "Which route?", ["Hills", "Canal"]);
-const gPost = sql(stateG, "SELECT post_id FROM group_polls")[0]?.post_id;
-check("Bob asks a poll in the group, kept by the group", Boolean(gPost) && n(stateB, "group_mine WHERE poll IS NOT NULL") === 1);
+const gId = sql(stateG, "SELECT id, content FROM items WHERE type = 'post'").find((r) => JSON.parse(r.content).poll)?.id;
+const gCard = `#gi-${gId}`;
+check("Bob asks a poll in the group, signed into his post, hosted by the group", Boolean(gId) && n(stateB, `sent WHERE item = '${gId}' AND kind = 'item'`) === 1);
 await ann.goto(`${A}/groups/${annGroup}`);
-await choose(ann, `#gp${gPost}`, 0);
+await choose(ann, gCard, 0);
 await cat.goto(`${C}/groups/${catGroup}`);
-await choose(cat, `#gp${gPost}`, 1);
-let catPoll = await pollIn(cat, `#gp${gPost}`);
-check("members answer from their own sites, and see the totals", counts(catPoll) === "1,1" && chosen(catPoll) === "Canal" && catPoll.who === null && !catPoll.canClose, JSON.stringify(catPoll));
-await ann.goto(`${A}/groups/${annGroup}`);
-check("Ann, the group's owner, doesn't see who chose what either", (await pollIn(ann, `#gp${gPost}`)).who === null);
-const catKey = sql(stateC, "SELECT their_key FROM groups")[0].their_key;
-check("…and the group doesn't tell anyone but its writer", !JSON.stringify(await (await call(G, "/_group/posts", catKey)).json()).includes("afterwrd:voters"));
-await bob.goto(`${B}/groups/${bobGroup}`);
-check("Bob's group page links to who chose what, without sending names with every page", (await pollIn(bob, `#gp${gPost}`))?.who === null
-  && Boolean(await bob.$(`#gp${gPost} .poll a[href$="/posts/${gPost}#poll-g${gPost}"]`)));
-const bobKeyG = sql(stateB, "SELECT their_key FROM groups")[0].their_key;
-check("…the group's page of posts names no one", !JSON.stringify(await (await call(G, "/_group/posts", bobKeyG)).json()).includes("afterwrd:voters"));
-await bob.goto(`${B}/groups/${bobGroup}/posts/${gPost}`);
-let bobGPoll = await pollIn(bob, `#gp${gPost}`);
-check("Bob, who asked, sees who", /Hills\s+Ann Example/.test(bobGPoll?.who ?? "") && /Canal\s+Cat Example/.test(bobGPoll?.who ?? "") && bobGPoll.canClose, bobGPoll?.who);
+await choose(cat, gCard, 1);
+await cat.goto(`${C}/groups/${catGroup}/posts/${gId}`);
+const catPoll = await pollIn(cat, gCard);
+check("members answer from their own sites, each signed, and see the totals", counts(catPoll) === "1,1" && chosen(catPoll) === "Canal" && !catPoll.canClose, JSON.stringify(catPoll));
+check("…and everyone in the group sees who chose what", /Hills\s+Ann Example/.test(catPoll?.who ?? "") && /Canal\s+You/.test(catPoll?.who ?? ""), catPoll?.who);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${gId}`);
+const bobGPoll = await pollIn(bob, gCard);
+check("Bob, who asked, sees who too, and can close it", /Hills\s+Ann Example/.test(bobGPoll?.who ?? "") && /Canal\s+Cat Example/.test(bobGPoll?.who ?? "") && bobGPoll.canClose, bobGPoll?.who);
 // A group can't change what Bob asked.
-sql(stateG, `UPDATE group_polls SET options = '["Bob says vote for me","Canal"]' WHERE post_id = ${gPost}`);
-await bob.goto(`${B}/groups/${bobGroup}/posts/${gPost}`);
-check("a group can't change the options Bob asked", (await pollIn(bob, `#gp${gPost}`))?.options[0].name === "Hills");
-check("…and his note says the group's host could still look it up", bobGPoll.who.includes("Whoever hosts the group could still look it up"));
-sql(stateG, `UPDATE group_polls SET options = '["Hills","Canal"]' WHERE post_id = ${gPost}`);
-check("only its writer can close it", (await call(G, `/_group/polls/${gPost}/close`, catKey, {})).status === 400);
-check("forged answers are refused", (await call(G, `/_group/polls/${gPost}/vote`, catKey, { "afterwrd:choices": [0, 1] })).status === 400
-  && (await call(G, `/_group/polls/${gPost}/vote`, catKey, { "afterwrd:choices": [5] })).status === 400);
+const gContent = sql(stateG, `SELECT content FROM items WHERE id = '${gId}'`)[0].content;
+sql(stateG, `UPDATE items SET content = '${gContent.replace("Hills", "Bob says vote for me").replace(/'/g, "''")}', changed_at = changed_at + 1 WHERE id = '${gId}'`);
 await bob.goto(`${B}/groups/${bobGroup}`);
-await Promise.all([settled(bob), bob.click(`#gp${gPost} .poll form:not(.poll-form) button`)]);
-check("Bob closes it", (await pollIn(bob, `#gp${gPost}`))?.facts.includes("Closed"));
-check("…and no answer is taken after", (await call(G, `/_group/polls/${gPost}/vote`, catKey, { "afterwrd:choices": [0] })).status === 400);
+check("a group can't change the options Bob asked", (await pollIn(bob, gCard))?.options[0].name === "Hills");
+sql(stateG, `UPDATE items SET content = '${gContent.replace(/'/g, "''")}' WHERE id = '${gId}'`);
+const catsPage = `/groups/${catGroup}/posts/${gId}`;
+check("only its writer can end it", (await signVote(cat, catsPage, [], { kind: "end" })) === 400);
+check("forged answers are refused", (await signVote(cat, catsPage, [0, 1])) === 400 && (await signVote(cat, catsPage, [5])) === 400);
+await bob.goto(`${B}/groups/${bobGroup}`);
+await Promise.all([settled(bob), bob.click(`${gCard} .poll form:not(.poll-form) button`)]);
+check("Bob closes it", (await pollIn(bob, gCard))?.facts.includes("Closed"));
+check("…and no answer is taken after", (await signVote(cat, catsPage, [0])) === 400);
 await cat.goto(`${C}/groups/${catGroup}/members`);
-await Promise.all([cat.waitForNavigation(), cat.click('form[action$="/leave"] button')]);
-check("leaving a group takes your answers with you", n(stateG, `group_poll_votes WHERE origin = '${C}'`) === 0 && n(stateG, "group_poll_votes") === 1);
+await Promise.all([cat.waitForNavigation(), cat.click('button[data-group-record="leave"]')]);
+check("leaving a group, Cat's signed answer stays, as everything she signed there does", n(stateC, "groups") === 0
+  && Object.keys(JSON.parse(sql(stateG, `SELECT tally FROM items WHERE id = '${gId}'`)[0].tally).votes).length === 2);
 await bob.goto(`${B}/groups/${bobGroup}`);
 await bob.screenshot({ path: `${OUT}/poll-group.png`, fullPage: true });
 await bob.setViewport({ width: 390, height: 844 });

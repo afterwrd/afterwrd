@@ -28,24 +28,21 @@ export async function loadThreads(db, keys) {
   return threads;
 }
 
-// In a group: what it said (group_inbox, see notify.js), while the owner's still in it.
-const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g.joined_at IS NOT NULL";
-
-// Notifications: comments here from before signing (comments), notices about signed posts (notices, below), and
-// comments in groups and changes to events there the owner is going to. One list, newest first. For a friend or group,
-// `connection_id` is the friend or group, `friend` their name, `target` the post. `kind` is NULL for a comment, or
-// 'invite' (a friend's), 'changed' or 'cancelled' for an event, or 'mention' (mentions.js: someone mentioned the owner,
-// or used @here in a group). `own_post`: whether the owner wrote it (groups). `date`: which date of a repeating group
-// event, when a note's about one date. `mentions`: who a comment here mentions (mentions.js).
+// Notifications: comments here from before signing (comments), and notices about signed posts (notices, below): friends'
+// and groups'. One list, newest first. For a friend or group, `connection_id` is the friend or group, `friend` their
+// name, `target` the post. `kind` is 'comment', 'invite' (a friend's), 'changed' or 'cancelled' for an event, 'mention'
+// (mentions.js: someone mentioned the owner, or used @here in a group), or 'closed' (a group). `own_post`: whether the
+// owner wrote it (groups). `date`: which date of a repeating group event, when it's about one date. `mentions`: who a
+// comment here mentions (mentions.js).
 // Signed posts (afterwrd 2: notes.js): comments and mentions on friends' posts the owner's in, and on their own
 // ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new
 // post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
   WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled')`;
-// A signed group's (step 6c: groupcopies.js): comments, mentions, @here and changes to events, while the owner's in it.
+// A group's (groupcopies.js): comments, mentions, @here, changes to events, and its closing, while the owner's in it.
 // One date of a repeating event called off (6d) has its target as "<post>?date=<date>".
 const GROUP_NOTICES = `FROM notices n JOIN groups g ON g.id = n.group_id AND g.joined_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled')`;
+  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled', 'closed')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions
@@ -54,11 +51,7 @@ const NOTIFICATIONS_SQL = `
   SELECT CASE WHEN n.own = 1 THEN 'own' ELSE 'signed' END, n.id, n.target, n.text, n.created_at, n.actor, NULL, n.connection_id, co.name,
     NULL, n.kind, NULL, NULL
   ${NOTICES}
-  UNION ALL
-  SELECT 'group', i.id, CAST(i.post_id AS TEXT), i.text, i.created_at, i.actor, NULL, g.id, g.name,
-    EXISTS (SELECT 1 FROM group_mine m WHERE m.site = g.origin AND m.remote_group = g.remote_id AND m.kind = 'post' AND m.post_id = i.post_id),
-    i.kind, i.date, NULL
-  ${GROUP_THERE}
+
   UNION ALL
   SELECT 'group', n.id, CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, 1, instr(n.target, '?date=') - 1) ELSE n.target END,
     n.text, n.created_at, n.actor, NULL, g.id, g.name, n.own, n.kind,
@@ -80,7 +73,6 @@ export async function newCount(db, user) {
   const row = await db.prepare(`SELECT
     (SELECT COUNT(*) FROM comments WHERE created_at > ?1 AND (author_id IS NULL OR author_id != ?2))
     + (SELECT COUNT(*) ${NOTICES} AND n.created_at > ?1)
-    + (SELECT COUNT(*) ${GROUP_THERE} WHERE i.created_at > ?1)
     + (SELECT COUNT(*) ${GROUP_NOTICES} AND n.created_at > ?1) AS n`)
     .bind(user.activity_seen_at ?? 0, user.id).first();
   return row.n;

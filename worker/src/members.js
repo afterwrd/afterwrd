@@ -64,7 +64,7 @@ export class MemberRules extends Rules {
       return null;
     }
     if (record.kind === "leave") {
-      if (actor === "owner") return "The owner can't leave: delete the group instead.";
+      if (actor === "owner") return "The owner can't leave: close the group instead.";
       return actor ? null : "You aren't in this group.";
     }
     if (record.kind === "close") return actor === "owner" ? null : "Only the group's owner can close it.";

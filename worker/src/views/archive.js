@@ -500,7 +500,7 @@ function friendEventItem(c) {
 
 /** A comment in a group on a post the owner wrote or commented on, or a change to an event they're going to. */
 function groupActivityItem(c) {
-  const href = `/groups/${c.connection_id}/posts/${c.target}${c.date ? `?date=${encodeURIComponent(c.date)}` : ""}`;
+  const href = c.kind === "closed" ? `/groups/${c.connection_id}` : `/groups/${c.connection_id}/posts/${c.target}${c.date ? `?date=${encodeURIComponent(c.date)}` : ""}`;
   // A mention receipt the group's site doesn't bear out (receipts.js, step 6c).
   if (c.kind === "hidden") {
     return html`<article class="card activity alert${c.isNew ? " new" : ""}">
@@ -509,6 +509,19 @@ function groupActivityItem(c) {
       <span class="what"><strong>${c.friend}'s site</strong> isn't showing you a comment by ${c.name} that mentions you, on
         <a href="${href}">a post</a>. ${c.name}'s site says the group's took it, so you may be shown a different conversation from
         the one ${c.name} saw. It's worth asking whoever runs the group.</span>
+      ${c.isNew && raw('<span class="badge badge-new">New</span>')}
+      <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
+    </header>
+  </div>
+</article>`;
+  }
+  // Its owner closed the group (step 6e): it goes 30 days after.
+  if (c.kind === "closed") {
+    return html`<article class="card activity${c.isNew ? " new" : ""}">
+  <div class="body">
+    <header>
+      <span class="what"><strong>${c.name}</strong> closed <a href="${href}">${c.friend}</a>. You can read it, and delete what you
+        wrote there, for 30 days.</span>
       ${c.isNew && raw('<span class="badge badge-new">New</span>')}
       <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
     </header>

@@ -13,8 +13,6 @@
   const unique = (list) => [...new Set(list)].join(",");
   // The signed posts and photos whose comments are open: their comment boxes say which item each is.
   const items = () => unique([.../** @type {NodeListOf<HTMLFormElement>} */ (document.querySelectorAll('form[data-sign="comment"]'))].map((f) => f.dataset.signItem ?? ""));
-  // …and posts in groups.
-  const groups = () => unique([.../** @type {NodeListOf<HTMLFormElement>} */ (document.querySelectorAll("form[data-group][data-post]"))].map((f) => `${f.dataset.group}:${f.dataset.post}`));
 
   function setCount(link, n) {
     if (!link) return;
@@ -68,7 +66,7 @@
   async function check() {
     if (stopped || document.hidden) return;
     last = Date.now();
-    const query = new URLSearchParams({ since, groups: groups(), items: items() });
+    const query = new URLSearchParams({ since, items: items() });
     let news;
     try {
       const res = await fetch(`/_live?${query}`, { cache: "no-store" });

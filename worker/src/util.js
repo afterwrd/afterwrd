@@ -16,7 +16,7 @@ export function html(body, status = 200) {
 // Every signed-in page is a loader and a view (src/views/). The loader gathers what the page shows and returns it as
 // plain data, which could be sent as JSON just as it is; the view turns that into HTML and does nothing else. So the
 // data must never carry a key or a hash of one: these are the columns that hold them.
-const SECRET_FIELDS = new Set(["their_key", "key_hash", "token_hash", "session_hash", "privateJwk", "p256dh", "refresh_token", "access_token", "auto_key", "auto_refresh"]);
+const SECRET_FIELDS = new Set(["their_key", "key_hash", "setup", "token_hash", "session_hash", "privateJwk", "p256dh", "refresh_token", "access_token", "auto_key", "auto_refresh"]);
 
 /**
  * A page's data, as its loader returns it. When testing (CHECK_PAGE_DATA, which test/e2e/run.sh sets on every site)
@@ -63,10 +63,10 @@ export class Refusal extends Error {
   }
 }
 
-/** A connection or group row without its keys, for a page. */
+/** A connection or group row without its keys (or a group's setup code, until it's claimed), for a page. */
 export const withoutKeys = (row) => {
   if (!row) return row;
-  const { their_key, key_hash, ...rest } = row;
+  const { their_key, key_hash, setup, ...rest } = row;
   return rest;
 };
 

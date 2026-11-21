@@ -1,8 +1,8 @@
-// What a hostile friend's or group's site might send, through the real parsing code, bundled by run.sh (with a stand-in
+// What a hostile friend's site might send, through the real parsing code, bundled by run.sh (with a stand-in
 // for Cloudflare's runtime) into $OUT/bundle.mjs. (Friends' signed posts and comments are checked against their
 // signatures and lists: lists.mjs, and between real sites in feed.mjs.)
 import { pathToFileURL } from "node:url";
-const { cleanMentions, linkify, noteMentions, callSite, parseEdits, icsFile, loadRelease, markMineInGroup, parseEvent, parseGroupPage, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+const { linkify, callSite, icsFile, loadRelease, parseEvent, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 const B = "https://bob.example";
 const A = "https://ann.example";
 const hash = "a".repeat(64);
@@ -15,77 +15,10 @@ check("a link with styling tacked on is refused", parseMedia(media(`${B}/files/$
 check("a link with anything after the signature is refused", parseMedia(media(`${B}/files/${hash}?exp=1800000000&sig=${"x".repeat(43)}&x=')`), B) === null);
 check("a link to another site is refused", parseMedia(media(`https://evil.example/files/${hash}?exp=1&sig=${"x".repeat(43)}`), B) === null);
 
-// Mentions (mentions.js): only names the words really say, to real sites, ten at most, and cheap to turn down.
-const env = { ALLOW_LOCAL_SITES: "1" };
-const ann = [{ name: "Ann Example", origin: "https://ann.example" }];
-const names = (text, list, here = false) => cleanMentions(list, text, env, { here }).map((m) => m.name).join();
-check("a mention needs @ and the whole name in the words", names("Hi @Ann Example!", ann) === "Ann Example" && names("Hi Ann Example", ann) === ""
-  && names("Hi @Ann Examples", ann) === "" && names("mail bob@Ann Example", ann) === "" && names("@@Ann Example", ann) === "");
-check("…to a real site", names("@Ann", [{ name: "Ann", origin: "javascript:alert(1)" }]) === "" && names("@Ann", [{ name: "Ann", origin: "https://a.example/x" }]) === "Ann");
-check("…@here only where it's allowed (groups)", names("x @here", [{ name: "here", origin: "here" }]) === "" && names("x @here", [{ name: "here", origin: "here" }], true) === "here");
-check("…ten at most", cleanMentions(Array.from({ length: 30 }, (_, i) => ({ name: `P${i}`, origin: `https://p${i}.example` })),
-  Array.from({ length: 30 }, (_, i) => `@P${i}`).join(" "), env).length === 10);
-const started = performance.now();
-const flood = { tag: Array.from({ length: 5000 }, (_, i) => ({ type: "Mention", href: "https://z.example/", name: `@N${i}` })) };
-noteMentions(flood, `${"a".repeat(60_000)} @Zed`, env);
-check("a note with thousands of tags and long words is turned down quickly", performance.now() - started < 50);
+// Mentions: only names listed are highlighted, escaped.
 check("highlighting escapes names, and only highlights those listed", String(linkify("<b>@Bob & co</b> @Ann", [{ name: "Bob & co" }]))
   === "&lt;b&gt;<strong class=\"mention\">@Bob &amp; co</strong>&lt;/b&gt; @Ann");
 
-// Edits (friends.js parseEdits, for groups' posts and comments): what a site says something said before is checked like
-// everything else.
-const written = Date.parse("2026-11-03T10:01:00Z") / 1000;
-const earlier = (n, at) => Array.from({ length: n }, (_, i) => ({ type: "Note", content: `was ${i}`, "afterwrd:replaced": at }));
-const edits = (extra) => parseEdits({ type: "Note", content: "now", ...extra }, written, 2000);
-check("an edited comment shows its earlier words", edits({ updated: "2026-11-03T10:05:00Z", "afterwrd:earlier": earlier(1, "2026-11-03T10:05:00Z") })
-  .earlier?.[0]?.text === "was 0");
-check("at most 20 earlier versions are kept", edits({ updated: "2026-11-03T10:05:00Z", "afterwrd:earlier": earlier(500, "2026-11-03T10:04:00Z") }).earlier.length === 20);
-check("versions 'replaced' before the comment was written, or after its last change, are dropped",
-  edits({ updated: "2026-11-03T10:05:00Z", "afterwrd:earlier": [...earlier(1, "2026-11-03T09:00:00Z"), ...earlier(1, "2026-11-04T09:00:00Z")] }).earlier.length === 0);
-check("an 'edit' before the comment was written isn't believed", edits({ updated: "2026-11-01T00:00:00Z", "afterwrd:earlier": earlier(1, "2026-11-01T00:00:00Z") })
-  .edited_at === null);
-check("overlong earlier words are dropped", edits({ updated: "2026-11-03T10:05:00Z",
-  "afterwrd:earlier": [{ type: "Note", content: "x".repeat(2001), "afterwrd:replaced": "2026-11-03T10:04:00Z" }] }).earlier.length === 0);
-
-// A group's site (Bob's, group 7) as seen from Ann's: what it sends about the group, its posts and their comments.
-const group = { type: "Group", id: `${B}/groups/7`, name: "Walkers", attributedTo: { type: "Person", id: `${B}/`, name: "Bob" }, "afterwrd:members": 3 };
-const groupNote = (id, author, extra = {}) => ({ type: "Note", id, attributedTo: author, published: "2026-11-03T10:00:00Z", content: "Hi", ...extra });
-const someone = { type: "Person", id: "https://cat.example/", name: "Cat" };
-let threw = false;
-try { parseGroupPage({ context: { ...group, id: `${B}/groups/8` }, orderedItems: [] }, B, 7); } catch { threw = true; }
-check("a group's site answering for a different group is refused", threw);
-const page = parseGroupPage({ context: group, orderedItems: [
-  groupNote(`${B}/groups/7/posts/1`, someone),
-  groupNote(`https://evil.example/groups/7/posts/2`, someone),
-  groupNote(`${B}/groups/8/posts/3`, someone),
-  groupNote(`${B}/groups/7/posts/4`, { type: "Person", id: someone.id, name: "x".repeat(101) }),
-  groupNote(`${B}/groups/7/posts/5`, someone, { attachment: [media(`https://evil.example/files/${hash}?exp=1&sig=${"x".repeat(43)}`),
-    media(`${B}/files/${hash}?exp=1800000000&sig=${"x".repeat(43)}`)] }),
-  groupNote(`${B}/groups/7/posts/6`, { type: "Person", id: `${A}/`, name: "Ann" }, { attachment: [media(`${B}/files/${hash}?exp=1800000000&sig=${"x".repeat(43)}`)],
-    replies: { items: [
-      groupNote(`${B}/groups/7/posts/6#c1`, { type: "Person", id: `${A}/`, name: "Ann" }),
-      groupNote(`${B}/groups/7/posts/6#c2`, { type: "Person", id: `${A}/`, name: "Ann" }),
-      groupNote(`${B}/groups/7/posts/5#c3`, someone),
-    ] } }),
-  // Ann's real comment 9 was on post 6; the group shows it under post 1 instead.
-  groupNote(`${B}/groups/7/posts/1`, someone, { replies: { items: [groupNote(`${B}/groups/7/posts/1#c9`, { type: "Person", id: `${A}/`, name: "Ann" })] } }),
-] }, B, 7);
-check("only posts in that group, on that site, by someone named sensibly, are read", page.posts.map((p) => p.id).join() === "1,5,6,1");
-check("only the group's own photo links are kept", page.posts.find((p) => p.id === 5).photos.length === 1);
-check("a comment addressed to another post is dropped", page.posts.find((p) => p.id === 6).comments.map((c) => c.id).join() === "1,2");
-// Ann's site sent post 6 and comment 1 there; the group's site claims comment 2 is hers too.
-const sent = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [
-  { kind: "post", post_id: 6, remote_id: 6, text: "What Ann posted", photos: "[]", created_at: 1700000000 },
-  { kind: "comment", post_id: 6, remote_id: 1, text: "What Ann said", created_at: 1700000001 },
-  { kind: "comment", post_id: 6, remote_id: 9, text: "Yes, count me in", created_at: 1700000002 }] }) }) }) };
-const marked = await markMineInGroup(sent, { origin: B, remote_id: 7 }, page.posts, A);
-const annPost = marked.find((p) => p.id === 6);
-check("Ann's post and comment show the words her site kept", annPost?.mine && annPost.text === "What Ann posted"
-  && annPost.comments.find((c) => c.id === 1)?.text === "What Ann said");
-check("a comment falsely claiming to be Ann's is left out", annPost && !annPost.comments.some((c) => c.id === 2));
-check("other people's posts aren't marked as Ann's", marked.filter((p) => p.id !== 6).every((p) => !p.mine));
-check("…nor a photo the group added to Ann's post, nor its date", annPost?.photos.length === 0 && annPost.created_at === 1700000000);
-check("Ann's comment moved under another post isn't shown as hers", marked.filter((p) => p.id === 1).every((p) => !p.comments.some((c) => c.id === 9)));
 check("an address with a trailing dot isn't taken as a site", siteOrigin("https://ann.example./") === null && siteOrigin("https://ann.example/") === A);
 const realFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response("null", { status: 200 });

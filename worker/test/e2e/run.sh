@@ -112,7 +112,8 @@ run_feed() { three_sites feed.mjs; }
 # here rather than 7 days (TEST_SLOW_SECONDS, local sites only), so the test sees it take effect.
 run_move() { EXTRA_A="--var TEST_SLOW_SECONDS:90" EXTRA_B="--var TEST_SLOW_SECONDS:90" EXTRA_C="--var TEST_SLOW_SECONDS:90" three_sites move.mjs; }
 run_selfhosted() { # a self-hosted site (A, HOSTING=self: src/hosting.js) next to one on Cloudflare (B), and a group's site
-  EXTRA_A="--var HOSTING:self" EXTRA_B="--var TEST_SELF_HOSTED:http://localhost:8787" three_sites selfhosted.mjs group
+  local close="--var TEST_CLOSE_SECONDS:30" # a closed group goes 30 seconds after, here (groups.js)
+  EXTRA_A="--var HOSTING:self $close" EXTRA_B="--var TEST_SELF_HOSTED:http://localhost:8787" EXTRA_G="$close" three_sites selfhosted.mjs group
 }
 run_notifications() { # notifications on the owner's devices (src/push.js), their encryption (src/webpush.js), the app
   echo "== webpush"
@@ -123,7 +124,11 @@ run_notifications() { # notifications on the owner's devices (src/push.js), thei
   (cd "$WORKER" && node --no-warnings test/triggers.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   three_sites notifications.mjs
 }
-run_groups() { three_sites groups.mjs group; }
+# A closed group goes 30 seconds after, here, rather than 30 days (TEST_CLOSE_SECONDS, local sites only: groups.js).
+run_groups() {
+  local close="--var TEST_CLOSE_SECONDS:30"
+  EXTRA_A="$close" EXTRA_B="$close" EXTRA_C="$close" EXTRA_G="$close" three_sites groups.mjs group
+}
 run_polls() { three_sites polls.mjs group; }
 run_mentions() { three_sites mentions.mjs group; }
 run_events() { three_sites events.mjs group; }

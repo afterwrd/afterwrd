@@ -6,8 +6,8 @@ import { dateOver, ownHost } from "../items.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, namesFor, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
-import { groupPostId, postId as postAddress } from "../../public/static/activity.js";
-import { eventsFor, oldEventsGone } from "../events.js";
+import { postId as postAddress } from "../../public/static/activity.js";
+import { eventsFor } from "../events.js";
 import { datesOf, FINISHED_SQL, finishedAt, hasDate, icsFile, monthSpan, readDay, readMonth, readWeek, ruleDates, weekSpan } from "../calendar.js";
 import { connectedToken } from "../cloudflare.js";
 import { findTarget, hasOldThread, latestComments, loadThreads, newCount, photoKey } from "./comments.js";
@@ -112,17 +112,13 @@ const ROUTES = [
   [/^\/groups\/new$/, null, groupNew, views.groupNewPage],
   [/^\/groups\/join$/, null, groupJoin, views.groupJoinPage],
   [/^\/groups\/(\d{1,15})$/, null, groupHome, views.groupPage],
-  [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})$/, null, groupPost, views.groupPostPage],
-  // A signed group's posts (step 6c: groupcopies.js), by their id.
+  // A group's posts (groupcopies.js), by their id.
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})$/, null, (ctx, params, id, item) => groupItemPost(ctx, params, id, item), views.groupItemPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/photos\/(\d{1,2})$/, null, groupItemPost, views.groupItemPhotoPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/edit$/, null, groupItemEventEdit, views.groupItemEventEditPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/event\.ics$/, null, groupItemEventFile, null],
-  [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})\/photos\/([0-9a-f]{64})$/, null, groupPhoto, views.groupPhotoPage],
   [/^\/groups\/(\d{1,15})\/members$/, null, groupMembers, views.groupMembersPage],
   [/^\/groups\/(\d{1,15})\/calendar$/, null, groupCalendar, views.groupCalendarPage],
-  [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})\/edit$/, null, groupEventEdit, views.groupEventEditPage],
-  [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})\/event\.ics$/, null, groupEventFile, null],
 ];
 
 /** A friend's or group's site couldn't give a page what it needed: `view` shows `data` instead. */
@@ -972,7 +968,7 @@ async function friendPhoto(ctx, params, id, hash) {
 
 /** The owner's groups, with comments waiting in each. (What's coming up in them is on Events.) */
 async function groupsIndex(ctx) {
-  const list = await all(ctx.db, `SELECT g.*, (SELECT COUNT(*) FROM group_inbox i WHERE i.group_id = g.id AND i.created_at > ?) AS notes
+  const list = await all(ctx.db, `SELECT g.*, (SELECT COUNT(*) FROM notices n WHERE n.group_id = g.id AND n.created_at > ?) AS notes
     FROM groups g WHERE g.joined_at IS NOT NULL ORDER BY g.name COLLATE NOCASE`, [ctx.user.activity_seen_at ?? 0]);
   // Groups whose Worker this site made, but which it didn't finish claiming.
   const unfinished = await all(ctx.db, "SELECT id, name, origin FROM groups WHERE joined_at IS NULL AND script != '' ORDER BY created_at");
@@ -980,7 +976,6 @@ async function groupsIndex(ctx) {
 }
 
 const LIST_SECONDS = 366 * 86400; // the List view: from now, up to a year ahead
-const GROUPS_ASKED = 20; // groups the Events page asks for their events (two requests each, at most)
 
 /**
  * Which view of a calendar a page asks for (?view=month, week or list; month by default), and the moments it covers:
@@ -1011,13 +1006,11 @@ async function eventsIndex(ctx, params) {
   const shown = calendarView(params, ctx.zone);
   const { from, to } = shown;
   const at = now();
-  await oldEventsGone(db).run();
   const IN_SPAN = `${FINISHED_SQL} >= ?1 AND e.starts_at < ?2`;
-  const [hosted, plans, joined] = await db.batch([
+  const [hosted, joined] = await db.batch([
     // The owner's events from before signing, theirs alone, read-only.
     db.prepare(`SELECT e.*, p.key FROM events e JOIN posts p ON p.id = e.post_id WHERE ${IN_SPAN}`).bind(from, to),
-    db.prepare(`SELECT e.* FROM events_elsewhere e WHERE e.group_id IS NOT NULL AND ${IN_SPAN}`).bind(from, to),
-    db.prepare("SELECT * FROM groups WHERE joined_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
+    db.prepare("SELECT * FROM groups WHERE joined_at IS NOT NULL AND identity IS NOT NULL ORDER BY name COLLATE NOCASE"),
   ]);
   // The owner's signed events, and friends' they're invited to (kept as copies), with their answers.
   const [ownSigned, friendSigned] = await Promise.all([
@@ -1033,13 +1026,9 @@ async function eventsIndex(ctx, params) {
       .map((c) => calendarItem(c.event, { kind: "friend", href: `/friend/${c.connection.id}/posts/${c.id}`, who: `${c.connection.name}'s event`,
         answer: c.event.answer })),
   ];
-  // Each group is asked for what's coming up (and, for a month already begun, what's just been): one or two requests
-  // each, as Home asks friends; at most GROUPS_ASKED groups, as a page may only ask 50 other sites on the free plan.
-  // A group that doesn't answer, or isn't asked, shows the owner's own copies of their plans there.
-  const unreachable = [];
-  // A signed group's events (step 6c) are kept here as copies: nothing to ask. Each date of a repeating one (6d) on
-  // its own, with the owner's answer to it.
-  for (const g of joined.results.filter((x) => x.identity)) {
+  // Groups' events are kept here as copies (groupcopies.js): nothing to ask. Each date of a repeating one (6d) on its
+  // own, with the owner's answer to it.
+  for (const g of joined.results) {
     for (const p of await groups_.groupEvents(ctx.env, g)) {
       for (const d of datesOf(p.event, { from, to })) {
         if (d.answer === "no" || !inSpan(d)) continue;
@@ -1047,29 +1036,9 @@ async function eventsIndex(ctx, params) {
       }
     }
   }
-  const unsigned = joined.results.filter((x) => !x.identity);
-  const asked = new Set(unsigned.slice(0, GROUPS_ASKED).map((g) => g.id));
-  await Promise.all(unsigned.map(async (g) => {
-    let reply;
-    try {
-      if (asked.has(g.id)) reply = await groups.loadEvents(ctx.env, ctx.url.origin, g, { past: from < at });
-    } catch {}
-    if (reply && !reply.outdated) {
-      // Each date of a repeating one on its own, with the owner's answer to it.
-      for (const d of [...reply.upcoming, ...reply.past].flatMap((p) => datesOf(p.event, { from, to }).map((x) => ({ ...x, post: p.id })))) {
-        if (d.answer === "no" || d.starts_at >= to || finishedAt(d) < from) continue;
-        items.push(calendarItem(d, { kind: "group", href: `/groups/${g.id}/posts/${d.post}${d.date ? `?date=${d.date}` : ""}`, who: g.name, answer: d.answer }));
-      }
-      return;
-    }
-    if (!reply && asked.has(g.id)) unreachable.push(g.name);
-    for (const e of plans.results.filter((x) => x.group_id === g.id)) {
-      items.push(calendarItem(e, { kind: "group", href: `/groups/${g.id}/posts/${e.post_id}${e.date ? `?date=${e.date}` : ""}`, who: g.name, answer: e.answer }));
-    }
-  }));
   items.sort((a, b) => a.starts_at - b.starts_at);
   return {
-    ...calendarShown(shown), items, unreachable, notAsked: Math.max(0, unsigned.length - GROUPS_ASKED),
+    ...calendarShown(shown), items,
     invitations: [
       // Invitations still to answer, for events still to come and not called off: answered here as anywhere else,
       // signed, and passed on by this site (friendcopies.js).
@@ -1128,14 +1097,15 @@ async function fromGroup(ctx, id, load) {
 
 async function groupHome(ctx, params, id) {
   return fromGroup(ctx, id, async (g) => {
-    // A signed group (step 6c: groupcopies.js): its newest posts kept here, after asking what's changed; older ones read.
-    if (g.identity) {
-      const before = Number(params.get("before")) || null;
-      const got = await groups_.groupPosts(ctx.env, ctx.url.origin, g, { before });
-      if (got.error || !got.info) throw got.error ?? new Error("The group's site sent something unexpected.");
-      return { signed: true, group: got.info, posts: got.posts, next: got.next, before, maxPhotos: MAX_GROUP_PHOTOS };
-    }
-    return { ...await groups.loadGroup(ctx.env, ctx.url.origin, g, pageNumber(params)), maxPhotos: MAX_GROUP_PHOTOS };
+    // A group from before signing: the owner's own posts and comments there, read-only (membership.js).
+    if (!g.identity) return { old: true, words: await groups.oldGroupWords(ctx.db, g) };
+    // Closed, and its 30 days are up: gone (groups.js).
+    if (groups.groupGoneHere(g)) return { gone: true };
+    // Its newest posts kept here, after asking what's changed (groupcopies.js); older ones read.
+    const before = Number(params.get("before")) || null;
+    const got = await groups_.groupPosts(ctx.env, ctx.url.origin, g, { before });
+    if (got.error || !got.info) throw got.error ?? new Error("The group's site sent something unexpected.");
+    return { group: got.info, posts: got.posts, next: got.next, before, maxPhotos: MAX_GROUP_PHOTOS };
   });
 }
 
@@ -1238,70 +1208,33 @@ async function groupItemEventFile(ctx, params, id, itemId) {
   });
 }
 
-async function groupPost(ctx, params, id, postId) {
-  return fromGroup(ctx, id, async (g) => {
-    const found = await groups.loadGroupPost(ctx.env, ctx.url.origin, g, postId);
-    if (!found?.post) throw new Error("That post isn't there any more.");
-    return found;
-  });
-}
 
 /** A photo in a group's post, among that post's photos, with ✕ going back to where the post was (?back=, on this site). */
-async function groupPhoto(ctx, params, id, postId, hash) {
-  return fromGroup(ctx, id, async (g) => {
-    const found = await groups.loadGroupPost(ctx.env, ctx.url.origin, g, postId);
-    const photos = found?.post?.photos ?? [];
-    const at = photos.findIndex((m) => m.hash === hash);
-    if (at < 0) throw new Error("That photo isn't there any more.");
-    const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/groups/${g.id}#gp${found.post.id}`;
-    return { ...found, photo: photos[at], index: at + 1, total: photos.length, prev: photos[at - 1]?.hash ?? null,
-      next: photos[at + 1]?.hash ?? null, back, stay: `?${new URLSearchParams({ back })}` };
-  });
-}
 
 /** A group's calendar: events to come, and adding one. */
 async function groupCalendar(ctx, params, id) {
   const shown = calendarView(params, ctx.zone);
   return fromGroup(ctx, id, async (g) => {
-    // A signed group's (step 6c): its events kept here, after asking what's changed.
-    if (g.identity) {
-      const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
-      const events = await groups_.groupEvents(ctx.env, g, info?.people);
-      const at = now();
-      return { signed: true, outdated: false, group: info, upcoming: events.filter((p) => finishedAt(p.event) >= at).sort((a, b) => a.event.starts_at - b.event.starts_at),
-        past: events.filter((p) => finishedAt(p.event) < at).sort((a, b) => b.event.starts_at - a.event.starts_at), ...calendarShown(shown) };
-    }
-    return { ...await groups.loadEvents(ctx.env, ctx.url.origin, g, { past: shown.from < now() }), ...calendarShown(shown) };
+    // Its events kept here, after asking what's changed (groupcopies.js).
+    if (!g.identity) throw new Error("This group is from before signing: only your own posts and comments there are shown, on its page.");
+    const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
+    const events = await groups_.groupEvents(ctx.env, g, info?.people);
+    const at = now();
+    return { group: info, upcoming: events.filter((p) => finishedAt(p.event) >= at).sort((a, b) => a.event.starts_at - b.event.starts_at),
+      past: events.filter((p) => finishedAt(p.event) < at).sort((a, b) => b.event.starts_at - a.event.starts_at), ...calendarShown(shown) };
   });
 }
 
 /** Changing an event the owner here added. */
-async function groupEventEdit(ctx, params, id, postId) {
-  return fromGroup(ctx, id, async (g) => {
-    const found = await groups.loadGroupPost(ctx.env, ctx.url.origin, g, postId);
-    if (!found?.post?.event || !found.post.mine) throw new Error("That isn't an event you added.");
-    return found;
-  });
-}
 
 /** An event as a calendar file, to open in the owner's own calendar. */
-async function groupEventFile(ctx, params, id, postId) {
-  return fromGroup(ctx, id, async (g) => {
-    const found = await groups.loadGroupPost(ctx.env, ctx.url.origin, g, postId);
-    const p = found?.post;
-    if (!p?.event) throw new Error("That isn't an event.");
-    const page = `${ctx.url.origin}/groups/${g.id}/posts/${p.id}`;
-    const body = icsFile(p.event, { uid: groupPostId(g.origin, g.remote_id, p.id), url: page,
-      about: [p.text, `${found.group.name}: ${page}`].filter(Boolean).join("\n\n") });
-    return new Response(body, { headers: { "Content-Type": "text/calendar; charset=utf-8",
-      "Content-Disposition": 'attachment; filename="event.ics"', "Cache-Control": "private, no-store" } });
-  });
-}
 
 /** Who's in a group; for its admins, also requests to join, the invite link, and running it. */
 async function groupMembers(ctx, params, id) {
   return fromGroup(ctx, id, async (g) => ({
-    ...await groups.loadMembers(ctx.env, g), max: maxMembers(ctx.env), connected: ctx.connected,
+    // Closed, and its 30 days are up: nobody's left to list, and its owner can delete its site (groupsites.js).
+    ...(groups.groupGoneHere(g) ? { gone: true, members: [], group: null } : await groups.loadMembers(ctx.env, g)),
+    max: maxMembers(ctx.env), connected: ctx.connected,
     // Self-hosted, its data stays on the server until a command removes it (hosting.js).
     deleteCommand: selfHosted(ctx.env) && g.role === "owner" ? serverCommand(`delete-group ${new URL(g.origin).host}`) : null,
     // Where the owner stands with each member, to offer asking them to be friends (connect.js).

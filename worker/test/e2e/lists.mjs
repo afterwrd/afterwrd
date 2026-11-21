@@ -345,6 +345,24 @@ check("a comment slipped in after closing is spotted, though the host signed it"
     && raw.prepare("SELECT COUNT(*) AS n FROM list_pages WHERE list = ?").get(itemRecord.fp).n === 0, deleted.refused);
   check("…and it can't be put back, with or without its old comments", (await takeRecord(db, { sent: itemRecord.sent, host, lookups, taken: NOW + 4 })).refused === "That's been deleted."
     && (await takeRecord(db, { sent: made[5].sent, host, lookups, taken: NOW + 4 })).refused === "That's been deleted.");
+
+  // A group's members list (its id is the group's own) hosted the same way: removing someone is about their `join`,
+  // which stays (step 6e found it emptied, so nobody could check the list after anyone was removed).
+  const group = await person("https://group.example");
+  const gHost = { person: group.id, privateKey: group.hosting.privateKey };
+  raw.prepare("INSERT INTO lists (id, owner, n, head, created_at) VALUES (?, ?, 0, '', ?)").run(group.id, ann.id, NOW);
+  const memberAt = async () => { const r = await readList(db, group.id, { host: gHost }); const e = r.entries.at(-1); return e ? { n: e.n, h: e.head } : null; };
+  const joined = await makeRecord({ kind: "join", author: cat.id, host: group.id, item: group.id, seen: null, prev: null }, { name: "Cat" }, cat.browser);
+  const tookJoin = await takeRecord(db, { sent: joined.sent, host: gHost, lookups, taken: NOW + 5 });
+  const letIn = await makeRecord({ kind: "approve", author: ann.id, host: group.id, item: group.id, seen: await memberAt(), prev: null, about: joined.fp }, undefined, ann.browser);
+  const tookIn = await takeRecord(db, { sent: letIn.sent, host: gHost, lookups, taken: NOW + 6 });
+  const out = await makeRecord({ kind: "remove", author: ann.id, host: group.id, item: group.id, seen: await memberAt(), prev: letIn.fp, about: joined.fp }, undefined, ann.browser);
+  const tookOut = await takeRecord(db, { sent: out.sent, host: gHost, lookups, taken: NOW + 7 });
+  const members = await readList(db, group.id, { host: gHost });
+  const read = await checkList({ host: group.id, hostingKey: group.state.current.hosting, list: group.id, owner: ann.id, Kind: MemberRules,
+    entries: members.entries, signedHead: members.signedHead, lookups });
+  check("removing someone from a group keeps their join on its members list, which still checks", !tookJoin.refused && !tookIn.refused && !tookOut.refused
+    && members.entries[0].sent && !read.problem && read.rules.roleOf(cat.id) === null, `${tookJoin.refused} ${tookIn.refused} ${tookOut.refused} ${read.problem}`);
 }
 
 // --- a group's members list (step 6b: src/members.js) ------------------------------------------------------------------
@@ -386,7 +404,7 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("…and he can't act on what he saw as an admin before", (await take(await sign(bob, "remove", { about: daveJoin.fp, role_at: stale }))) === "Only the group's admins can do that.");
   check("a member leaves", !(await take(await sign(cat, "leave"))) && rules.roleOf(cat.id) === null);
   check("…and can't be approved again without joining again", (await take(await sign(ann, "approve", { about: catJoin.fp }))) === "They aren't in this group, or asking.");
-  check("the owner can't leave", (await take(await sign(ann, "leave"))) === "The owner can't leave: delete the group instead.");
+  check("the owner can't leave", (await take(await sign(ann, "leave"))) === "The owner can't leave: close the group instead.");
   check("…and these kinds belong only in a members list", new Rules({ host: G, list: "i".repeat(43), owner: ann.id })
     .refuse({ ...(await sign(bob, "join", {}, { name: "Bob" })).got, record: { ...(await sign(bob, "join", {}, { name: "Bob" })).got.record, item: "i".repeat(43) } }, NOW)
     === "That belongs in a group's members list.");

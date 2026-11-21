@@ -26,7 +26,7 @@ import { MAX_COMMENT } from "./archive/comments.js";
 import { finishedAt } from "./calendar.js";
 import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js";
 import { signedLink } from "./friends.js";
-import { copyPhotos, GROUP_BYTES, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
+import { closedGroup, copyPhotos, GROUP_BYTES, groupGone, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
 import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
 import { listEntries, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
 import { checkProfile, identityState } from "./identities.js";
@@ -80,6 +80,7 @@ async function keepProfile(env, person, profile) {
 }
 
 export async function handleGroupItems(request, env, url) {
+  if (await groupGone(env)) return json({ error: "This group has closed." }, 410);
   const member = await signedMember(request, env, url);
   const group = member && (await theGroup(env.DB));
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
@@ -91,8 +92,10 @@ export async function handleGroupItems(request, env, url) {
   if (!self) return json({ error: "This group isn't ready yet." }, 409);
   const db = env.DB;
   const body = request.method === "POST" ? await request.json().catch(() => ({})) : null;
-  if (request.method === "POST" && url.pathname === "/_p/items") return newPost(env, url, self, group, member, body);
-  if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body);
+  // Closed (step 6e: groups.js): read-only for its last 30 days, but for members deleting what they wrote.
+  const shut = Boolean(closedGroup(group));
+  if (request.method === "POST" && url.pathname === "/_p/items") return shut ? json({ error: "This group has closed." }, 409) : newPost(env, url, self, group, member, body);
+  if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body, { shut });
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const before = Number(url.searchParams.get("before") ?? 0) || 0;
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
@@ -350,8 +353,8 @@ async function newPost(env, url, self, group, member, body) {
   return json({ ok: true, id, receipt: answer.receipt });
 }
 
-/** A member's record on a post here (POST /_p/records). */
-async function memberRecord(env, url, self, member, body) {
+/** A member's record on a post here (POST /_p/records). Once the group's closed (`shut`), only their own deletes. */
+async function memberRecord(env, url, self, member, body, { shut = false } = {}) {
   const db = env.DB;
   const mine = await theirs(env, String(member.identity), { sent: body?.sent, delegation: body?.delegation });
   if (mine.error) return json({ error: mine.error }, 400);
@@ -359,6 +362,7 @@ async function memberRecord(env, url, self, member, body) {
   const { record, content } = got;
   const id = String(record.item ?? "");
   if (!KINDS.has(record.kind) || !ID_RE.test(id) || record.host !== self.person) return json({ error: "That didn't work." }, 400);
+  if (shut && record.kind !== "delete") return json({ error: "This group has closed." }, 409);
   const item = await db.prepare("SELECT id, author, type, content, version, tally, audience FROM items WHERE id = ?").bind(id).first();
   if (!item) return json({ error: "That post isn't here any more." }, 404);
   const now_ = JSON.parse(String(item.content));
@@ -482,6 +486,19 @@ async function memberNames(env, people) {
 export async function groupNoteFor(env, note, member) {
   const db = env.DB;
   if (note.kind === "gone" || note.kind === "gone-off") return { v: 2, kind: "gone", item: note.item, cancelled: note.kind === "gone-off" };
+  // The owner closed the group (step 6e): their `close` on the members list, with the group's receipt for it.
+  if (note.kind === "closed") {
+    const self = await groupSelf(env);
+    const entries = self ? await listEntries(db, self.list) : [];
+    const at = entries.findIndex((e) => e.fp === note.fp);
+    const entry = entries[at];
+    if (!entry?.sent) return null;
+    const record = parseRecord(fromB64url(entry.sent.record));
+    return { v: 2, kind: "closed", item: self.list,
+      entry: { n: entry.n, fp: entry.fp, taken: entry.taken, prev: at > 0 ? entries[at - 1].head : "", sent: entry.sent },
+      receipt: await signHead(self.privateKey, { host: self.person, list: self.list, n: entry.n, head: entry.head }),
+      delegations: await delegationsFor(db, [record.key]), people: await peopleFor(db, [record.author]) };
+  }
   if (note.kind === "item" || note.kind === "here") {
     const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
       WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();

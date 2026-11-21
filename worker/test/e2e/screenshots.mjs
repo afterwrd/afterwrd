@@ -6,7 +6,7 @@
 import puppeteer from "puppeteer-core";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { settled, setUpSigning } from "./helpers.mjs";
+import { letInto, settled, setUpSigning, startSignedGroup } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -20,6 +20,7 @@ const HOSTS = { "localhost:8787": "afterwrd.annm.workers.dev", "localhost:8788":
   "localhost:8789": "afterwrd.cathr.workers.dev", "localhost:8790": "afterwrd-bookclub.annm.workers.dev" };
 const CODE = "local-test-setup-code";
 const GROUP_KEY = "local-test-group-key";
+const [, , , stateB, stateC] = process.argv.slice(2); // the made-up export, photos, then each site's state (run.sh)
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const step = (what) => console.log(`·  ${what}`);
 
@@ -198,22 +199,9 @@ await commentOnFirst(cath, "article.from-friend", "Looks lovely. Say happy birth
 step("comments");
 
 // A group, with an event.
-const waiting = await post(ann, "/_groups/create/local", { origin: G, setup: GROUP_KEY, name: "Book club", about: "One book a month, and cake." });
-const { id: group } = await post(ann, "/_groups/create/claim", { id: waiting.id });
-await ann.goto(`${A}/groups/${group}/members`);
-await ann.click("#make");
-await ann.waitForSelector("#link:not([hidden])");
-const invite = await ann.$eval("#link-url", (i) => i.value);
-for (const [page, site] of [[ben, B], [cath, C]]) {
-  await page.goto(invite);
-  await page.$eval("#site", (f) => { f.closest("details").open = true; });
-  await page.type("#site input", site);
-  await Promise.all([page.waitForNavigation(), page.click("#site button")]);
-  await Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click("#go")]);
-}
-await ann.goto(`${A}/groups/${group}/members`);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
-await Promise.all([ann.waitForNavigation(), ann.click('.requests button[formaction$="/approve"]')]);
+const group = await startSignedGroup(ann, { origin: G, setup: GROUP_KEY, name: "Book club", about: "One book a month, and cake." });
+await letInto(ann, A, group, ben, B, stateB);
+await letInto(ann, A, group, cath, C, stateC);
 await ann.goto(`${A}/groups/${group}`);
 await ann.type("#composer textarea", "Next month: The Remains of the Day. Copies on my shelf if anyone needs one.");
 await Promise.all([ann.waitForNavigation({ timeout: 60_000 }), ann.click("#composer button.post")]);
