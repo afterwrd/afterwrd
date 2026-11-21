@@ -34,6 +34,7 @@ import { now, pageData, withoutKeys } from "../util.js";
 import { safeNext } from "../auth.js";
 import { fmtDate, fmtMonth } from "../views/format.js";
 import { checkSentRound, sentTrouble } from "../sentchecks.js";
+import { busyAccount } from "../allowances.js";
 import { peopleShown } from "../names.js";
 import * as archiveViews from "../views/archive.js";
 import * as eventViews from "../views/events.js";
@@ -758,7 +759,7 @@ async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
   const [own, friendOwn, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows, sent] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows, sent, busy] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
     // …and their posts from before signing: theirs alone, read-only, until migration (docs/signed-conversations.md).
@@ -792,6 +793,8 @@ async function home(ctx, params) {
       WHERE c.approved_at IS NOT NULL AND i.moving_to IS NOT NULL AND i.moving_to != c.origin ORDER BY i.moving_at LIMIT 5`),
     // Deletes and leaves not taken yet, and anything signed as the owner that their site never sent (sentchecks.js).
     sentTrouble(db),
+    // The Cloudflare account busy (this site and its groups) on 3 days this week: said calmly (allowances.js).
+    busyAccount(ctx.env).catch(() => null),
   ]);
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
@@ -819,7 +822,7 @@ async function home(ctx, params) {
     checkGrant: checkGrantState, // a problem with it, if there is one
     // The one reminder that the site can look after itself (keep up to date, let friends' sites check it), if it can't yet.
     lookAfter: await lookAfterReminder(db, auto, checkGrantState, lookAfterFound),
-    asking, introductions, archiveDropped,
+    asking, introductions, archiveDropped, busy,
   };
 }
 

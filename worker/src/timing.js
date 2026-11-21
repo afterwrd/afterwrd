@@ -24,7 +24,7 @@ import { squeezeFrom } from "./limits.js";
 /**
  * @typedef {{ n: number, ms: number, active: number, since: number, rounds: number }} Clock
  * @typedef {{ start: number, db: Clock, sites: Clock, objects: number, show: boolean, delays: { db: number, sites: number },
- *   sql: { ms: number, rows: number }, scale?: Scale }} Timing
+ *   sql: { ms: number, rows: number }, scale?: Scale, caller?: string }} Timing
  * @typedef {{ object: any, refused: number, cursors: any[], texts: string[], writes: number, pending: Promise<unknown>[] }} Scale
  */
 
@@ -90,6 +90,18 @@ const fresh = () => ({ start: Date.now(), db: clock(), sites: clock(), objects: 
 export function measure(answer) {
   if (current.getStore()?.scale) return answer();
   return current.run(fresh(), answer);
+}
+
+/** The site calling in this request (allowances.js admit): the rows it reads are charged to its allowance at the end. */
+export function noteCaller(person) {
+  const timing = current.getStore();
+  if (timing) timing.caller = person;
+}
+
+/** Who this request was from (noteCaller), if anyone, and the rows it has read so far; null outside a request. */
+export function requestCaller() {
+  const timing = current.getStore();
+  return timing ? { person: timing.caller ?? null, rows: timing.sql.rows } : null;
 }
 
 // --- Scale tests (test/scale; docs/scale-test-plan.md) --------------------------------------------------------------

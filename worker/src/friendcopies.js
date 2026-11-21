@@ -6,7 +6,7 @@
 // - commenting on it: signed in the browser, passed on by this site in a signed call, and kept in `sent` with the host's
 //   receipt (relayRecord):
 //     POST /_admin/friend/<connection>/items/<id>/records   form: sent (JSON), back
-import { callFriend, friendPerson, switchConnection } from "./calls.js";
+import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
 import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
@@ -79,9 +79,9 @@ export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && 
  */
 export function noteAnswer(db, connection, error = null, at = now()) {
   // 409 and 410 are a site that's there, mid-move: they've moved (410), or this site isn't recognised at its new address
-  // yet (409). Not missing.
+  // yet (409). 429 is a site that's there, saying this one has had its allowance there today (allowances.js). Not missing.
   Object.assign(connection, !error ? { reached_at: at, missing_since: null, said_no: 0 }
-    : [403, 409, 410].includes(error.status) ? { missing_since: null, said_no: 0 }
+    : [403, 409, 410, 429].includes(error.status) ? { missing_since: null, said_no: 0 }
     : { missing_since: connection.missing_since ?? at, said_no: error.status === 401 ? 1 : 0 });
   return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
     .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
@@ -102,9 +102,11 @@ export async function pullItems(env, from, connection) {
       const moved = await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1 AND moving_to = ? AND moving_at > ?").bind(from, now() - FOLLOW_SECONDS).first();
       if (moved) error = { status: 409 };
     }
+    // Asked again in an hour; or, if their site says this one has had its allowance there today, once the day's over.
+    const busy = busyUntil(error);
     await env.DB.batch([
       noteAnswer(env.DB, connection, error),
-      env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(now(), connection.id),
+      env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - PULL_SECONDS) : now(), connection.id),
       ...(error.status === 401 ? [env.DB.prepare("DELETE FROM copies WHERE connection_id = ?").bind(connection.id)] : []),
     ]);
     return null;
@@ -364,7 +366,9 @@ export async function friendThread(env, from, connection, id) {
   const person = await friendPerson(env, connection);
   if (!person) return { error: "Their site doesn't take signed comments yet." };
   let data;
-  try { data = await callFriend(env, from, String(connection.origin), `/_p/items/${id}`); } catch (error) { return { error: error.message }; }
+  try { data = await callFriend(env, from, String(connection.origin), `/_p/items/${id}`); } catch (error) {
+    return { error: busyUntil(error) ? `${connection.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message };
+  }
   // Everyone in it: their identities as their site passed them on (each checked as it's learnt), and their names.
   const names = new Map();
   const me = await ownHost(env);

@@ -25,7 +25,10 @@ import { messagePage } from "./views/pages.js";
 import { signedFor } from "./share.js";
 import { PUBLIC_APP, PUBLIC_FONT, PUBLIC_SIGNING, serveStatic } from "./static.js";
 import { handleCheck } from "./checks.js";
-import { html } from "./util.js";
+import { html, json } from "./util.js";
+import { bodyBytes } from "./calls.js";
+import { countRequest, testLimits } from "./limits.js";
+import { OverAllowance, settle } from "./allowances.js";
 import { handleLive } from "./live.js";
 import { handlePush } from "./push.js";
 import { autoState, handleAutoConnect, handleAutoStep, health, runAuto } from "./auto.js";
@@ -62,14 +65,20 @@ export const handle = (request, env, work) => measure(async () => {
   testDelays(env);
   if (env.ALLOW_LOCAL_SITES && env.TEST_SLOW_SECONDS) testSlowSeconds(Number(env.TEST_SLOW_SECONDS));
   if (env.ALLOW_LOCAL_SITES && env.TEST_CLOSE_SECONDS) testCloseSeconds(Number(env.TEST_CLOSE_SECONDS));
+  testLimits(env);
+  countRequest(); // today's usage (limits.js), for the busy-account warning
   let response;
   try {
     response = await route(request, env, work);
   } catch (error) {
+    // A site past its allowance here today (allowances.js): refused until the day ends, and told when that is.
+    if (error instanceof OverAllowance) response = json({ error: error.message, ...error.more }, 429);
     // A newer version may have changed the database under this one (migrate.js): say so, rather than fail.
-    if (!(await checkNewer(env))) throw error;
-    response = beingUpdated(request);
+    else if (!(await checkNewer(env))) throw error;
+    else response = beingUpdated(request);
   }
+  // The rows this request read, charged to whoever it was from; counts saved now and then (allowances.js).
+  await settle(env).catch((error) => console.error("Counting:", error.message));
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(HEADERS)) headers.set(name, value);
   const timing = timingHeader();
@@ -110,6 +119,13 @@ async function route(request, env, work) {
   // On a newer version's database, only which version this is, an update's own steps (they only use settings), and the
   // stylesheet and fonts for the page saying so.
   if (url.pathname !== "/_version" && !/^\/(_auto|static)\//.test(url.pathname) && await databaseIsNewer(env)) return beingUpdated(request);
+  // Other sites' calls (friends', members', groups'): bodies of 64 KB at most, refused before anything is read or
+  // checked (T31). Read once here, so what follows can read it again.
+  if (request.method === "POST" && /^\/_(p|member|group)\//.test(url.pathname)) {
+    const bytes = await bodyBytes(request);
+    if (!bytes) return json({ error: "That's too big." }, 413);
+    request = new Request(request, { body: bytes });
+  }
   if (env.GROUP_KEY) return routeGroup(request, env, url);
   // Which uploaded version of the Worker is answering at this address: public, as it says nothing but an ID Cloudflare
   // made up. A friend's check (checks.js) compares it with what Cloudflare says, to be sure it read the right Worker.

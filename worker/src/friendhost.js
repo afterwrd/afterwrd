@@ -15,7 +15,7 @@
 // (And POST /_p/notes, a friend's site telling this one about something new: notes.js.)
 import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
-import { listEntries, readList } from "./hosted.js";
+import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList } from "./hosted.js";
 import { checkProfile, identityState } from "./identities.js";
 import { checkDelegation } from "./identity.js";
 import { ownHost, recordOn } from "./items.js";
@@ -130,7 +130,8 @@ export async function handleFriendItems(request, env, url, work) {
     try { asked = JSON.parse(new TextDecoder().decode(body)); } catch {}
     const host = await ownHost(env);
     if (!host) return json({ error: "Not found." }, 404);
-    return json(await answerCheck(env, caller.person, asked, { host: host.person, mayRead: (id) => mayCallerSee(db, id, caller.connection.id) }));
+    const answer = await answerCheck(env, caller.person, asked, { host: host.person, mayRead: (id) => mayCallerSee(db, id, caller.connection.id) });
+    return json(answer, answer.status ?? 200);
   }
   if (request.method === "POST" && url.pathname === "/_p/records") {
     let sent = null, delegation = null, profile = null;
@@ -142,6 +143,8 @@ export async function handleFriendItems(request, env, url, work) {
     // Someone the owner's blocked (blocks.js): not taken, with no more said than any refusal.
     if (await isBlocked(db, caller.person)) return json({ error: "That wasn't taken." }, 409);
     if (!(await mayCallerSee(db, record.item, caller.connection.id))) return json({ error: "That post isn't here any more." }, 404);
+    // At most so many a day from one writer, across all the owner's posts (hosted.js).
+    if (await overDailyRecords(db, caller.person, String(record.kind))) return json({ error: DAILY_RECORDS_SAID }, 429);
     const state = await identityState(env, caller.person);
     const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
     if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return json({ error: "That isn't signed by them." }, 400);

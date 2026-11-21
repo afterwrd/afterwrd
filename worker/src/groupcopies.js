@@ -13,7 +13,7 @@
 //                                               change, or (an admin) remove or calloff
 // - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
 import { blockedAmong, isBlocked } from "./blocks.js";
-import { callFriend } from "./calls.js";
+import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
@@ -23,7 +23,7 @@ import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
-import { pushAllowed } from "./notify.js";
+import { pushAllowed, writerMayBuzz } from "./notify.js";
 import { checkPhotos, removeUnusedFiles } from "./posts.js";
 import { notifyLater } from "./push.js";
 import { checkGroupReceipts, queueReceipts } from "./receipts.js";
@@ -36,6 +36,7 @@ import { messagePage } from "./views/pages.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { decode, fromB64url } from "../public/static/signed.js";
 import { html, json, now, Refusal } from "./util.js";
+import { keepGroupUsage } from "./allowances.js";
 
 export const KEEP = 50; // a group's newest posts kept here (docs/signed-conversations.md section 3)
 const PULL_SECONDS = 3600;
@@ -62,6 +63,9 @@ async function learnPeople(env, people) {
   return names;
 }
 
+/** What to say when a group's site refused a call: if it's had a lot from this one today (allowances.js), that. */
+const busyMessage = (group, error) => (busyUntil(error) ? `${group.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message);
+
 /** A call to a group's site, signed by this one. Throws as callFriend does. */
 const ask = async (env, from, group, path, body = null) => callFriend(env, from, String(group.origin), path, { ...(body !== null && { body }), timeout: 25_000 });
 
@@ -79,11 +83,15 @@ export async function pullGroup(env, from, group) {
     try {
       data = await ask(env, from, group, `/_p/items?since=${since}`);
     } catch (error) {
-      await db.prepare("UPDATE groups SET items_checked_at = ? WHERE id = ?").bind(now(), group.id).run();
+      // Asked again in an hour; or, if the group's site says this one has had its allowance there today, once the day's over.
+      const busy = busyUntil(error);
+      await db.prepare("UPDATE groups SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - PULL_SECONDS) : now(), group.id).run();
       if (page === 0) throw error;
       break;
     }
     if (page === 0) info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
+    // A group the owner here started: how busy its site has been, for Home's busy-account warning (allowances.js).
+    if (page === 0 && data.usage) await keepGroupUsage(db, Number(group.id), data.usage).catch(() => null);
     // Anything signed as the owner here that this site never sent (sentchecks.js).
     if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
     await learnPeople(env, data.people);
@@ -259,7 +267,7 @@ async function copyRules(env, group, data) {
  */
 export async function groupThread(env, from, group, id, people = []) {
   let data;
-  try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: error.message, status: error.status }; }
+  try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
   const signed = await learnPeople(env, data.people);
   const state = await identityState(env, String(group.identity));
   if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
@@ -436,14 +444,15 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     const actor = (await namesFor(env.DB, [author])).get(author) ?? groupSays(note, author);
     const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
     if ((kept.record.mentions ?? []).includes(me.person)) {
-      if (await keepNotice(env.DB, { kind: "mention", fp: id, group: g, item: id, target: id, actor, text })) {
-        await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, url: link(id), tag: `mention-g${g}-${id}` });
+      if (await keepNotice(env.DB, { kind: "mention", fp: id, group: g, item: id, target: id, actor, text, author })) {
+        await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, url: link(id), tag: `mention-g${g}-${id}`, author });
       }
     } else if (note.here === true && kept.content.here) {
       // @here: on Notifications always; on the phone, only the first from this group in a day.
       const told = await env.DB.prepare("SELECT 1 FROM notices WHERE group_id = ? AND kind = 'here' AND created_at > ? LIMIT 1").bind(g, now() - 86400).first();
-      if (await keepNotice(env.DB, { kind: "here", fp: id, group: g, item: id, target: id, actor, text }) && !told
-        && (await pushAllowed(env.DB, "SELECT COUNT(*) AS n FROM notices WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?2", g, now()))) {
+      if (await keepNotice(env.DB, { kind: "here", fp: id, group: g, item: id, target: id, actor, text, author }) && !told
+        && (await pushAllowed(env.DB, "SELECT COUNT(*) AS n FROM notices WHERE group_id = ?1 AND kind IN ('mention', 'here') AND created_at > ?2", g, now()))
+        && (await writerMayBuzz(env.DB, author))) {
         notifyLater(env, url.origin, work, { kind: "mention", title: String(group.name), text: `${actor} wrote to everyone: ${snippet(text)}`,
           hidden: "Wrote to everyone in a group", url: link(id), tag: `here-g${g}-${id}` });
       }
@@ -503,9 +512,9 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     const there = !mentioned && !own && (await env.DB.prepare(`SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' AND ${TAKEN_SQL} LIMIT 1`).bind(item).first());
     if (!mentioned && !own && !there) return json({ ok: true }, 202);
     const text = got.content?.text ?? "";
-    const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, group: g, own, item, target, actor, text });
+    const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, group: g, own, item, target, actor, text, author });
     if (kept && mentioned) {
-      await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, comment: true, url: link(target), tag: `mention-g${g}-${target}` });
+      await tellMention(env, url.origin, work, { group: g, title: String(group.name), actor, text, comment: true, url: link(target), tag: `mention-g${g}-${target}`, author });
     }
     return json({ ok: true }, 202);
   }
@@ -601,7 +610,7 @@ async function dateCalledOff(env, url, work, { group, me, copy, was, item, date,
  */
 export async function groupDate(env, from, group, id, date, admins = new Set()) {
   let data;
-  try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: error.message }; }
+  try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: busyMessage(group, error) }; }
   const mine = (await env.DB.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(dateList(id, date)).first())?.fp ?? null;
   if (data?.empty === true) return { answers: {}, off: null, seen: null, mine, problem: null };
   await learnPeople(env, data.people);

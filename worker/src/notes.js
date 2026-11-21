@@ -29,8 +29,8 @@ import { identityState, learnIdentity, parseChain, checkProfile } from "./identi
 import { TAKEN_SQL } from "./sentchecks.js";
 import { ID_RE, ownHost } from "./items.js";
 import { checkHead, headOf, signHead } from "./lists.js";
-import { rateWindow } from "./limits.js";
-import { pushAllowed } from "./notify.js";
+import { daySecondsNow, LIMITS, rateWindow } from "./limits.js";
+import { pushAllowed, writerMayBuzz } from "./notify.js";
 import { outbox } from "./outbox.js";
 import { notifyLater } from "./push.js";
 import { checkRecord } from "./records.js";
@@ -140,26 +140,33 @@ export async function noteFor(env, note, connection) {
 
 /**
  * Keeps a notice for the owner here, within the limits for `connection`'s site, or `group`'s (counted together, of
- * every kind), once per record and kind. Returns whether it was kept.
+ * every kind), once per record and kind. With `author` (whose record it is: a mention or a reply), also within that
+ * writer's own daily limit, across every friend's site and group (step 8: LIMITS.notices). Returns whether it was kept.
  */
-export async function keepNotice(db, { kind, fp, connection = null, group = null, own = 0, item, target, actor, text }) {
+export async function keepNotice(db, { kind, fp, connection = null, group = null, own = 0, item, target, actor, text, author = null }) {
   const at = now();
   const by = group === null ? "connection_id" : "group_id";
-  const row = await db.prepare(`INSERT INTO notices (kind, fp, ${by}, own, target, actor, text, created_at, item)
-    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12
+  const row = await db.prepare(`INSERT INTO notices (kind, fp, ${by}, own, target, actor, text, created_at, item, author)
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12, ?13
     WHERE (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - ?9) < ?10
       AND (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - 86400) < ?11
+      AND (?13 IS NULL OR (SELECT COUNT(*) FROM notices WHERE author = ?13 AND created_at > ?8 - ?14) < ?15)
     ON CONFLICT (kind, fp) DO NOTHING RETURNING id`)
-    .bind(kind, fp, group ?? connection, own, target, snippet(actor, 100) || null, snippet(text) || null, at, rateWindow(RATE.seconds), RATE.count, DAILY, item).first();
+    .bind(kind, fp, group ?? connection, own, target, snippet(actor, 100) || null, snippet(text) || null, at, rateWindow(RATE.seconds), RATE.count, DAILY, item,
+      author, daySecondsNow(), LIMITS.notices).first();
   // Only what's past keeping (notices_by_time).
   await db.prepare("DELETE FROM notices WHERE created_at < ?").bind(at - KEEP_SECONDS).run();
   return Boolean(row);
 }
 
-/** A mention said on the owner's phones that take mentions, within their allowance (notify.js pushAllowed). */
-export async function tellMention(env, origin, work, { connection = null, group = null, title, actor, text, url, tag, comment = false }) {
+/**
+ * A mention said on the owner's phones that take mentions, within their allowance from that site or group (notify.js
+ * pushAllowed) and, with `author`, within that writer's own (step 8: LIMITS.pushes a day, wherever they wrote).
+ */
+export async function tellMention(env, origin, work, { connection = null, group = null, title, actor, text, url, tag, comment = false, author = null }) {
   const by = group === null ? "connection_id" : "group_id";
   if (!(await pushAllowed(env.DB, `SELECT COUNT(*) AS n FROM notices WHERE ${by} = ?1 AND kind = 'mention' AND created_at > ?2`, group ?? connection, now()))) return;
+  if (author && !(await writerMayBuzz(env.DB, author))) return;
   notifyLater(env, origin, work, { kind: "mention", title, text: `${actor === title ? "Mentioned you" : `${actor} mentioned you`}: ${snippet(text)}`,
     hidden: comment ? "Mentioned you in a comment" : "Mentioned you in a post", url, tag });
 }
@@ -199,8 +206,8 @@ async function receiveItem(env, url, work, { connection, person }, me, note) {
   const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
   await keepNotice(env.DB, { kind: "post", fp: id, connection: connection.id, item: id, target: id, actor: name, text });
   if ((kept.record.mentions ?? []).includes(me.person)
-    && (await keepNotice(env.DB, { kind: "mention", fp: id, connection: connection.id, item: id, target: id, actor: name, text }))) {
-    await tellMention(env, url.origin, work, { connection: connection.id, title: name, actor: name, text,
+    && (await keepNotice(env.DB, { kind: "mention", fp: id, connection: connection.id, item: id, target: id, actor: name, text, author: kept.record.author }))) {
+    await tellMention(env, url.origin, work, { connection: connection.id, title: name, actor: name, text, author: kept.record.author,
       url: `/friend/${connection.id}/posts/${id}`, tag: `mention-${connection.id}-${id}` });
   }
   return json({ ok: true }, 202);
@@ -243,9 +250,9 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
   const text = got.content?.text ?? "";
-  const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, connection: connection.id, item, target, actor, text });
+  const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, connection: connection.id, item, target, actor, text, author });
   if (kept && mentioned) {
-    await tellMention(env, url.origin, work, { connection: connection.id, title: String(connection.name), actor, text, comment: true,
+    await tellMention(env, url.origin, work, { connection: connection.id, title: String(connection.name), actor, text, comment: true, author,
       url: `/friend/${connection.id}/posts/${target}`, tag: `mention-${connection.id}-${target}` });
   }
   return json({ ok: true }, 202);
@@ -262,9 +269,9 @@ export async function noticeOwn(env, origin, work, { item, record, content, fp, 
   const target = photo ? `${photo.post}/photos/${Number(photo.position) + 1}` : item;
   const mentioned = (record.mentions ?? []).includes(me.person);
   const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp, connection: connection.id, own: 1, item, target,
-    actor: String(connection.name), text: content?.text ?? "" });
+    actor: String(connection.name), text: content?.text ?? "", author: record.author });
   if (kept && mentioned) {
-    await tellMention(env, origin, work, { connection: connection.id, title: String(connection.name), actor: String(connection.name),
+    await tellMention(env, origin, work, { connection: connection.id, title: String(connection.name), actor: String(connection.name), author: record.author,
       text: content?.text ?? "", comment: true, url: `/posts/${photo ? String(photo.post) : item}`, tag: `mention-own-${target}` });
   }
 }

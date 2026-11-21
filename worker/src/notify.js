@@ -1,6 +1,6 @@
 // How many mentions may reach the owner's phones (notes.js, groupcopies.js). Notes from friends' sites and groups'
 // are notes.js and groupcopies.js; groups' old keyed notes (POST /_member/notify) went in step 6e.
-import { rateWindow } from "./limits.js";
+import { daySecondsNow, LIMITS, rateWindow } from "./limits.js";
 
 // Of those kept (from one friend's site, or one group), how many may reach the owner's phones: the rest wait quietly on
 // Notifications. `sql` counts those kept so far, including the one just kept, since ?2 (with ?1 who from, and ?3
@@ -12,4 +12,15 @@ export async function pushAllowed(db, sql, from, at, more = null) {
     db.prepare(sql).bind(from, at - 86400, ...(more === null ? [] : [more])),
   ]);
   return recent.results[0].n <= MENTION_PUSH.count && today.results[0].n <= MENTION_PUSH.daily;
+}
+
+/**
+ * Whether a mention by `author` that's just been kept may reach the owner's phones too: the first LIMITS.pushes a day
+ * from one writer do, wherever they wrote (step 8), so one person can't keep a phone buzzing through several sites.
+ * @param {D1Database} db @param {string} author
+ */
+export async function writerMayBuzz(db, author) {
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM notices WHERE author = ? AND kind IN ('mention', 'here') AND created_at > ?")
+    .bind(author, Math.floor(Date.now() / 1000) - daySecondsNow()).first();
+  return Number(row?.n ?? 0) <= LIMITS.pushes;
 }

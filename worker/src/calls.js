@@ -8,6 +8,7 @@ import { fetchIdentity, hostingKeyFor, identityState } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { ownHost } from "./items.js";
 import { host, ownerName, readLimited } from "./sites.js";
+import { admit } from "./allowances.js";
 
 const TIMEOUT_MS = 8000;
 const MAX_REPLY = 2_000_000;
@@ -51,7 +52,9 @@ export async function callFriend(env, from, origin, path, { body = null, timeout
   try { data = JSON.parse(await readLimited(response, MAX_REPLY)); } catch {}
   if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
   if (!response.ok) {
-    throw Object.assign(new Error(typeof data.error === "string" ? data.error.slice(0, 300) : `${host(origin)} answered ${response.status}.`), { status: response.status });
+    // retry: a site saying this one has had its allowance there today, and when to try again (allowances.js).
+    throw Object.assign(new Error(typeof data.error === "string" ? data.error.slice(0, 300) : `${host(origin)} answered ${response.status}.`),
+      { status: response.status, ...(response.status === 429 && Number.isSafeInteger(data.retry) && { retry: data.retry }) });
   }
   return data;
 }
@@ -107,6 +110,7 @@ export async function friendCalling(request, env, url, body = null, { waiting = 
   if (!connection.approved_at && !waiting) {
     return Response.json({ error: `Waiting for ${await ownerName(env.DB)} to approve the connection.` }, { status: 403 });
   }
+  await admit(env, caller.person); // within their allowance here today, or refused (allowances.js)
   return { connection: /** @type {Row<"connections">} */ (/** @type {unknown} */ (connection)), person: caller.person };
 }
 
@@ -140,10 +144,15 @@ export async function switchConnection(env, connection, to) {
  * @param {URL} url
  * @param {Uint8Array | null} body
  */
-export function siteCalling(request, env, url, body) {
-  return checkCall({ method: request.method, url: request.url, headers: request.headers, body },
+export async function siteCalling(request, env, url, body) {
+  const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
     { ownOrigin: url.origin, hostingKeyOf: (person, site) => hostingKeyFor(env, person, site) });
+  if (caller) await admit(env, caller.person); // within their allowance here today, or refused (allowances.js)
+  return caller;
 }
+
+/** When a site that refused a call (callFriend's error) says to try again, if it said this site had had its allowance. */
+export const busyUntil = (error) => (error?.status === 429 && Number.isSafeInteger(error.retry) ? error.retry : null);
 
 /** A call's body as bytes, read once; null if it's bigger than `limit`. */
 export async function bodyBytes(request, limit = 64 * 1024) {

@@ -41,7 +41,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] } }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -84,6 +84,10 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
         ${lookAfter.attempts.length === 1 ? "site has" : "sites have"} already tried to check it.`}
       <a id="look-after-go" href="${lookAfter.auto ? (lookAfter.checks ? "/_cloudflare/auto-start?then=checks" : "/_cloudflare/auto-start") : "/_cloudflare/checks-start"}">Set it up</a>
       <button class="link">Not now</button></form>`}
+    ${busy && html`<p class="notice" id="busy-account">Your Cloudflare account has been busy: over half of its free daily
+      allowance on ${busy.days} days this week${busy.sources.length > 1 ? html` (${busy.sources.map((s) => `${s.name ?? "your own site"} ${s.share}%`).join(", ")})` : ""}.
+      Nothing has stopped, but if it reaches the limit, your site and groups pause until it resets at midnight UTC.
+      ${busy.sources.some((s) => s.name) ? "Closing a group you no longer need frees it up." : ""}</p>`}
     ${archiveDropped && html`<p class="notice" id="archive-dropped">Your site moved to faster storage, but your Facebook
       download was too big to move with it in one day, so it was left out. Your own posts, photos, friends and groups all
       came. To have your Facebook years back, <a href="/_admin/import">import your download again</a>.</p>`}

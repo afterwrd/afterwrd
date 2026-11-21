@@ -53,6 +53,7 @@ import m0038 from "../migrations/0038_group_members.sql";
 import m0039 from "../migrations/0039_group_items.sql";
 import m0040 from "../migrations/0040_groups_signed.sql";
 import m0041 from "../migrations/0041_checks_names_blocks.sql";
+import m0042 from "../migrations/0042_limits.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -98,6 +99,7 @@ const MIGRATIONS = [
   ["0039_group_items.sql", m0039],
   ["0040_groups_signed.sql", m0040],
   ["0041_checks_names_blocks.sql", m0041],
+  ["0042_limits.sql", m0042],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

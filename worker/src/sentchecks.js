@@ -80,7 +80,9 @@ export const willRetry = (record) => (record.kind === "delete" || record.kind ==
 /** @param {any} env @param {string} person @param {any} body @param {{ host: string, mayRead?: (item: string) => Promise<boolean> }} options */
 export async function answerCheck(env, person, body, { host, mayRead = async (_item) => true }) {
   const db = env.DB;
-  const points = (Array.isArray(body?.points) ? body.points : []).slice(0, MAX_POINTS)
+  // More than a check may ask is refused, not cut short, so the asker never takes part of an answer for all of it (T31).
+  if (Array.isArray(body?.points) && body.points.length > MAX_POINTS) return { error: `At most ${MAX_POINTS} at a time.`, status: 413 };
+  const points = (Array.isArray(body?.points) ? body.points : [])
     .filter((p) => ID_RE.test(p?.fp ?? "") && typeof p.list === "string" && (ID_RE.test(p.list) || parseListId(p.list)));
   if (!points.length) return { results: [], delegations: {}, people: {} };
   const [indexRows, listRows] = await db.batch([

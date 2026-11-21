@@ -12,6 +12,7 @@ import { fromB64url } from "../public/static/signed.js";
 import { MemberRules } from "./members.js";
 import { checkRecord } from "./records.js";
 import { CHECKPOINT, GroupRules, listOf, PAGE, Rules, signHead } from "./lists.js";
+import { daySecondsNow, LIMITS } from "./limits.js";
 
 const TRIES = 8;
 const turns = new Map(); // list -> the last take queued for it
@@ -53,6 +54,24 @@ export async function rulesFor(db, list, owner, host, group = null) {
   return { rules, entries };
 }
 
+
+// Records that never count towards a writer's daily cap: taking back what's theirs, and an admin's clear-up (removing,
+// calling off), which mustn't stop half way.
+const UNCOUNTED = new Set(["delete", "leave", "remove", "calloff"]);
+
+/**
+ * Whether `author` has already left LIMITS.records records here in the last day, across every post (step 8: on top of
+ * 20 an item), so `kind` is refused. One count from the `authored` index (step 7), which has the writer and when. A
+ * group's members list (`members`: joins, approvals, roles) isn't counted: letting people in mustn't use up posting.
+ * @param {D1Database} db @param {string} author @param {string} kind @param {string} [members]
+ */
+export async function overDailyRecords(db, author, kind, members = "") {
+  if (UNCOUNTED.has(kind)) return false;
+  const row = await db.prepare("SELECT COUNT(*) AS n FROM authored WHERE author = ? AND taken > ? AND list != ?")
+    .bind(author, Math.floor(Date.now() / 1000) - daySecondsNow(), members).first();
+  return Number(row?.n ?? 0) >= LIMITS.records;
+}
+export const DAILY_RECORDS_SAID = "That's a lot for one day here. Try again tomorrow.";
 /**
  * Takes a record (`sent`: {record, sig, content?, salt?}) onto the list it belongs to, as host `host` ({person, privateKey}:
  * the site's identity and hosting key), at `taken` (now). `lookups` find writers' identities and browser keys

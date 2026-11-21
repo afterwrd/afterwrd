@@ -123,8 +123,8 @@ export async function receiveReceipt(request, env, url, work) {
   const text = got.content?.text ?? "";
   const holder = connection ? { connection: Number(connection.id) } : { group: Number(group.id) };
   const where = connection ? `/friend/${connection.id}/posts/${target}` : `/groups/${group.id}/posts/${target}`;
-  if (await keepNotice(env.DB, { kind: "mention", fp: got.fp, ...holder, item, target, actor, text })) {
-    await tellMention(env, url.origin, work, { ...holder, title: String((connection ?? group).name), actor, text, comment: true,
+  if (await keepNotice(env.DB, { kind: "mention", fp: got.fp, ...holder, item, target, actor, text, author: record.author })) {
+    await tellMention(env, url.origin, work, { ...holder, title: String((connection ?? group).name), actor, text, comment: true, author: record.author,
       url: where, tag: connection ? `mention-${connection.id}-${target}` : `mention-g${group.id}-${target}` });
   }
   // Then whether the host shows the owner here the same conversation at that point.

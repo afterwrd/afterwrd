@@ -17,6 +17,7 @@ import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { ownOrigin } from "./keys.js";
 import { json, now } from "./util.js";
+import { admit } from "./allowances.js";
 
 const TIMEOUT_MS = 8000;
 
@@ -38,7 +39,10 @@ export async function signedMember(request, env, url) {
   const body = request.method === "POST" ? new Uint8Array(await request.clone().arrayBuffer()) : null;
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
     { ownOrigin: url.origin, hostingKeyOf: (person, site) => (person === member.identity && site === member.origin ? hostingKeyFor(env, person, site) : null) });
-  return caller ? /** @type {Row<"group_members">} */ (/** @type {unknown} */ (member)) : null;
+  if (!caller) return null;
+  // Within their allowance here today, or refused (allowances.js); not the group's owner, whose own account it is.
+  if (member.role !== "owner") await admit(env, String(member.identity));
+  return /** @type {Row<"group_members">} */ (/** @type {unknown} */ (member));
 }
 
 /** A call from the group to a member's site, signed by the group (for one that joined with an identity). */

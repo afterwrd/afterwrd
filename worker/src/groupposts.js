@@ -29,7 +29,7 @@ import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js
 import { signedLink } from "./friends.js";
 import { closedGroup, copyPhotos, GROUP_BYTES, groupGone, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
 import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
-import { listEntries, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
+import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
 import { checkProfile, identityState } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
 import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
@@ -42,6 +42,8 @@ import { outbox } from "./outbox.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
+import { selfHosted } from "./hosting.js";
+import { ownUsage } from "./allowances.js";
 
 const SINCE_PAGE = 50;
 const BEFORE_PAGE = 20;
@@ -99,7 +101,10 @@ export async function handleGroupItems(request, env, url) {
   if (request.method === "POST" && url.pathname === "/_p/items") return shut ? json({ error: "This group has closed." }, 409) : newPost(env, url, self, group, member, body);
   if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body, { shut });
   // What became of the member's records here (sentchecks.js): while closing, too.
-  if (request.method === "POST" && url.pathname === "/_p/records/check") return json(await answerCheck(env, String(member.identity), body, { host: self.person }));
+  if (request.method === "POST" && url.pathname === "/_p/records/check") {
+    const answer = await answerCheck(env, String(member.identity), body, { host: self.person });
+    return json(answer, answer.status ?? 200);
+  }
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const before = Number(url.searchParams.get("before") ?? 0) || 0;
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
@@ -129,7 +134,10 @@ export async function handleGroupItems(request, env, url) {
     const authors = items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]).map((x) => parseRecord(fromB64url(x.record))?.author).filter(Boolean);
     return json({ v: 2, items, gone, until, more, roles, context: await groupObject(db, url.origin, group, member),
       delegations: await delegationsFor(db, keys), people: await peopleFor(db, [...new Set([...authors, self.owner])]),
-      ...(!before && !only && { mine: await mineSince(db, String(member.identity), since) }) });
+      ...(!before && !only && { mine: await mineSince(db, String(member.identity), since) }),
+      // To its owner, on Cloudflare: how busy this group's site has been this week, for their busy-account warning
+      // (allowances.js), since it shares their account.
+      ...(!before && !only && member.role === "owner" && !selfHosted(env) && { usage: await ownUsage(db) }) });
   }
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})(?:\/dates\/(\d{4}-\d{2}-\d{2}))?$/.exec(url.pathname);
   if (request.method === "GET" && one) {
@@ -307,6 +315,8 @@ async function newPost(env, url, self, group, member, body) {
   if (n(recent) >= POST_RATE.count || n(daily) >= POST_RATE.daily || n(photosToday) + copies.length > POST_RATE.photos || n(bytes) + adding > GROUP_BYTES) {
     return json({ error: "That's a lot of posts or photos for now, or the group is full of photos. Try again later." }, 429);
   }
+  // A post is a record too (and each photo with it): within the member's records a day (hosted.js).
+  if (await overDailyRecords(db, String(member.identity), "item", self.list)) return json({ error: DAILY_RECORDS_SAID }, 429);
   let release = async () => {};
   if (post.content.here === true) {
     const here = await takeHere(env, group, member);
@@ -368,6 +378,8 @@ async function memberRecord(env, url, self, member, body, { shut = false } = {})
   const id = String(record.item ?? "");
   if (!KINDS.has(record.kind) || !ID_RE.test(id) || record.host !== self.person) return json({ error: "That didn't work." }, 400);
   if (shut && record.kind !== "delete") return json({ error: "This group has closed." }, 409);
+  // At most so many a day from one member, across all the group's posts (hosted.js); never an admin's clear-up.
+  if (await overDailyRecords(db, String(member.identity), String(record.kind), self.list)) return json({ error: DAILY_RECORDS_SAID }, 429);
   const item = await db.prepare("SELECT id, author, type, content, version, tally, audience FROM items WHERE id = ?").bind(id).first();
   if (!item) return json({ error: "That post isn't here any more." }, 404);
   const now_ = JSON.parse(String(item.content));

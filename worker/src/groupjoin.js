@@ -19,6 +19,7 @@ import { decode, fromB64url } from "../public/static/signed.js";
 import { now, Refusal } from "./util.js";
 import { keepSent as keepSentAs, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { ownerName } from "./sites.js";
+import { admit } from "./allowances.js";
 
 /** The owner's newest record on a group's members list that this site sent (what their next one follows). */
 const lastSent = async (db, list) => (await db.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(list).first())?.fp ?? null;
@@ -136,5 +137,7 @@ export async function signedGroup(request, env, url) {
   const body = request.method === "POST" ? new Uint8Array(await request.clone().arrayBuffer()) : null;
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
     { ownOrigin: url.origin, hostingKeyOf: (person, site) => (person === group.identity && site === group.origin ? hostingKeyFor(env, person, site) : null) });
-  return caller ? group : null;
+  if (!caller) return null;
+  await admit(env, String(group.identity)); // within its allowance here today, or refused (allowances.js)
+  return group;
 }

@@ -4,6 +4,8 @@
 // It covers only what afterwrd uses: prepare().bind(), first(), all(), run(), raw() and batch() (one transaction),
 // with D1's result shapes.
 
+import { countRows } from "./limits.js";
+
 /**
  * `sql` and its parameters, with every whole-number parameter written into the SQL itself. A Durable Object's SQLite
  * binds every JavaScript number as a decimal (5 becomes 5.0, and "5.0" in a text column) and won't take a BigInt,
@@ -85,6 +87,7 @@ export function runStatements(storage, statements, together) {
     const cursor = sql.exec(text, ...params);
     const results = cursor.toArray().map(fromSqlite);
     const written = cursor.rowsWritten;
+    countRows(cursor.rowsRead, written); // today's usage (limits.js), for the busy-account warning
     const { changes, last_row_id } = sql.exec("SELECT changes() AS changes, last_insert_rowid() AS last_row_id").one();
     return {
       success: true,
