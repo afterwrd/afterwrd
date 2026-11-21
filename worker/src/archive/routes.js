@@ -794,6 +794,8 @@ async function home(ctx, params) {
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
+  // …and signed groups' (step 6c: groupcopies.js), likewise.
+  ctx.work?.waitUntil?.(groups_.pullGroups(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,

@@ -7,6 +7,8 @@
 // events (adding one, answering, changing it, calling it off: only those going hear, and only of changes), leaving,
 // removing, and deleting the group.
 //   node groups.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
+import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { count as n, settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
@@ -628,6 +630,53 @@ check("Cat, a member, isn't offered @here", !(await mention(cat, "#composer text
 await cat.$eval("#composer textarea", (t) => { t.value = ""; });
 const catHere = await signedPost(cat, catGroup, { type: "post", text: "Hello @here", here: true });
 check("…and the group refuses one from her", (await toGroup(stateC, C, catHere, [])) === 403);
+
+// A photo goes with its post: neither its writer nor the group's owner can take one out on its own.
+const firstPhoto = sql(stateG, `SELECT photo FROM item_photos WHERE post = '${bobPost}' ORDER BY position`)[0].photo;
+check("a photo can't be deleted from a group post on its own", (await relaySigned(bob, bobGroup, { kind: "delete", host: groupPerson, item: firstPhoto,
+  seen: point(firstPhoto), prev: lastSent(stateB, firstPhoto), about: firstPhoto })) === 400 && n(stateG, `items WHERE id = '${firstPhoto}'`) === 1);
+check("…nor removed by the group's owner", (await relaySigned(ann, annGroup, { kind: "remove", host: groupPerson, item: firstPhoto,
+  seen: point(firstPhoto), prev: lastSent(stateA, firstPhoto), about: firstPhoto }, null, { roleAt: true })) === 400 && n(stateG, `items WHERE id = '${firstPhoto}'`) === 1);
+
+// Home asks signed groups what's new in the background, as it does friends' sites, once an hour at most.
+sql(stateB, `DELETE FROM copies WHERE group_id = ${bobGroup}; UPDATE groups SET items_since = NULL, items_checked_at = NULL WHERE id = ${bobGroup};`);
+await bob.goto(`${B}/`);
+check("Home asks the group for its posts in the background", await waitFor(() => n(stateB, `copies WHERE group_id = ${bobGroup}`) > 0));
+
+// Download everything: what Bob signed in the group, with his words now, as well as every record in signed.json.
+async function download(page, site, label) {
+  const dir = `${OUT}/downloads/${label}`;
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  // Headless Chrome never finishes saving downloads, so keep the zip the page hands to the browser.
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(window, "showSaveFilePicker", { value: undefined });
+    const make = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => { window.__download = blob; return make(blob); };
+  });
+  await page.goto(`${site}/_admin/export`);
+  await page.waitForFunction(() => document.getElementById("size").textContent !== "", { timeout: 10_000 }).catch(() => {});
+  await page.click("#go");
+  await page.waitForFunction(() => /Done/.test(document.getElementById("status").textContent) || document.getElementById("error").textContent,
+    { timeout: 120_000, polling: 500 });
+  const base64 = await page.evaluate(async () => {
+    const bytes = new Uint8Array(await window.__download.arrayBuffer());
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(out);
+  });
+  const zipFile = `${dir}/download.zip`;
+  writeFileSync(zipFile, Buffer.from(base64, "base64"));
+  const list = execFileSync("unzip", ["-Z1", zipFile], { encoding: "utf8" }).trim().split("\n");
+  return (name) => JSON.parse(execFileSync("unzip", ["-p", zipFile, list.find((f) => f.endsWith(`/${name}`))], { maxBuffer: 1e8 }).toString());
+}
+const bobZip = await download(bob, B, "bob-group");
+const inGroups = bobZip("groups-elsewhere.json").orderedItems;
+const bobsPostThere = inGroups.find((x) => x.id?.endsWith(`/posts/${bobPost}`));
+check("Download everything lists Bob's signed post in the group, as he last changed it", bobsPostThere?.content === "Started the first book: The Hobbit"
+  && bobsPostThere["afterwrd:signed"] === true, JSON.stringify(inGroups).slice(0, 400));
+check("…and leaves out the comment he deleted", !inGroups.some((x) => x.content === "Ah, of course"));
+check("…with every record he signed there in signed.json", bobZip("signed.json")["afterwrd:sent"].some((x) => x.item === bobPost && x.kind === "edit"));
 
 // Asking to be friends from a group's members, and introductions by friends. Nobody here is friends yet.
 const ask = (page, from) => Promise.all([page.waitForNavigation({ timeout: 30_000 }), page.click(`li[data-from="${from}"] .friendship button`)]);

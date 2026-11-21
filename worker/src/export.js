@@ -63,7 +63,7 @@ export const TABLES = {
   known_delegations: { columns: "*" },
   identities: { columns: "person, chain, profile" },
   // Groups: which, and what the owner posted and said in them. No keys.
-  groups: { columns: "id, name, about, origin, remote_id, host_name, joined_at, role", where: "joined_at IS NOT NULL" },
+  groups: { columns: "id, name, about, origin, remote_id, host_name, joined_at, role, identity", where: "joined_at IS NOT NULL" },
   group_mine: { columns: "*" },
   friend_links: { columns: "connection_id, person_name" },
   users: { columns: "id, name" },

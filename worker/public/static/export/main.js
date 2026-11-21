@@ -309,7 +309,7 @@ function documents(t) {
         "afterwrd:date": e.date || undefined, // which date of a repeating group event
         "afterwrd:answer": e.answer ?? undefined, "afterwrd:invitedAt": iso(e.invited_at ?? undefined) };
     }), { name: "Friends' and groups' events on your calendar" }) } : {}),
-    "groups-elsewhere.json": collection([...t.group_mine].sort((a, b) => b.created_at - a.created_at).map((m) => {
+    "groups-elsewhere.json": collection([...signedInGroups(), ...[...t.group_mine].sort((a, b) => b.created_at - a.created_at).map((m) => {
       const post = groupPostId(m.site, m.remote_group, m.post_id);
       return {
         type: "Note", id: m.kind === "post" ? post : `${post}#c${m.remote_id}`, attributedTo: actorId(site),
@@ -318,7 +318,7 @@ function documents(t) {
         "afterwrd:poll": m.poll ? (({ options, multiple, closes_at: closes }) => ({ type: "Question",
           [multiple ? "anyOf" : "oneOf"]: options.map((name) => ({ type: "Note", name })), endTime: iso(closes) }))(JSON.parse(m.poll)) : undefined,
       };
-    }), { name: "What you've posted and said in groups (the originals are kept on each group's site)" }),
+    })], { name: "What you've posted and said in groups (the originals are kept on each group's site)" }),
     "comments-elsewhere.json": collection([...t.comments_elsewhere].filter((c) => c.site).sort((a, b) => b.created_at - a.created_at)
       .map((c) => ({
         type: "Note",
@@ -338,6 +338,41 @@ function documents(t) {
       "afterwrd:sent": t.sent.map((x) => ({ host: x.host, item: x.item, kind: x.kind, fp: x.fp, sent: JSON.parse(x.record), receipt: x.receipt ? JSON.parse(x.receipt) : null })),
     },
   };
+
+  /**
+   * What the owner signed in groups with an identity (sent, step 6c): their posts and comments there, newest first, with
+   * their words now (edits applied; deleted ones left out). Photos are named by the post they're in.
+   */
+  function signedInGroups() {
+    const byGroup = new Map(t.groups.filter((g) => g.identity).map((g) => [g.identity, g]));
+    const out = new Map();
+    for (const x of [...t.sent].sort((a, b) => a.created_at - b.created_at)) {
+      const g = byGroup.get(x.host);
+      const sent = JSON.parse(x.record);
+      const record = fromB64json(sent.record);
+      const content = sent.content ? fromB64json(sent.content) : null;
+      if (!g || !record) continue;
+      const post = groupPostId(g.origin, g.remote_id, x.item);
+      if (x.kind === "item" && content?.type !== "photo") {
+        out.set(x.fp, { type: "Note", id: post, attributedTo: actorId(site), context: groupId(g.origin, g.remote_id), published: iso(x.created_at),
+          mediaType: "text/plain", content: content?.text ?? "", "afterwrd:signed": true, earlier: [], edited_at: null,
+          ...(content?.event && { "afterwrd:event": content.event }),
+          ...(content?.poll && { "afterwrd:poll": { type: "Question", [content.poll.multiple ? "anyOf" : "oneOf"]: content.poll.options.map((name) => ({ type: "Note", name })),
+            endTime: iso(content.poll.closes_at ?? undefined) } }) });
+      } else if (x.kind === "comment") {
+        out.set(x.fp, { type: "Note", id: `${post}#${x.fp}`, attributedTo: actorId(site), inReplyTo: post, context: groupId(g.origin, g.remote_id),
+          published: iso(x.created_at), mediaType: "text/plain", content: content?.text ?? "", "afterwrd:signed": true, earlier: [], edited_at: null });
+      } else if (x.kind === "edit" && out.has(record.about)) {
+        const c = out.get(record.about);
+        c.earlier.push({ text: c.content, replaced_at: x.created_at });
+        c.content = content?.text ?? c.content;
+        c.edited_at = x.created_at;
+      } else if (x.kind === "change" && out.has(record.item) && typeof content?.text === "string") {
+        out.get(record.item).content = content.text;
+      } else if (x.kind === "delete") out.delete(record.about);
+    }
+    return [...out.values()].reverse().map(({ earlier, edited_at: at, ...c }) => ({ ...c, ...editedFields({ edited_at: at, earlier }) }));
+  }
 
   /** The owner's signed comments on friends' posts (sent), with their words now: edits applied, deleted ones left out. */
   function sentComments() {

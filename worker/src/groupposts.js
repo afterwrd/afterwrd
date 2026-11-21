@@ -360,6 +360,10 @@ async function memberRecord(env, url, self, member, body) {
   }
   if (record.kind === "edit" && record.about === id && now_.type === "event") return json({ error: "An event's words change with the event: use Change it." }, 400);
   if (record.kind === "calloff" && now_.type !== "event") return json({ error: "That isn't an event." }, 400);
+  // A photo goes with its post: taking one out on its own would leave the post listing a photo that isn't there.
+  if ((record.kind === "delete" || record.kind === "remove") && record.about === id && item.type === "photo") {
+    return json({ error: "A photo goes with its post: delete or remove the whole post instead." }, 400);
+  }
   const plan = await kindPlan(env, item, now_, got, { guestIds: null, salt: null, isGuest: async () => true });
   if (plan.refused) return json({ error: plan.refused }, 409);
   await keepProfile(env, String(member.identity), body.profile);
