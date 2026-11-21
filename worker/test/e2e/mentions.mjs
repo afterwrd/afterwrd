@@ -8,8 +8,9 @@
 import { createECDH, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, settled, siteCall, siteSql as sql, setUpSigning } from "./helpers.mjs";
 import { signCall } from "../../src/signedcalls.js";
+import { signHead } from "../../src/lists.js";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const [, , stateA, stateB, stateC, stateG] = process.argv.slice(2);
@@ -239,6 +240,46 @@ await Promise.all([settled(bob), bob.click(`${again} .say button`)]);
 check("…then she's told on her site", await waitFor(() => notices(stateC, "mention") === 2));
 await new Promise((r) => setTimeout(r, 2000));
 check("…but her phone isn't", toPhone("cat") === 1, String(toPhone("cat")));
+
+// Mention receipts (step 5, decision 18): Bob's own site also sends Cat Ann's site's receipt for each comment of his that
+// mentions her, and her site checks Ann's shows her that comment just where the receipt says.
+check("Bob's site sends Cat the receipts, and Ann's site shows her both comments where they say", await waitFor(() =>
+  n(stateC, "mention_receipts WHERE state = 'ok'") === 2), JSON.stringify(sql(stateC, "SELECT state FROM mention_receipts")));
+check("…still one mention each", notices(stateC, "mention") === 2);
+const firstReceipt = sql(stateC, "SELECT fp FROM mention_receipts ORDER BY created_at, rowid LIMIT 1")[0].fp;
+const receiptBody = (fp, changes = {}) => {
+  const row = sql(stateB, `SELECT host, item, record, receipt FROM sent WHERE fp = '${fp}'`)[0];
+  const sent = JSON.parse(row.record);
+  const key = JSON.parse(Buffer.from(sent.record, "base64url")).key;
+  const d = sql(stateB, `SELECT bytes, proof FROM known_delegations WHERE key = '${key}'`)[0];
+  const own = sql(stateB, "SELECT person, chain, profile FROM own_identity")[0];
+  return { v: 2, kind: "receipt", host: row.host, item: row.item, sent, receipt: JSON.parse(row.receipt), delegation: { bytes: d.bytes, proof: JSON.parse(d.proof) },
+    people: { [own.person]: { chain: JSON.parse(own.chain), ...(own.profile && { profile: JSON.parse(own.profile) }) } }, ...changes };
+};
+const forgetAtCat = (fp) => sql(stateC, `DELETE FROM notices WHERE fp = '${fp}'; DELETE FROM mention_receipts WHERE fp = '${fp}'`);
+// Had Ann's site never told her, Bob's alone would have.
+forgetAtCat(firstReceipt);
+const resent = await siteCall(stateB, B, `${C}/_p/mention`, receiptBody(firstReceipt));
+check("from Bob's site alone, Cat is told she's mentioned, and it checks", resent.status === 202 && await waitFor(() => notices(stateC, "mention") === 2
+  && n(stateC, `mention_receipts WHERE fp = '${firstReceipt}' AND state = 'ok'`) === 1));
+// Ann's site signing one thing for Bob and showing Cat another at that point: Cat's site says so, plainly.
+forgetAtCat(firstReceipt);
+const real = JSON.parse(Buffer.from(receiptBody(firstReceipt).receipt.bytes, "base64url").toString());
+const annHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateA, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
+  { name: "Ed25519" }, false, ["sign"]);
+const otherVersion = await signHead(annHosting, { host: real.host, list: real.list, n: real.n, head: "x".repeat(43) });
+await siteCall(stateB, B, `${C}/_p/mention`, receiptBody(firstReceipt, { receipt: otherVersion }));
+check("a receipt for a conversation Ann's site doesn't show Cat: her site says so", await waitFor(() => notices(stateC, "hidden") === 1
+  && n(stateC, `mention_receipts WHERE fp = '${firstReceipt}' AND state = 'hidden'`) === 1));
+await cat.goto(`${C}/activity`);
+check("…on her Notifications", (await text(cat)).includes("Ann Example's site isn't showing you a comment by Bob Example that mentions you"), (await text(cat)).slice(0, 300));
+// One about a post on a site Cat isn't friends with (Bob's own), or not signed by its writer's site: quietly nothing.
+forgetAtCat(firstReceipt);
+const kept = n(stateC, "mention_receipts");
+const notFriends = await siteCall(stateB, B, `${C}/_p/mention`, receiptBody(firstReceipt, { host: ownPerson(stateB) }));
+const unsigned = await fetch(`${C}/_p/mention`, { method: "POST", headers: { "Content-Type": "application/json", "Afterwrd-From": B }, body: JSON.stringify(receiptBody(firstReceipt)) });
+check("receipts about a stranger's post, or unsigned, are quietly ignored", notFriends.status === 202 && unsigned.status === 202 && n(stateC, "mention_receipts") === kept
+  && n(stateC, `notices WHERE fp = '${firstReceipt}'`) === 0);
 
 // A friend's site can only send notes about its own posts, and only comments its receipts vouch for. Bob's site, signing
 // as itself (its hosting key), tries both on Ann's.

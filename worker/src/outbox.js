@@ -18,6 +18,7 @@ import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
 import { callFriend } from "./calls.js";
 import { noteFor } from "./notes.js";
+import { sendReceipt } from "./receipts.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
@@ -81,6 +82,8 @@ export class Outbox extends DurableObject {
     // Fat notes about signed posts (notes.js, afterwrd 2): one row per note, not per recipient. `audience` "friends"
     // goes to every friend in turn (`cursor`: the last connection id sent to); otherwise `recipients` lists them
     // (`cursor`: how many have been sent). A recipient that couldn't be reached gets a row in note_retries.
+    // A mention receipt ("receipt": receipts.js) goes to people, not friends: `recipients` lists their identities, and
+    // a note_retries row names one by its place in that list.
     this.sql.exec(`CREATE TABLE IF NOT EXISTS fat_notes (
       id INTEGER PRIMARY KEY AUTOINCREMENT, origin TEXT NOT NULL, kind TEXT NOT NULL, item TEXT NOT NULL, fp TEXT,
       audience TEXT, recipients TEXT, cursor INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
@@ -250,23 +253,32 @@ export class Outbox extends DurableObject {
       } else {
         const all = JSON.parse(String(note.recipients ?? "[]"));
         next = all.slice(Number(note.cursor), Number(note.cursor) + room);
+        // People, for a receipt: each by its place in the list.
+        if (note.kind === "receipt") next = next.map((_, i) => Number(note.cursor) + i);
         this.sql.exec("UPDATE fat_notes SET cursor = ? WHERE id = ?", Number(note.cursor) + next.length, note.id);
         if (Number(note.cursor) + next.length >= all.length) this.sql.exec("UPDATE fat_notes SET due = ? WHERE id = ?", DONE, note.id);
       }
       for (const connection of next) calls.push({ note, connection, retry: null });
     }
     if (!calls.length) return 0;
-    const ids = [...new Set(calls.map((c) => c.connection))];
+    const ids = [...new Set(calls.filter((c) => c.note.kind !== "receipt").map((c) => c.connection))];
     const { results } = await this.env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
       AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
     const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
     // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
     const deliveries = [];
     await Promise.all(calls.map(async ({ note, connection, retry }) => {
-      const friend = friends.get(connection);
+      const friend = note.kind === "receipt" ? null : friends.get(connection);
       let again = false;
       let delivered = false;
-      if (friend) {
+      if (note.kind === "receipt") {
+        try {
+          delivered = await sendReceipt(this.env, note, JSON.parse(String(note.recipients))[connection]);
+        } catch (error) {
+          const status = /** @type {any} */ (error).status;
+          again = status === 0 || status >= 500 || status === 429 || status === undefined;
+        }
+      } else if (friend) {
         try {
           const body = await noteFor(this.env, note, friend);
           if (body) await callFriend(this.env, String(note.origin), String(friend.origin), "/_p/notes", { body, timeout: TIMEOUT_MS });

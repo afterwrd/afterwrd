@@ -41,7 +41,7 @@ const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g
 // ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new
 // post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'invite', 'changed', 'cancelled')`;
+  WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions

@@ -136,7 +136,7 @@ export async function noteFor(env, note, connection) {
  * Keeps a notice for the owner here, within the limits for `connection`'s site (counted together, of every kind), once
  * per record and kind. Returns whether it was kept.
  */
-async function keepNotice(db, { kind, fp, connection, own = 0, item, target, actor, text }) {
+export async function keepNotice(db, { kind, fp, connection, own = 0, item, target, actor, text }) {
   const at = now();
   const row = await db.prepare(`INSERT INTO notices (kind, fp, connection_id, own, target, actor, text, created_at, item)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12
@@ -150,7 +150,7 @@ async function keepNotice(db, { kind, fp, connection, own = 0, item, target, act
 }
 
 /** A mention said on the owner's phones that take mentions, within their allowance (notify.js pushAllowed). */
-async function tellMention(env, origin, work, { connection, title, actor, text, url, tag, comment = false }) {
+export async function tellMention(env, origin, work, { connection, title, actor, text, url, tag, comment = false }) {
   if (!(await pushAllowed(env.DB, "SELECT COUNT(*) AS n FROM notices WHERE connection_id = ?1 AND kind = 'mention' AND created_at > ?2", connection, now()))) return;
   notifyLater(env, origin, work, { kind: "mention", title, text: `${actor === title ? "Mentioned you" : `${actor} mentioned you`}: ${snippet(text)}`,
     hidden: comment ? "Mentioned you in a comment" : "Mentioned you in a post", url, tag });

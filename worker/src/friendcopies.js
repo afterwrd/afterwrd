@@ -9,6 +9,7 @@
 import { callFriend, friendPerson, switchConnection } from "./calls.js";
 import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
+import { checkReceipts, queueReceipts } from "./receipts.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
 import { parseRecord } from "../public/static/records.js";
@@ -145,6 +146,8 @@ export async function pullItems(env, from, connection) {
     await env.DB.batch(statements);
     if (!data.more) break;
   }
+  // Mention receipts its site couldn't be asked about before (receipts.js): it's answering now.
+  await checkReceipts(env, from, connection).catch(() => null);
   return count;
 }
 
@@ -324,7 +327,9 @@ export async function friendThread(env, from, connection, id) {
     await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ?").bind(last.n, last.head, id).run();
   }
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
-  return { entries: result.entries.map((e) => ({ ...e, name: e.by ? names.get(e.by) ?? "Someone" : null })), problem: result.problem, changed,
+  // Each with its running fingerprint as checked (a mention receipt names one: receipts.js).
+  const heads = new Map(entries.map((e) => [e.n, e.head]));
+  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? names.get(e.by) ?? "Someone" : null })), problem: result.problem, changed,
     seen: last ? { n: last.n, h: last.head } : null, mine, host: person };
 }
 
@@ -351,9 +356,11 @@ export async function relayRecord(request, env, url, connectionId, id) {
       { body: { sent, delegation: { bytes: String(delegation.bytes), proof: JSON.parse(String(delegation.proof)) },
         ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) } });
   } catch (error) { return refused(`Couldn't send it: ${error.message}`); }
+  const fp = await fingerprintOf("record", fromB64url(sent.record));
   await env.DB.prepare(`INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(await fingerprintOf("record", fromB64url(sent.record)), record.host, id, record.kind,
-      JSON.stringify(sent), answer.receipt ? JSON.stringify(answer.receipt) : null, now()).run();
+    .bind(fp, record.host, id, record.kind, JSON.stringify(sent), answer.receipt ? JSON.stringify(answer.receipt) : null, now()).run();
+  // Those it mentions are sent the host's receipt too, from here (receipts.js).
+  if (answer.receipt) await queueReceipts(env, url.origin, record, fp);
   // The owner's own vote or answer, in their copy's totals at once (their site's are fetched again soon anyway).
   if (record.kind === "vote" || record.kind === "answer") {
     const copy = await env.DB.prepare("SELECT content, tally FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id).first();

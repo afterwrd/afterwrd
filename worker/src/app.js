@@ -7,6 +7,7 @@
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
 import { receiveNotes } from "./notes.js";
+import { receiveReceipt } from "./receipts.js";
 import { handleIdentity } from "./identities.js";
 import { testSlowSeconds } from "./identity.js";
 import { handleAdmin } from "./admin.js";
@@ -130,6 +131,7 @@ async function route(request, env, work) {
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
   if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleFriendItems(request, env, url, work);
   if (url.pathname === "/_p/notes" && request.method === "POST") return receiveNotes(request, env, url, work);
+  if (url.pathname === "/_p/mention" && request.method === "POST") return receiveReceipt(request, env, url, work);
   // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
   if (friendCallRoute(`${request.method} ${url.pathname}`)) return handleFriendCalls(request, env, url);
   // A group the owner's in, calling with the key this site gave it.

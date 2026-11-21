@@ -421,6 +421,7 @@ function friendActivityItem(c) {
 function noticeItem(c) {
   // A friend's invitation to their event, or a change to it (as before: friendEventItem).
   if (["invite", "changed", "cancelled"].includes(c.kind)) return friendEventItem(c);
+  if (c.kind === "hidden") return hiddenItem(c);
   const own = c.source === "own";
   const isPhoto = c.target.includes("/photos/");
   const href = own ? `/posts/${c.target.split("/")[0]}` : `/friend/${c.connection_id}/posts/${c.target}`;
@@ -437,6 +438,26 @@ function noticeItem(c) {
       <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
     </header>
     ${c.text && html`<div class="text">${c.text}</div>`}
+  </div>
+</article>`;
+}
+
+/**
+ * A comment that mentions the owner, which its writer's site says the friend's site took (a mention receipt:
+ * receipts.js), but which that site doesn't show the owner where it said: it may be showing them a different
+ * conversation from the one the writer saw.
+ */
+function hiddenItem(c) {
+  const href = `/friend/${c.connection_id}/posts/${c.target}`;
+  return html`<article class="card activity alert${c.isNew ? " new" : ""}">
+  <div class="body">
+    <header>
+      <span class="what"><strong>${c.friend}'s site</strong> isn't showing you a comment by ${c.name} that mentions you, on
+        <a href="${href}">${c.friend}'s post</a>. ${c.name}'s site says ${c.friend}'s took it, so you may be shown a different
+        conversation from the one ${c.name} saw. It's worth asking ${c.friend}.</span>
+      ${c.isNew && raw('<span class="badge badge-new">New</span>')}
+      <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
+    </header>
   </div>
 </article>`;
 }
