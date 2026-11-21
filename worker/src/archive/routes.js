@@ -1,11 +1,12 @@
 // The site's pages for the owner: their posts and photos (made on afterwrd, and from their Facebook download, in the
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
+import { blockedAmong, blockedList } from "../blocks.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
-import { loadThread, namesFor, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
+import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { postId as postAddress } from "../../public/static/activity.js";
 import { eventsFor } from "../events.js";
 import { datesOf, FINISHED_SQL, finishedAt, hasDate, icsFile, monthSpan, readDay, readMonth, readWeek, ruleDates, weekSpan } from "../calendar.js";
@@ -32,6 +33,8 @@ import { onCloudflare, selfHosted, serverCommand } from "../hosting.js";
 import { now, pageData, withoutKeys } from "../util.js";
 import { safeNext } from "../auth.js";
 import { fmtDate, fmtMonth } from "../views/format.js";
+import { checkSentRound, sentTrouble } from "../sentchecks.js";
+import { peopleShown } from "../names.js";
 import * as archiveViews from "../views/archive.js";
 import * as eventViews from "../views/events.js";
 import * as friendViews from "../views/friends.js";
@@ -644,7 +647,10 @@ async function friendComments(ctx, connection, id, owner) {
     r: e.record ? { record: e.record, content: e.content } : null }));
   const comments = itemComments(read, { owner, item: id });
   const names = new Map(t.entries.filter((e) => e.by).map((e) => [e.by, e.name]));
-  for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
+  // How each is known here (names.js): "friend of Ann", "not your friend Bob", a friend's new name.
+  const tags = new Map(t.entries.filter((e) => e.by).map((e) => [e.by, { label: e.label, warn: e.warn, renamed: e.renamed }]));
+  const blocked = await blockedAmong(ctx.db, comments.map((c) => c.author));
+  for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; Object.assign(c, tags.get(c.author)); c.blocked = blocked.has(c.author); if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${connection.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${connection.name}'s site has changed this conversation since you last saw it.` : null;
@@ -670,8 +676,9 @@ async function itemPost(ctx, params, id) {
   const list = await loadThread(ctx.env, id);
   if (!list) return null;
   const comments = itemComments(list.entries, { owner: item.author, item: id });
-  const names = await namesFor(ctx.db, comments.flatMap((c) => [c.author, c.removedBy]));
-  for (const c of comments) { if (c.author) c.name = names.get(c.author) ?? "Someone"; if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
+  // Friends by the name the owner approved, and a friend's new name (names.js).
+  const { names, tags } = await peopleShown(ctx.db, comments.flatMap((c) => [c.author, c.removedBy]), { me: item.author });
+  for (const c of comments) { if (c.author) { c.name = names.get(c.author) ?? "Someone"; Object.assign(c, tags.get(c.author)); } if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
   // An event's page: friends who could still be invited (those with an identity: a signed invitation names them).
   if (item.event) {
     const asked = new Set(item.event.guests.map((g) => g.id));
@@ -751,7 +758,7 @@ async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
   const [own, friendOwn, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
-    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows] = await Promise.all([
+    friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows, sent] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
     // …and their posts from before signing: theirs alone, read-only, until migration (docs/signed-conversations.md).
@@ -768,7 +775,7 @@ async function home(ctx, params) {
     friendCheckAlerts(db),
     checkGrant(db),
     // Someone asking to be friends: approved (or not) from Home in one tap, as well as from Friends.
-    all(db, `SELECT id, origin, name, invited_as, via_kind, via_name FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL
+    all(db, `SELECT id, origin, name, identity, invited_as, via_kind, via_name FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL
       ORDER BY connected_at DESC LIMIT 3`),
     // Friends introducing the owner to someone: asked (or not) from Home too.
     all(db, `${INTRODUCTIONS_SQL} LIMIT 3`, [now() - INTRODUCTION_DAYS * 86400]),
@@ -783,6 +790,8 @@ async function home(ctx, params) {
     // Friends moving, or moved and not yet followed here (identities.js, calls.js).
     all(db, `SELECT c.name, i.moving_to, i.moving_at FROM connections c JOIN identities i ON i.person = c.identity
       WHERE c.approved_at IS NOT NULL AND i.moving_to IS NOT NULL AND i.moving_to != c.origin ORDER BY i.moving_at LIMIT 5`),
+    // Deletes and leaves not taken yet, and anything signed as the owner that their site never sent (sentchecks.js).
+    sentTrouble(db),
   ]);
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
@@ -792,14 +801,16 @@ async function home(ctx, params) {
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // …and signed groups' (step 6c: groupcopies.js), likewise.
   ctx.work?.waitUntil?.(groups_.pullGroups(ctx.env, ctx.url.origin).catch(() => {}));
+  // …then what the owner sent elsewhere, checked with its hosts (sentchecks.js), once an hour at most.
+  ctx.work?.waitUntil?.(checkSentRound(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent };
   }
   return {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or
@@ -853,6 +864,8 @@ async function fromFriend(ctx, id, load) {
   connection.selfHosted = !onCloudflare(connection.origin, ctx.env);
   try {
     const data = await load(connection);
+    // Their signed name, if it's changed since the owner approved them (names.js): shown, with a way to use it.
+    if (connection.identity) connection.renamed = (await peopleShown(ctx.db, [String(connection.identity)])).tags.get(String(connection.identity))?.renamed ?? null;
     connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection).run();
     if (data instanceof Response) return data; // somewhere else to go (a photo in a signed post: friendPhoto)
@@ -874,7 +887,7 @@ async function friendsIndex(ctx) {
     db.prepare("SELECT * FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
     db.prepare("SELECT * FROM friend_links"),
     db.prepare("SELECT id, name, friend_since FROM facebook_people WHERE is_me = 0 AND friend_since IS NOT NULL ORDER BY name COLLATE NOCASE"),
-    db.prepare(`SELECT id, origin, name, invited_as, via_kind, via_name, connected_at FROM connections
+    db.prepare(`SELECT id, origin, name, identity, invited_as, via_kind, via_name, connected_at FROM connections
       WHERE connected_at IS NOT NULL AND approved_at IS NULL ORDER BY connected_at DESC`),
     db.prepare(`SELECT person_name, MAX(created_at) AS invited_at FROM connect_links
       WHERE person_name IS NOT NULL AND used_at IS NULL AND expires_at > ? GROUP BY person_name`).bind(now()),
@@ -900,7 +913,7 @@ async function friendsIndex(ctx) {
   // Requests show only what their site said when it connected: nothing is fetched from a site you haven't approved,
   // so a stranger can't slow this page down or see when you look at it.
   return { friends, facebook, requests: requests.results, introductions: introductions.results,
-    checks: await recentChecks(db) };
+    checks: await recentChecks(db), blocked: await blockedList(db) };
 }
 
 /** Who a friend on afterwrd is in the owner's Facebook download, if the owner has linked them. */
@@ -1173,8 +1186,12 @@ async function groupComments(ctx, g, id, owner, people = []) {
     r: e.record ? { record: e.record, content: e.content } : null }));
   const comments = itemComments(read, { owner, item: id });
   const name = (p) => t.names.get(p) ?? "Someone";
+  const blocked = await blockedAmong(ctx.db, comments.map((c) => c.author));
   for (const c of comments) {
+    c.blocked = blocked.has(c.author); // folded away (blocks.js)
     if (c.author) c.name = name(c.author);
+    // How each is known here (names.js): "your friend", "not your friend Bob", a friend's new name.
+    if (c.author) Object.assign(c, t.tags.get(c.author));
     // Removed by the group's owner, or one of its admins (lists.js GroupRules).
     if (c.removedBy) c.removedByName = c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}` : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
   }
@@ -1233,13 +1250,27 @@ async function groupCalendar(ctx, params, id) {
 async function groupMembers(ctx, params, id) {
   return fromGroup(ctx, id, async (g) => ({
     // Closed, and its 30 days are up: nobody's left to list, and its owner can delete its site (groupsites.js).
-    ...(groups.groupGoneHere(g) ? { gone: true, members: [], group: null } : await groups.loadMembers(ctx.env, g)),
+    ...(groups.groupGoneHere(g) ? { gone: true, members: [], group: null } : await taggedMembers(ctx, await groups.loadMembers(ctx.env, g))),
     max: maxMembers(ctx.env), connected: ctx.connected,
     // Self-hosted, its data stays on the server until a command removes it (hosting.js).
     deleteCommand: selfHosted(ctx.env) && g.role === "owner" ? serverCommand(`delete-group ${new URL(g.origin).host}`) : null,
     // Where the owner stands with each member, to offer asking them to be friends (connect.js).
     friends: await all(ctx.db, "SELECT id, origin, approved_at, reached_at, invited_as FROM connections WHERE connected_at IS NOT NULL"),
   }));
+}
+
+/**
+ * A group's members, each marked as the owner here knows them (names.js): "your friend", a friend's new name, or "not
+ * your friend Bob" for a look-alike of a friend, the group's owner or an admin.
+ */
+async function taggedMembers(ctx, data) {
+  const members = Array.isArray(data.members) ? data.members : [];
+  const owner = members.find((m) => m.role === "owner" && m.person)?.person ?? "";
+  const names = new Map(members.filter((m) => m.person).map((m) => [m.person, m.name]));
+  const admins = new Set(members.filter((m) => m.role === "admin" && m.person).map((m) => m.person));
+  const me = (await ownHost(ctx.env))?.person ?? null;
+  const shown = await peopleShown(ctx.db, members.map((m) => m.person), { signed: names, group: { owner, names, admins }, me });
+  return { ...data, members: members.map((m) => (m.person && m.person !== me ? { ...m, name: shown.names.get(m.person) ?? m.name, ...shown.tags.get(m.person) } : m)) };
 }
 
 /**

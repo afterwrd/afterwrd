@@ -117,7 +117,7 @@ export function dateTally(read) {
  * A poll as pages show it (views/parts.js pollBlock), from its content's `poll` and its tally: each option with how
  * many chose it and who (names: person -> name), whether `viewer` did, and whether it's open.
  */
-export function pollShown(poll, tally, { viewer = null, names = new Map(), me = null } = {}) {
+export function pollShown(poll, tally, { viewer = null, names = new Map(), me = null, known = null } = {}) {
   const votes = Object.entries(tally?.votes ?? {});
   const mine = votes.find(([p]) => p === viewer)?.[1] ?? 0;
   const ended = tally?.ended_at ?? null;
@@ -130,6 +130,8 @@ export function pollShown(poll, tally, { viewer = null, names = new Map(), me = 
     }),
     multiple: Boolean(poll.multiple), closes_at: poll.closes_at ?? null, closed_at: ended ?? (open ? null : poll.closes_at), open,
     voters: votes.length, answered: Boolean(mine),
+    // How many of them the owner here knows (names.js: friends, and themselves), when that's been worked out.
+    knownVoters: known ? votes.filter(([p]) => p === me || known.has(p)).length : null,
   };
 }
 
@@ -137,12 +139,13 @@ export function pollShown(poll, tally, { viewer = null, names = new Map(), me = 
  * An event as pages show it (views/events.js eventBlock), from its content and tally: everyone invited sees who's going,
  * might go and can't (decision 15), and `viewer`'s own answer. An answer given before it last moved says so.
  */
-export function eventShown(content, tally, { viewer = null, names = new Map(), me = null, version = null, invited = null } = {}) {
+export function eventShown(content, tally, { viewer = null, names = new Map(), me = null, version = null, invited = null, known = null } = {}) {
   const e = content.event;
   const lists = (answersOf) => {
     const answers = Object.entries(answersOf ?? {});
     const who = (answer) => answers.filter(([, a]) => a.answer === answer)
-      .map(([p, a]) => ({ name: p === me ? "You" : names.get(p) ?? "Someone", me: p === me, earlier: Boolean(version && a.version !== version) }));
+      .map(([p, a]) => ({ name: p === me ? "You" : names.get(p) ?? "Someone", me: p === me, earlier: Boolean(version && a.version !== version),
+        ...(known && { known: p === me || known.has(p) }) }));
     return { going: who("going"), maybe: who("maybe"), cantGo: who("no"), answer: answers.find(([p]) => p === viewer)?.[1].answer ?? null };
   };
   // A repeating one (a group's, step 6d): each date's answers on their own (calendar.js datesOf), and where each

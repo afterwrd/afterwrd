@@ -15,12 +15,13 @@ import { MemberRules } from "./members.js";
 import { ID_RE, ownHost } from "./items.js";
 import { ownOrigin } from "./keys.js";
 import { parseRecord } from "../public/static/records.js";
-import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { decode, fromB64url } from "../public/static/signed.js";
 import { now, Refusal } from "./util.js";
+import { keepSent as keepSentAs, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { ownerName } from "./sites.js";
 
 /** The owner's newest record on a group's members list that this site sent (what their next one follows). */
-const lastSent = async (db, list) => (await db.prepare("SELECT fp FROM sent WHERE item = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(list).first())?.fp ?? null;
+const lastSent = async (db, list) => (await db.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(list).first())?.fp ?? null;
 
 /** What a `join` through an invite link says: the group (from what the link's group says), and where its list is up to. */
 export async function joinPoint(env, info) {
@@ -44,12 +45,7 @@ async function ready(env, sent, kinds, list) {
 }
 
 /** Keeps the owner's own copy of what they sent a group, with its receipt; returns its fingerprint. */
-async function keepSent(env, record, sent, receipt) {
-  const fp = await fingerprintOf("record", fromB64url(sent.record));
-  await env.DB.prepare("INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(fp, record.host, record.item, record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
-  return fp;
-}
+const keepSent = (env, record, sent, receipt, error = null) => keepSentAs(env, { record, sent, list: record.item, receipt, error });
 
 /** Asks to join a group with an identity (`info`: linkInfo's answer), with the owner's signed `join`. Returns its id here. */
 export async function joinSigned(env, info, sent) {
@@ -110,7 +106,7 @@ export async function membersPoint(env, group, data) {
  * record there was taken at, as the group's receipt says.
  */
 export async function waitingPoint(env, group) {
-  const row = await env.DB.prepare("SELECT fp, receipt FROM sent WHERE item = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(group.identity).first();
+  const row = await env.DB.prepare(`SELECT fp, receipt FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(group.identity).first();
   const head = row?.receipt ? decode(fromB64url(JSON.parse(String(row.receipt)).bytes)) : null;
   if (!head || !Number.isSafeInteger(head.n) || !ID_RE.test(head.head ?? "")) throw new Refusal("Your request to join can't be found. Remove the group, and ask again.");
   return { host: group.identity, item: group.identity, seen: { n: head.n, h: head.head }, prev: String(row.fp), role_at: null };
@@ -120,7 +116,12 @@ export async function waitingPoint(env, group) {
 export async function relayGroupRecord(env, group, sent, send) {
   const { record, body } = await ready(env, sent, ["approve", "remove", "role", "leave", "close"], String(group.identity));
   let reply;
-  try { reply = await send("/_group/records", body); } catch (error) { throw new Refusal(error.message); }
+  try { reply = await send("/_group/records", body); } catch (error) {
+    // A leave is kept to send again (sentchecks.js).
+    await keepSent(env, record, sent, null, error);
+    if (!(error.status === 409 && error.message === "duplicate")) throw new Refusal(`${error.message}.${willRetry(record)}`);
+    reply = {};
+  }
   return { record, fp: await keepSent(env, record, sent, reply.receipt ?? null) };
 }
 

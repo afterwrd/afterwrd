@@ -99,6 +99,7 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
         db.prepare("UPDATE lists SET n = ?, head = ?, deleted_at = ? WHERE id = ? AND n = ?").bind(n, head, taken, list, Number(row.n)),
         db.prepare(`DELETE FROM list_pages WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
         db.prepare(`DELETE FROM checkpoints WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
+        db.prepare(`DELETE FROM authored WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
       ]);
       if (won.meta.changes === 1) return { entry: { n, fp: got.fp, taken, head }, deleted: true, removed: got.record.kind === "remove" };
       continue;
@@ -111,12 +112,21 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
       if (target) {
         const targetPage = Math.floor((target.n - 1) / PAGE);
         const source = targetPage === page ? pageEntries : entries.filter((e) => Math.floor((e.n - 1) / PAGE) === targetPage);
-        const emptied = source.map((e) => (e.fp === target.fp ? { n: e.n, fp: e.fp, taken: e.taken, head: e.head } : e));
+        // Keeping which entry emptied it (`by`, `by_n`), so its writer's site, asking what became of it, is shown the
+        // signed delete or removal from the same row (sentchecks.js).
+        const emptied = source.map((e) => (e.fp === target.fp ? { n: e.n, fp: e.fp, taken: e.taken, head: e.head, by: got.fp, by_n: n } : e));
         if (targetPage === page) statements[1] = db.prepare(`INSERT INTO list_pages (list, page, entries) SELECT ?, ?, ? WHERE ${moved("")}
           ON CONFLICT(list, page) DO UPDATE SET entries = excluded.entries`).bind(list, page, JSON.stringify(emptied), list, list, head);
         else statements.push(db.prepare(`UPDATE list_pages SET entries = ? WHERE list = ? AND page = ? AND ${moved("")}`)
           .bind(JSON.stringify(emptied), list, targetPage, list, list, head));
+        // Nothing kept says whose it was (decision 7): only where it was, for its writer's check.
+        statements.push(db.prepare(`UPDATE authored SET author = NULL WHERE fp = ? AND ${moved("")}`).bind(target.fp, list, list, head));
       }
+    }
+    // Indexed by fingerprint and writer (sentchecks.js): not the owner's own records on their own site.
+    if (got.record.author !== host.person) {
+      statements.push(db.prepare(`INSERT OR IGNORE INTO authored (fp, author, list, n, taken) SELECT ?, ?, ?, ?, ? WHERE ${moved("")}`)
+        .bind(got.fp, got.record.author, list, n, taken, list, list, head));
     }
     const receipt = await signHead(host.privateKey, { host: host.person, list, n, head });
     if (n % CHECKPOINT === 0) {
@@ -158,6 +168,7 @@ export async function tombstone(db, list, at = Math.floor(Date.now() / 1000)) {
     db.prepare("UPDATE lists SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL").bind(at, list),
     db.prepare("DELETE FROM list_pages WHERE list = ?").bind(list),
     db.prepare("DELETE FROM checkpoints WHERE list = ?").bind(list),
+    db.prepare("DELETE FROM authored WHERE list = ?").bind(list),
   ]);
 }
 
@@ -172,5 +183,6 @@ export async function tombstoneDates(db, item, at = Math.floor(Date.now() / 1000
     db.prepare("UPDATE lists SET deleted_at = ? WHERE id > ? AND id < ? AND deleted_at IS NULL").bind(at, lo, hi),
     db.prepare("DELETE FROM list_pages WHERE list > ? AND list < ?").bind(lo, hi),
     db.prepare("DELETE FROM checkpoints WHERE list > ? AND list < ?").bind(lo, hi),
+    db.prepare("DELETE FROM authored WHERE list > ? AND list < ?").bind(lo, hi),
   ]);
 }

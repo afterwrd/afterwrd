@@ -10,11 +10,13 @@ import { callFriend, friendPerson, switchConnection } from "./calls.js";
 import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
+import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
-import { fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { fromB64url } from "../public/static/signed.js";
 import { itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
+import { friendsAmong, peopleShown } from "./names.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
 import { ANSWERS, cleanEvent, hasDate } from "./calendar.js";
 import { safeNext } from "./auth.js";
@@ -130,6 +132,15 @@ export async function pullItems(env, from, connection) {
     // Their identity has changed since this site last read it (a new device, a move under way): read it again.
     if (page === 0 && Number.isSafeInteger(data.identity) && data.identity > Number(known?.n ?? 0)) {
       await fetchIdentity(env, String(connection.origin)).catch(() => null);
+    }
+    // Anything signed as the owner here that this site never sent (sentchecks.js).
+    if (page === 0) await compareMine(env, { connection }, data.mine).catch(() => null);
+    // Their signed name now (a rename shows on Friends: names.js).
+    if (page === 0 && data.profile) {
+      const state = await identityState(env, person);
+      if (state && (await checkProfile(data.profile, state))) {
+        await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(data.profile), person).run();
+      }
     }
     const statements = [noteAnswer(env.DB, connection)];
     for (const item of Array.isArray(data.items) ? data.items : []) {
@@ -320,25 +331,25 @@ async function copiesShown(db, rows) {
     const t = r.tally ? JSON.parse(String(r.tally)) : null;
     return Object.keys(t?.votes ?? t?.answers ?? {});
   });
-  const [names, me, mine] = await Promise.all([namesFor(db, people), db.prepare("SELECT person FROM own_identity WHERE id = 1").first(),
+  const [names, me, mine, known] = await Promise.all([namesFor(db, people), db.prepare("SELECT person FROM own_identity WHERE id = 1").first(),
     // The owner's newest record on each (what their next one follows: lists.js prev).
-    rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) ORDER BY created_at, rowid`)
-      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }]);
+    rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) AND ${TAKEN_SQL} ORDER BY created_at, rowid`)
+      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }, friendsAmong(db, people)]);
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
-  return rows.map((r) => ({ ...copyFromRow(r, { names, me: me ? String(me.person) : null }),
+  return rows.map((r) => ({ ...copyFromRow(r, { names, me: me ? String(me.person) : null, known }),
     list: r.list_n && me ? { host: String(r.author), me: String(me.person), seen: { n: Number(r.list_n), h: String(r.list_head) },
       mine: last.get(String(r.id)) ?? null } : null }));
 }
 
-export function copyFromRow(r, { names = new Map(), me = null } = {}) {
+export function copyFromRow(r, { names = new Map(), me = null, known = null } = {}) {
   const content = JSON.parse(String(r.content));
   const tally = r.tally ? JSON.parse(String(r.tally)) : null;
   for (const [p] of Object.entries(tally?.answers ?? {})) if (p === String(r.author)) names.set(p, String(r.name));
   return { id: String(r.id), connection: { id: Number(r.connection_id), name: String(r.name), origin: String(r.origin),
     avatar: r.avatar_url ? { thumbSrc: String(r.avatar_url) } : null },
     version: content.version ?? String(r.id), tally,
-    poll: content.poll ? pollShown(content.poll, tally, { viewer: me, names, me }) : null,
-    event: content.event ? eventShown(content, tally, { viewer: me, names, me, version: content.version ?? null, invited: tally?.invited ?? null }) : null,
+    poll: content.poll ? pollShown(content.poll, tally, { viewer: me, names, me, known }) : null,
+    event: content.event ? eventShown(content, tally, { viewer: me, names, me, version: content.version ?? null, invited: tally?.invited ?? null, known }) : null,
     author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [],
     here: content.here === true, earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
     edited_at: r.edited_at ? Number(r.edited_at) : null, comments: Number(r.comments), created_at: Number(r.created_at),
@@ -384,10 +395,15 @@ export async function friendThread(env, from, connection, id) {
   if (!result.problem && !changed && last) {
     await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ?").bind(last.n, last.head, id).run();
   }
+  // What the owner here sent to it, compared with what their site shows (sentchecks.js).
+  if (me && !result.problem) await compareThread(env, { where: { connection }, host: person, list: id, entries: result.entries, me: me.person, names }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
   // Each with its running fingerprint as checked (a mention receipt names one: receipts.js).
   const heads = new Map(entries.map((e) => [e.n, e.head]));
-  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? names.get(e.by) ?? "Someone" : null })), problem: result.problem, changed,
+  // Named as the owner here knows them (names.js): friends by the name they approved, others as "friend of Ann".
+  const shown = await peopleShown(env.DB, result.entries.map((e) => e.by), { signed: names, friendHost: { person, name: String(connection.name) }, me: me?.person ?? null });
+  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
+    ...(e.by && shown.tags.get(e.by)) })), problem: result.problem, changed,
     seen: last ? { n: last.n, h: last.head } : null, mine, host: person };
 }
 
@@ -413,10 +429,13 @@ export async function relayRecord(request, env, url, connectionId, id) {
     answer = await callFriend(env, url.origin, String(connection.origin), "/_p/records",
       { body: { sent, delegation: { bytes: String(delegation.bytes), proof: JSON.parse(String(delegation.proof)) },
         ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) } });
-  } catch (error) { return refused(`Couldn't send it: ${error.message}`); }
-  const fp = await fingerprintOf("record", fromB64url(sent.record));
-  await env.DB.prepare(`INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(fp, record.host, id, record.kind, JSON.stringify(sent), answer.receipt ? JSON.stringify(answer.receipt) : null, now()).run();
+  } catch (error) {
+    // Kept if it may have been taken, or is a delete to send again (sentchecks.js).
+    await keepSent(env, { record, sent, list: id, error });
+    if (error.status === 409 && error.message === "duplicate") answer = {};
+    else return refused(`Couldn't send it: ${error.message}.${willRetry(record)}`);
+  }
+  const fp = await keepSent(env, { record, sent, list: id, receipt: answer.receipt ?? null });
   // Those it mentions are sent the host's receipt too, from here (receipts.js).
   if (answer.receipt) await queueReceipts(env, url.origin, record, fp);
   // The owner's own vote or answer, in their copy's totals at once (their site's are fetched again soon anyway).

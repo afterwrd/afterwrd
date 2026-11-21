@@ -18,3 +18,5 @@ export { Rules, checkList, signHead, checkHead, headOf, PER_AUTHOR, EDIT_SECONDS
 export { takeRecord, readList, listEntries } from "../../src/hosted.js";
 export { MemberRules } from "../../src/members.js";
 export { local } from "../../src/sqlite.js";
+// Names as the owner knows people (step 7b).
+export { fold } from "../../src/names.js";

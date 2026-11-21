@@ -421,6 +421,7 @@ function friendActivityItem(c) {
 function noticeItem(c) {
   // A friend's invitation to their event, or a change to it (as before: friendEventItem).
   if (["invite", "changed", "cancelled"].includes(c.kind)) return friendEventItem(c);
+  if (c.kind === "removed" || c.kind === "missing") return sentItem(c, `/friend/${c.connection_id}/posts/${c.target}`);
   if (c.kind === "hidden") return hiddenItem(c);
   const own = c.source === "own";
   const isPhoto = c.target.includes("/photos/");
@@ -501,6 +502,7 @@ function friendEventItem(c) {
 /** A comment in a group on a post the owner wrote or commented on, or a change to an event they're going to. */
 function groupActivityItem(c) {
   const href = c.kind === "closed" ? `/groups/${c.connection_id}` : `/groups/${c.connection_id}/posts/${c.target}${c.date ? `?date=${encodeURIComponent(c.date)}` : ""}`;
+  if (c.kind === "removed" || c.kind === "missing") return sentItem(c, href);
   // A mention receipt the group's site doesn't bear out (receipts.js, step 6c).
   if (c.kind === "hidden") {
     return html`<article class="card activity alert${c.isNew ? " new" : ""}">
@@ -565,6 +567,32 @@ function activityItem(ctx, c) {
     </header>
     <div class="text">${linkify(c.text, mentions)}</div>
     ${snippet && html`<p class="meta on">On “${snippet}”</p>`}
+  </div>
+</article>`;
+}
+
+/** What a record of the owner's is called in a notice about it (sentchecks.js `about`). */
+const SENT_WORDS = { comment: "comment", item: "post", post: "post", vote: "vote", answer: "answer", edit: "change to a comment", change: "change" };
+
+/**
+ * One of the owner's own records on a friend's post or in a group, removed by its host or an admin, or gone with
+ * nothing signed saying why (sentchecks.js: a check, or a thread opened). `c.name`: who removed it.
+ */
+function sentItem(c, href) {
+  const thing = c.target.includes("/photos/") && c.about === "post" ? "photo" : SENT_WORDS[c.about] ?? "comment";
+  const where = c.source === "group" ? html`in <a href="${href}">${c.friend}</a>` : html`on <a href="${href}">${c.friend}'s post</a>`;
+  const what = c.kind === "removed"
+    ? html`<strong>${c.name ?? "Someone"}</strong> removed your ${thing} ${where}.`
+    : html`Your ${thing} ${where} is missing: ${c.source === "group" ? "the group's" : html`${c.friend}'s`} site left it out, with nothing
+      signed saying why. It's worth asking ${c.source === "group" ? "whoever runs the group" : c.friend}.`;
+  return html`<article class="card activity${c.kind === "missing" ? " alert" : ""}${c.isNew ? " new" : ""}">
+  <div class="body">
+    <header>
+      <span class="what">${what}</span>
+      ${c.isNew && raw('<span class="badge badge-new">New</span>')}
+      <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
+    </header>
+    ${c.text && html`<div class="text">${c.text}</div>`}
   </div>
 </article>`;
 }

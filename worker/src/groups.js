@@ -205,7 +205,7 @@ async function empty(env) {
   await db.batch([
     ...["group_comments", "group_comment_versions", "group_photos", "group_answers", "group_event_skips", "group_poll_votes", "group_polls",
       "group_events", "group_posts", "group_post_versions", "group_links", "group_members", "groups",
-      "items", "item_photos", "lists", "list_pages", "checkpoints", "here_log"].map((table) => db.prepare(`DELETE FROM ${table}`)),
+      "items", "item_photos", "lists", "list_pages", "checkpoints", "authored", "here_log"].map((table) => db.prepare(`DELETE FROM ${table}`)),
     db.prepare("DELETE FROM media WHERE item_id IS NOT NULL"),
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('group_closed', '1')"),
   ]);

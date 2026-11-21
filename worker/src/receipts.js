@@ -10,6 +10,7 @@
 // only when it mentions the owner here; anything else gets the same quiet answer, so nobody can learn from it who the
 // owner is friends with. The writer's identity is
 // fetched from their own address only once that much has checked.
+import { isBlocked } from "./blocks.js";
 import { callFriend, siteCalling } from "./calls.js";
 import { friendThread } from "./friendcopies.js";
 import { groupThread } from "./groupcopies.js";
@@ -101,7 +102,7 @@ export async function receiveReceipt(request, env, url, work) {
     || !(record.mentions ?? []).includes(me.person)) return quiet();
   // From the writer's own site, signed by it (its identity fetched from its address only now).
   const caller = await siteCalling(request, env, url, bytes);
-  if (!caller || caller.person !== record.author) return quiet();
+  if (!caller || caller.person !== record.author || (await isBlocked(env.DB, record.author))) return quiet();
   const got = await checkRecord(note.sent, { identityOf: (p) => identityState(env, p),
     delegationOf: async (key) => (key === record.key && note.delegation ? note.delegation : null), at: now() });
   const hostState = got && (await identityState(env, host));

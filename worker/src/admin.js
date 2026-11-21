@@ -2,6 +2,8 @@
 // another, signing out everywhere), and every other owner page is routed from here. Only the owner signs in, so
 // no one else needs a way in: friends see each other from their own sites (connect.js).
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
+import { handleBlocks } from "./blocks.js";
+import { handleSentAdmin } from "./sentchecks.js";
 import { handleKeys, identitySummary } from "./keys.js";
 import { handleItems } from "./items.js";
 import { relayRecord } from "./friendcopies.js";
@@ -52,6 +54,10 @@ export async function handleAdmin(request, env, url, owner) {
     await forgetDeviceById(env, forget[1]);
     return Response.redirect(`${url.origin}/_admin`, 303);
   }
+  // What the owner sent elsewhere (sentchecks.js): stop sending a delete again; clear "signed as you".
+  if (url.pathname === "/_admin/sent/stop" || url.pathname === "/_admin/notices/dismiss") return handleSentAdmin(request, env, url);
+  // Blocking someone, and unblocking (blocks.js).
+  if (url.pathname === "/_admin/blocks" || url.pathname.startsWith("/_admin/blocks/")) return handleBlocks(request, env, url);
   if (url.pathname === "/_admin/notifications/seen") {
     await pushDevicesSeen(env);
     return Response.redirect(`${url.origin}/`, 303);

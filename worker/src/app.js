@@ -131,7 +131,7 @@ async function route(request, env, work) {
     return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   }
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
-  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleFriendItems(request, env, url, work);
+  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check") return handleFriendItems(request, env, url, work);
   if (url.pathname === "/_p/notes" && request.method === "POST") return receiveNotes(request, env, url, work);
   if (url.pathname === "/_p/mention" && request.method === "POST") return receiveReceipt(request, env, url, work);
   // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
@@ -237,7 +237,7 @@ async function routeGroup(request, env, url) {
   if (url.pathname.startsWith("/_join/")) return handleJoinLink(request, env, url);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
   // afterwrd 2 (step 6c): its posts, as signed items, to members' signed calls (groupposts.js).
-  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records") return handleGroupItems(request, env, url);
+  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check") return handleGroupItems(request, env, url);
   const signed = await signedFile(request, env, url);
   if (signed) return signed;
   if (request.method === "GET" && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);

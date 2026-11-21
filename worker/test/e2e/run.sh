@@ -107,7 +107,8 @@ three_sites() { # $1: the suite, run against three sites, each with its own data
   pkill -f "wrangler dev --name afterwrd-87" 2>/dev/null
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 2
 }
-run_feed() { three_sites feed.mjs; }
+# Ann's site checks what she sent with a "day" of 8 seconds (TEST_SENT_SECONDS, local sites only: sentchecks.js).
+run_feed() { EXTRA_A="--var TEST_SENT_SECONDS:8" three_sites feed.mjs; }
 # A whole site moved to a new one, with its identity (src/move.js, src/movein.js): a change of address waits 90 seconds
 # here rather than 7 days (TEST_SLOW_SECONDS, local sites only), so the test sees it take effect.
 run_move() { EXTRA_A="--var TEST_SLOW_SECONDS:90" EXTRA_B="--var TEST_SLOW_SECONDS:90" EXTRA_C="--var TEST_SLOW_SECONDS:90" three_sites move.mjs; }

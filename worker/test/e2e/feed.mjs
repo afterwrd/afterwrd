@@ -330,6 +330,107 @@ check("Ann's comment deleted on Bob's site, its words gone, a marker left", (awa
   && (await bob.$eval("article.card .comment.gone", (c) => c.textContent).catch(() => "")).includes("deleted")
   && !sql(stateB, `SELECT entries FROM list_pages WHERE list = '${bobPostId}'`)[0].entries.includes(wasContent));
 
+// Step 7a (sentchecks.js): Ann's site checks, in the background, what became of what she sent to Bob's posts. Here a
+// "day" of its schedule is 8 seconds (TEST_SENT_SECONDS on Ann's site), and a round runs at most that often, from Home.
+const SENT_DAY = 8;
+const annPerson = sql(stateA, "SELECT person FROM own_identity")[0].person;
+const bobPerson = sql(stateB, "SELECT person FROM own_identity")[0].person;
+// A record signed in a browser, from the open post's comment form (its list point and the writer's newest record).
+const signHere = (page, fields, content) => page.evaluate(async (fields, content) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const d = document.querySelector("form.say").dataset;
+  const key = await savedKey();
+  return makeRecord({ author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: d.signPrev || null, ...fields }, content, key);
+}, fields, content);
+const annSays = async (text) => {
+  await ann.goto(bobsPostPage);
+  await ann.type("article.from-friend .say textarea", text);
+  await Promise.all([settled(ann), ann.click("article.from-friend .say button")]);
+  return sql(stateA, `SELECT fp FROM sent WHERE kind = 'comment' ORDER BY created_at DESC, rowid DESC LIMIT 1`)[0].fp;
+};
+// A round of checks: Ann opens Home once the schedule says they're due (her rows' next_at, on her site's clock).
+const roundUntil = async (test, ms = 40_000) => waitFor(async () => {
+  await ann.goto(`${A}/`);
+  await new Promise((r) => setTimeout(r, 1500));
+  return test();
+}, ms);
+const checked = await annSays("Checked later");
+check("Ann's site keeps her comment to check, from a day on", sql(stateA, `SELECT state, next_at, created_at FROM sent WHERE fp = '${checked}'`)
+  .some((r) => r.state === null && r.next_at === r.created_at + SENT_DAY));
+check("Bob's site indexes it by writer", sql(stateB, `SELECT author, list FROM authored WHERE fp = '${checked}'`).some((r) => r.author === annPerson && r.list === bobPostId));
+check("…but not his own records on his own posts", sql(stateB, `SELECT COUNT(*) AS n FROM authored WHERE author = '${bobPerson}'`)[0].n === 0);
+check("only a friend's site may ask what became of records", (await fetch(`${B}/_p/records/check`, { method: "POST", headers: { "Afterwrd-From": A },
+  body: JSON.stringify({ points: [{ fp: checked, list: bobPostId }] }) })).status === 401);
+const askedBob = await (await siteCall(stateA, A, `${B}/_p/records/check`, { points: [{ fp: checked, list: bobPostId }, { fp: bobPostId, list: bobPostId }] })).json();
+check("…and Bob's site says Ann's is there, and Bob's own post isn't hers to ask about",
+  askedBob.results?.[0]?.state === "there" && askedBob.results?.[1]?.state === "missing", JSON.stringify(askedBob.results));
+// Bob removes it, signed in his browser (his site, as host, may).
+await bob.goto(`${B}/posts/${bobPostId}`);
+const removal = await signHere(bob, { kind: "remove", about: checked }, undefined);
+check("Bob removes Ann's comment", (await bob.evaluate(async (url, sent) => (await fetch(url, { method: "POST", redirect: "manual",
+  body: new URLSearchParams({ sent: JSON.stringify(sent), back: location.pathname }) })).type, `/_admin/items/${bobPostId}/records`, removal.sent)) === "opaqueredirect");
+check("…and his site's index no longer says whose it was", sql(stateB, `SELECT author FROM authored WHERE fp = '${checked}'`)[0]?.author === null);
+check("Ann's site finds out at its next round, from Bob's signed removal", await roundUntil(() =>
+  sql(stateA, `SELECT state, removed_by FROM sent WHERE fp = '${checked}'`).some((r) => r.state === "removed" && r.removed_by === bobPerson)));
+await ann.goto(`${A}/activity`);
+const annActivity = await ann.$eval("main", (m) => m.innerText);
+check("…and her Notifications say so, with what she wrote", annActivity.includes("Bob Example removed your comment on Bob Example's post")
+  && annActivity.includes("Checked later"), annActivity.slice(0, 300));
+check("…once only, and it's no longer asked about", sql(stateA, `SELECT COUNT(*) AS n FROM notices WHERE kind = 'removed'`)[0].n === 1
+  && sql(stateA, `SELECT next_at FROM sent WHERE fp = '${checked}'`)[0].next_at === null);
+// Bob's site drops one of Ann's comments with nothing signed saying why, as whoever runs it could by hand.
+const vanishing = await annSays("Will vanish");
+const pagesBefore = sql(stateB, `SELECT page, entries FROM list_pages WHERE list = '${bobPostId}'`);
+const lastPage = pagesBefore.at(-1);
+sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(JSON.parse(lastPage.entries).filter((e) => e.fp !== vanishing)).replace(/'/g, "''")}'
+  WHERE list = '${bobPostId}' AND page = ${lastPage.page}`);
+check("a comment Bob's site drops is found missing at Ann's next round", await roundUntil(() =>
+  sql(stateA, `SELECT state FROM sent WHERE fp = '${vanishing}'`).some((r) => r.state === "missing")));
+await ann.goto(`${A}/activity`);
+check("…and her Notifications say his site left it out", (await ann.$eval("main", (m) => m.innerText)).includes("Your comment on Bob Example's post is missing"));
+sql(stateB, `UPDATE list_pages SET entries = '${lastPage.entries.replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = ${lastPage.page}`);
+// A delete Bob's site doesn't take (here, it can't be reached) is kept, said on Home, and sent again until it's taken.
+const keep = await annSays("Delete me later");
+const bobOrigin = sql(stateA, `SELECT origin FROM connections WHERE identity = '${bobPerson}'`)[0].origin;
+await ann.goto(bobsPostPage);
+sql(stateA, `UPDATE connections SET origin = 'http://localhost:8799' WHERE identity = '${bobPerson}'`);
+await ann.click(`#c-${keep} .under details.more summary`);
+await Promise.all([settled(ann), ann.click(`#c-${keep} .under .delete`)]);
+check("a delete Bob's site can't take is kept to send again", sql(stateA, "SELECT state FROM sent WHERE kind = 'delete' ORDER BY created_at DESC LIMIT 1")
+  .some((r) => r.state === "waiting"));
+sql(stateA, "UPDATE connections SET items_checked_at = " + Math.floor(Date.now() / 1000) + ` WHERE identity = '${bobPerson}'`); // no pull meanwhile
+await ann.goto(`${A}/`);
+check("…and Home says so", (await ann.$eval("main", (m) => m.innerText)).includes("hasn't taken your delete"));
+sql(stateA, `UPDATE connections SET origin = '${bobOrigin}' WHERE identity = '${bobPerson}'`);
+check("…sent again at the next round, and taken", await roundUntil(() =>
+  sql(stateA, "SELECT state FROM sent WHERE kind = 'delete' ORDER BY created_at DESC LIMIT 1").some((r) => r.state === null)
+  && !(sql(stateB, `SELECT entries FROM list_pages WHERE list = '${bobPostId}'`).map((p) => p.entries).join("")).includes("Delete me later")));
+await ann.goto(`${A}/`);
+check("…and Home no longer says so", !(await ann.$eval("main", (m) => m.innerText)).includes("hasn't taken your delete"));
+// Something signed as Ann that her site never sent (a stolen key used elsewhere, T6): here, signed in her browser and
+// sent straight to Bob's site.
+await ann.goto(bobsPostPage);
+const stolen = await signHere(ann, { kind: "comment" }, { text: "Not from Ann's site" });
+const annDelegation = sql(stateA, "SELECT bytes, proof FROM delegations ORDER BY expires_at DESC LIMIT 1")[0];
+check("…a comment signed with Ann's key but sent around her site is taken by Bob's", (await siteCall(stateA, A, `${B}/_p/records`,
+  { sent: stolen.sent, delegation: { bytes: annDelegation.bytes, proof: JSON.parse(annDelegation.proof) } })).status === 200);
+await new Promise((r) => setTimeout(r, (SENT_DAY + 1) * 1000));
+sql(stateA, `UPDATE connections SET items_checked_at = 0 WHERE identity = '${bobPerson}'`);
+check("Ann's site finds it at its next pull from Bob's", await roundUntil(() =>
+  sql(stateA, `SELECT COUNT(*) AS n FROM notices WHERE kind = 'forged' AND fp = '${stolen.fp}'`)[0].n === 1));
+await ann.goto(`${A}/`);
+check("…and Home says something was signed as her that her site didn't send", (await ann.$eval("main", (m) => m.innerText))
+  .includes("Something signed as you appeared on Bob Example's post"));
+await Promise.all([settled(ann), ann.click("form[action='/_admin/notices/dismiss'] button")]);
+await ann.goto(`${A}/`);
+check("…until she clears it", !(await ann.$eval("main", (m) => m.innerText)).includes("Something signed as you"));
+// Tidy: Bob removes it, so what follows sees Ann's comments as before.
+await bob.goto(`${B}/posts/${bobPostId}`);
+const tidy = await signHere(bob, { kind: "remove", about: stolen.fp }, undefined);
+await bob.evaluate(async (url, sent) => fetch(url, { method: "POST", redirect: "manual", body: new URLSearchParams({ sent: JSON.stringify(sent), back: location.pathname }) }),
+  `/_admin/items/${bobPostId}/records`, tidy.sent);
+
 // What a friend's site can and can't reach: only signed calls, and only what's shared.
 const fromAnn = (path, body = null, options = {}) => siteCall(stateA, A, B + path, body, options);
 check("an unsigned call gets nothing", (await fetch(`${B}/_p/items`)).status === 401
@@ -601,7 +702,6 @@ check("Ann sees Bob's changed post, Edited, with what it said before", Boolean(e
 // Asking for less (friendhost.js): Ann's site asks for Bob's posts changed since it last asked, in a signed call. Asked
 // again, nothing; a new post, only that; a comment, only the post it's on; a deleted post, its id among those gone.
 const asOf = () => Number(sql(stateA, "SELECT items_since FROM connections")[0].items_since ?? 0);
-const annPerson = sql(stateA, "SELECT person FROM own_identity")[0].person;
 const annHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateA, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
   { name: "Ed25519" }, false, ["sign"]);
 const ask = async (since) => {

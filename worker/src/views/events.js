@@ -29,7 +29,7 @@ export function eventBlock(ctx, e, { href, full = false, answer = null, ics = nu
   // Signed events (views/items.js) name the owner here with `me`, and mark answers given before it last changed.
   const names = (list) => list.map((x, i) => (x.me || x.from === ctx.url.origin ? (i ? "you" : "You") : x.name)
     + (x.earlier ? " (said before it changed)" : "")).join(", ");
-  const counts = [e.going.length && `${e.going.length} going`, e.maybe.length && `${e.maybe.length} maybe`,
+  const counts = [e.going.length && `${e.going.length} going${youKnow(e.going)}`, e.maybe.length && `${e.maybe.length} maybe${youKnow(e.maybe)}`,
     e.invited && `${e.invited} invited`].filter(Boolean).join(" · ");
   const lists = [["Going", e.going], ["Maybe", e.maybe], ["Can't go", e.cantGo ?? []], ["Not answered yet", e.waiting ?? []]];
   return html`<div class="event${e.cancelled_at ? " cancelled" : ""}">
@@ -117,7 +117,8 @@ export function repeatingSigned(ctx, e, { base, relay, full = false, sign, edit 
   const next = dates.find((d) => d.date === asked) ?? dates.find((d) => !d.over && !d.cancelled_at) ?? dates.at(-1);
   const over = dates.every((d) => d.over);
   const names = (list) => list.map((x, i) => (x.me ? (i ? "you" : "You") : x.name) + (x.earlier ? " (said before it changed)" : "")).join(", ");
-  const counts = (d) => [d.going.length && `${d.going.length} going`, d.maybe.length && `${d.maybe.length} maybe`].filter(Boolean).join(" · ");
+  const counts = (d) => [d.going.length && `${d.going.length} going${youKnow(d.going)}`, d.maybe.length && `${d.maybe.length} maybe${youKnow(d.maybe)}`]
+    .filter(Boolean).join(" · ");
   const answers = (d, label) => html`<form method="post" action="${relay}" class="answers" aria-label="${label}" data-inplace${raw(sign("answer", d))}>
     <input type="hidden" name="back" value="${back}">
     ${ANSWER_LABELS.map(([value, words]) => html`<button class="chip${d.answer === value ? " primary" : ""}" name="answer" value="${value}"
@@ -463,3 +464,9 @@ ${calendarSwitch(base, view)}
 ${shownView}`);
 }
 
+/** " (3 you know)", when some of `list` (answers) aren't people the owner here knows (names.js); otherwise nothing. */
+function youKnow(list) {
+  if (!list.length || list[0].known === undefined) return "";
+  const n = list.filter((x) => x.known).length;
+  return n < list.length ? ` (${n} you know)` : "";
+}

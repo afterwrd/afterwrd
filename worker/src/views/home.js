@@ -9,7 +9,7 @@ import { html, raw } from "./html.js";
 import { askedBecause, friendFace, introductionCard } from "./friends.js";
 import { gone, waitingFor } from "../friendcopies.js";
 import { MEMORIES, page } from "./layout.js";
-import { composer, postCard } from "./parts.js";
+import { blockButton, composer, postCard } from "./parts.js";
 
 // --- Home and Memories ----------------------------------------------------------------------------------------------
 
@@ -41,7 +41,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [] }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] } }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -96,6 +96,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
     ${moved && html`<p class="notice alert" id="moved">You've moved to <a href="${moved.to}">${host(moved.to)}</a>. Friends' sites
       find you there now, and this site only says where you've gone. If you haven't yet, <a href="/_admin/export">download
       everything</a> here and bring it in there, from Import. Delete this site once you're settled.</p>`}
+    ${sentNotices(sent)}
     ${friendsMoving.map((f) => html`<p class="notice moving">${f.name} ${f.waiting
       ? html`is moving to ${host(f.moving_to)} on ${fmtDate(f.moving_at)}.`
       : html`has moved to ${host(f.moving_to)}.`}</p>`)}
@@ -118,7 +119,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       ${r.invited_as && r.invited_as.toLowerCase() !== r.name.toLowerCase() && html`<strong class="warn">That's not the name you invited (${r.invited_as}).</strong>`}
       <span class="row"><button class="chip primary" formaction="/_admin/connections/${r.id}/approve?back=home">Approve</button>
         <button class="chip" formaction="/_admin/connections/${r.id}/decline?back=home" data-confirm="Decline? Their site will be told no." data-confirm-ok="Decline">Decline</button></span>
-    </form>`)}
+    </form>${r.identity && blockButton({ person: r.identity, name: r.name, back: "/", look: "link" })}`)}
     ${introductions.map((i) => introductionCard(i, "/", "div"))}
     <div class="notice install-note" id="install-note" hidden>
       <span><strong>Put afterwrd on your home screen.</strong> It opens like an app, in one tap, and can tell you when a
@@ -258,4 +259,30 @@ also tell you when a friend invites you to an event, or one you're going to chan
   <p>Look for <strong>Install</strong> at the right-hand end of the address bar, or in the browser's menu.</p>
 </section>
 <p data-device-others hidden><button class="chip" data-show-devices>Steps for another phone or computer</button></p>`);
+}
+
+/** Where one of the owner's records went (sentchecks.js sentTrouble): a friend's post or photo, or a group. */
+function sentWhere(r) {
+  const item = String(r.target ?? r.item ?? "").split("/")[0].split("?")[0];
+  if (r.connection_id) return html`<a href="/friend/${r.connection_id}/posts/${item}">${r.friend}'s post</a>`;
+  if (r.group_id && item !== "" && item.length === 43 && r.kind !== "leave") return html`<a href="/groups/${r.group_id}/posts/${item}">a post in ${r.group_name}</a>`;
+  return r.group_id ? html`<a href="/groups/${r.group_id}">${r.group_name}</a>` : html`a site you're no longer connected with`;
+}
+
+/**
+ * Deletes and leaves a friend's site or group hasn't taken (sent again in the background until they are), and anything
+ * signed as the owner that their site never sent (sentchecks.js).
+ */
+function sentNotices({ waiting = [], forged = [] } = {}) {
+  return html`${waiting.map((r) => html`<form class="notice alert" method="post" action="/_admin/sent/stop" data-region="" data-inplace="remove">
+      <input type="hidden" name="fp" value="${r.fp}">
+      ${r.kind === "leave"
+        ? html`${r.group_name ?? "A group"} hasn't taken your leaving yet, from ${fmtDate(r.created_at)}.`
+        : html`${r.friend ? html`${r.friend}'s site` : r.group_name ?? "A site"} hasn't taken your delete on ${sentWhere(r)} yet, from ${fmtDate(r.created_at)}.`}
+      ${r.next_at ? "Your site will keep asking." : "Your site has stopped asking: delete it again, or ask them."}
+      <button class="link">Stop asking</button></form>`)}
+    ${forged.map((r) => html`<form class="notice alert" method="post" action="/_admin/notices/dismiss" data-region="" data-inplace="remove">
+      <input type="hidden" name="id" value="${r.id}">
+      Something signed as you appeared on ${sentWhere(r)}, and your site didn't send it. Someone may have one of your keys:
+      look at <a href="/_admin">Your devices</a>, and remove any you don't know. <button class="link">Got it</button></form>`)}`;
 }

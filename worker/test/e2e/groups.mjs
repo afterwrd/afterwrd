@@ -884,6 +884,59 @@ await ann.goto(`${A}/groups/${annGroup}/members`);
 await ask(ann, B);
 check("…and she can't ask again from the group", (await text(ann, "body")).includes("already asked") && n(stateB, `connections WHERE origin = '${A}'`) === 0);
 
+// Step 7b (names.js): people shown as the owner knows them. Now Ann and Cat are friends, and Bob and Cat; Ann and Bob
+// aren't. In a group, friends are marked, not strangers.
+const tagsOn = (page, from) => page.$$eval(`li[data-from="${from}"] .what .from`, (l) => l.map((x) => x.textContent.trim())).catch(() => []);
+await cat.goto(`${C}/groups/${catGroup}/members`);
+check("in a group, Cat's friends are marked as hers", (await tagsOn(cat, A)).includes("your friend") && (await tagsOn(cat, B)).includes("your friend"),
+  JSON.stringify([await tagsOn(cat, A), await tagsOn(cat, B)]));
+await ann.goto(`${A}/groups/${annGroup}/members`);
+check("…and Ann's: Cat is, Bob (not her friend) isn't", (await tagsOn(ann, C)).includes("your friend") && (await tagsOn(ann, B)).length === 0,
+  JSON.stringify([await tagsOn(ann, C), await tagsOn(ann, B)]));
+await ann.goto(`${A}/groups/${annGroup}/posts/${pollPost}`);
+check("a poll's count is split by who Ann knows", (await text(ann, `#poll-${pollPost} .meta`)).includes("2 people answered, 1 you know"),
+  await text(ann, `#poll-${pollPost} .meta`));
+// A look-alike: Ann's friend Cat, as Ann calls her here, made to look like Bob's name: Bob is flagged as not her.
+const annCat = sql(stateA, `SELECT id, name FROM connections WHERE origin = '${C}'`)[0];
+sql(stateA, `UPDATE connections SET name = 'B0b  Examрle' WHERE id = ${annCat.id}`);
+await ann.goto(`${A}/groups/${annGroup}/members`);
+check("someone whose name looks like a friend's is flagged", (await tagsOn(ann, B)).some((t) => t.startsWith("not your friend B0b")), JSON.stringify(await tagsOn(ann, B)));
+// A rename: Ann approved Cat as "Catherine"; Cat's signed name is "Cat Example".
+sql(stateA, `UPDATE connections SET name = 'Catherine' WHERE id = ${annCat.id}`);
+await ann.goto(`${A}/groups/${annGroup}/members`);
+check("a friend is shown by the name Ann approved, with their new one", (await text(ann, `li[data-from="${C}"] .what strong`)) === "Catherine"
+  && (await tagsOn(ann, C)).includes("now calling themselves Cat Example"), JSON.stringify(await tagsOn(ann, C)));
+await ann.goto(`${A}/friend/${annCat.id}/posts`);
+check("…and her page offers to use it", (await text(ann, "main")).includes("Catherine now calls themselves Cat Example"));
+await Promise.all([ann.waitForNavigation(), ann.click(`form[action="/_admin/connections/${annCat.id}/rename"] button`)]);
+check("…which Ann does", sql(stateA, `SELECT name FROM connections WHERE id = ${annCat.id}`)[0].name === "Cat Example");
+
+// Step 7c (blocks.js): Ann blocks Bob, quietly, from the group's members.
+await ann.goto(`${A}/groups/${annGroup}/members`);
+check("Ann can block a member who isn't the owner", Boolean(await ann.$(`li[data-from="${B}"] form[action="/_admin/blocks"]`))
+  && !(await ann.$(`li[data-from="${A}"] form[action="/_admin/blocks"]`)));
+await Promise.all([ann.waitForNavigation(), ann.click(`li[data-from="${B}"] form[action="/_admin/blocks"] button`)]);
+check("…by his key, and his site isn't told", n(stateA, `blocks WHERE person = '${bobPerson}'`) === 1 && n(stateB, "blocks") === 0);
+await ann.goto(`${A}/groups/${annGroup}`);
+check("his posts are folded away for her", (await text(ann, `#gi-${bobPost}`)).includes("Hidden: a post from someone you've blocked"));
+await ann.goto(`${A}/groups/${annGroup}/posts/${annPost}`);
+const annNotesBefore = groupNotices(stateA, "comment");
+await bob.goto(`${B}/groups/${bobGroup}`);
+await comment(bob, `gi-${annPost}`, "Ann won't see this");
+await new Promise((r) => setTimeout(r, 3000));
+check("his comment on her post isn't told to her", groupNotices(stateA, "comment") === annNotesBefore);
+await ann.goto(`${A}/groups/${annGroup}/posts/${annPost}`);
+check("…and is folded away in the thread", (await text(ann, "main")).includes("Hidden: someone you've blocked") && !(await text(ann, "main")).includes("Ann won't see this"));
+await ann.goto(`${A}/groups/${annGroup}/posts/${pollPost}`);
+check("…while polls still count him, unnamed", (await ann.$eval(`#poll-${pollPost} .poll-who`, (d) => d.textContent).catch(() => "")).includes("someone you've blocked")
+  && (await text(ann, `#poll-${pollPost} .meta`)).includes("2 people answered"));
+await ann.goto(`${A}/friend`);
+check("Friends lists him as blocked", (await text(ann, "#blocked")).includes("Bob Example"));
+await Promise.all([ann.waitForNavigation(), ann.click("#blocked form button")]);
+check("…and Ann unblocks him", n(stateA, "blocks") === 0);
+await ann.goto(`${A}/groups/${annGroup}/posts/${annPost}`);
+check("…seeing his comment again", (await text(ann, "main")).includes("Ann won't see this"));
+
 // Leaving and removing.
 await ann.goto(`${A}/groups/${annGroup}/members`);
 await Promise.all([ann.waitForNavigation(), ann.click(`button[data-group-record="role"][data-role="member"][data-about="${bobJoin}"]`)]);

@@ -31,31 +31,32 @@ export async function loadThreads(db, keys) {
 // Notifications: comments here from before signing (comments), and notices about signed posts (notices, below): friends'
 // and groups'. One list, newest first. For a friend or group, `connection_id` is the friend or group, `friend` their
 // name, `target` the post. `kind` is 'comment', 'invite' (a friend's), 'changed' or 'cancelled' for an event, 'mention'
-// (mentions.js: someone mentioned the owner, or used @here in a group), or 'closed' (a group). `own_post`: whether the
+// (mentions.js: someone mentioned the owner, or used @here in a group), 'closed' (a group), or 'removed' or 'missing':
+// one of the owner's own comments, posts, votes or answers there, removed or left out (sentchecks.js; `about` says which). `own_post`: whether the
 // owner wrote it (groups). `date`: which date of a repeating group event, when it's about one date. `mentions`: who a
 // comment here mentions (mentions.js).
 // Signed posts (afterwrd 2: notes.js): comments and mentions on friends' posts the owner's in, and on their own
 // ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new
 // post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled')`;
+  WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled', 'removed', 'missing')`;
 // A group's (groupcopies.js): comments, mentions, @here, changes to events, and its closing, while the owner's in it.
 // One date of a repeating event called off (6d) has its target as "<post>?date=<date>".
 const GROUP_NOTICES = `FROM notices n JOIN groups g ON g.id = n.group_id AND g.joined_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled', 'closed')`;
+  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled', 'closed', 'removed', 'missing')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
-    NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions
+    NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions, NULL AS about
   FROM comments c LEFT JOIN users u ON u.id = c.author_id
   UNION ALL
   SELECT CASE WHEN n.own = 1 THEN 'own' ELSE 'signed' END, n.id, n.target, n.text, n.created_at, n.actor, NULL, n.connection_id, co.name,
-    NULL, n.kind, NULL, NULL
+    NULL, n.kind, NULL, NULL, n.about
   ${NOTICES}
 
   UNION ALL
   SELECT 'group', n.id, CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, 1, instr(n.target, '?date=') - 1) ELSE n.target END,
     n.text, n.created_at, n.actor, NULL, g.id, g.name, n.own, n.kind,
-    CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, instr(n.target, '?date=') + 6) END, NULL
+    CASE WHEN instr(n.target, '?date=') > 0 THEN substr(n.target, instr(n.target, '?date=') + 6) END, NULL, n.about
   ${GROUP_NOTICES}`;
 
 /** The newest notifications, for the Notifications page. */

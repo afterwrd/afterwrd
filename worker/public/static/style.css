@@ -260,6 +260,7 @@ img.who { object-fit: cover; padding: 0; }
 .comment .bubble { justify-self: start; max-width: 100%; padding: 0.5rem 0.95rem; border-radius: 18px; background: var(--raised); }
 .comment .bubble strong { display: block; font: 800 0.85rem var(--round); }
 .comment .bubble .from { display: block; margin-top: -0.15rem; font-size: 0.72rem; color: var(--muted); }
+.comment .bubble .from.warn { color: var(--danger); font-weight: 700; } /* a look-alike of a friend's name (names.js) */
 .comment .said { white-space: pre-wrap; overflow-wrap: anywhere; }
 .comment:target .bubble { box-shadow: 0 0 0 2px var(--accent); }
 .comment .under { display: flex; align-items: center; gap: 0.8rem; padding: 0.15rem 0.95rem 0; }
@@ -855,7 +856,7 @@ details.more .menu a, details.more .menu button {
   display: block; width: 100%; padding: 0.5rem 0.75rem; border: 0; border-radius: 10px; background: none; text-align: left;
   color: var(--text); font: 700 0.9rem var(--sans); cursor: pointer; text-decoration: none;
 }
-details.more .menu .delete { color: var(--danger); }
+details.more .menu .delete, details.more .menu .block { color: var(--danger); }
 details.more .menu a:hover, details.more .menu button:hover { background: var(--surface); text-decoration: none; }
 
 /* A calendar's Month / Week / List switch, and a week as days */
@@ -884,3 +885,6 @@ details.more .menu a:hover, details.more .menu button:hover { background: var(--
 .notify label { display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.5rem 0; }
 #notify-error { color: var(--danger); font-weight: 700; margin: 0; }
 #notify-error:empty { display: none; }
+/* How a group's member is known to the owner (names.js): "your friend", a new name, or a look-alike. */
+.member .what .from { display: block; font-size: 0.72rem; color: var(--muted); }
+.member .what .from.warn { color: var(--danger); font-weight: 700; }

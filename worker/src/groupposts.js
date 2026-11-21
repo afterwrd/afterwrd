@@ -15,6 +15,7 @@
 //                            `role` making them admin (with their `join`), so readers needn't ask for the members list
 //   GET  /_p/items/<id>/dates/<date>   one date's list of a repeating event (step 6d: its answers and calling off),
 //                            with what /_p/items/<id> sends with it
+//   POST /_p/records/check   what became of the member's records here (sentchecks.js answerCheck)
 //   POST /_p/records         {sent, delegation, profile?}: the member's own comment, edit, delete, vote, answer, end or
 //                            change, or (an admin, or the group's owner) a remove or calloff; an answer or calloff with
 //                            `date` goes on that date's list, which starts with it
@@ -36,6 +37,7 @@ import { ownIdentity } from "./keys.js";
 import { rateWindow } from "./limits.js";
 import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
+import { answerCheck, mineSince } from "./sentchecks.js";
 import { outbox } from "./outbox.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
 import { fingerprintOf, fromB64url } from "../public/static/signed.js";
@@ -96,6 +98,8 @@ export async function handleGroupItems(request, env, url) {
   const shut = Boolean(closedGroup(group));
   if (request.method === "POST" && url.pathname === "/_p/items") return shut ? json({ error: "This group has closed." }, 409) : newPost(env, url, self, group, member, body);
   if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body, { shut });
+  // What became of the member's records here (sentchecks.js): while closing, too.
+  if (request.method === "POST" && url.pathname === "/_p/records/check") return json(await answerCheck(env, String(member.identity), body, { host: self.person }));
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const before = Number(url.searchParams.get("before") ?? 0) || 0;
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
@@ -124,7 +128,8 @@ export async function handleGroupItems(request, env, url) {
     const keys = [...items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]), ...Object.values(roles).flatMap((p) => [p.join, p.role])].map(keyOf);
     const authors = items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]).map((x) => parseRecord(fromB64url(x.record))?.author).filter(Boolean);
     return json({ v: 2, items, gone, until, more, roles, context: await groupObject(db, url.origin, group, member),
-      delegations: await delegationsFor(db, keys), people: await peopleFor(db, [...new Set([...authors, self.owner])]) });
+      delegations: await delegationsFor(db, keys), people: await peopleFor(db, [...new Set([...authors, self.owner])]),
+      ...(!before && !only && { mine: await mineSince(db, String(member.identity), since) }) });
   }
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})(?:\/dates\/(\d{4}-\d{2}-\d{2}))?$/.exec(url.pathname);
   if (request.method === "GET" && one) {

@@ -288,6 +288,8 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   for (const statement of readFileSync(new URL("../../migrations/0029_lists.sql", import.meta.url), "utf8").split(";").map((t) => t.trim()).filter((t) => t && !/^(--[^\n]*\n?)*$/.test(t))) {
     raw.exec(statement);
   }
+  // The host's index of others' records (migration 0041: sentchecks.js), which taking a record writes to.
+  raw.exec("CREATE TABLE authored (fp TEXT PRIMARY KEY, author TEXT, list TEXT NOT NULL, n INTEGER NOT NULL, taken INTEGER NOT NULL)");
   const db = local(storage);
   const host = { person: ann.id, privateKey: ann.hosting.privateKey };
   const itemRecord = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Big thread" }, ann.browser);
@@ -408,6 +410,15 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("…and these kinds belong only in a members list", new Rules({ host: G, list: "i".repeat(43), owner: ann.id })
     .refuse({ ...(await sign(bob, "join", {}, { name: "Bob" })).got, record: { ...(await sign(bob, "join", {}, { name: "Bob" })).got.record, item: "i".repeat(43) } }, NOW)
     === "That belongs in a group's members list.");
+}
+
+// --- names (step 7b: src/names.js): look-alikes fold to the same ---------------------------------------------------
+{
+  const { fold } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+  check("names fold case, accents, spaces and signs", fold("  Zoë   O'Brien ") === fold("zoe obrien"));
+  check("…and look-alike letters: digits, Cyrillic, Greek, I and l", fold("B0b Ехаmple") === fold("Bob Example") && fold("Вill") === fold("BiII")
+    && fold("Αnn") === fold("Ann") && fold("Mia") !== fold("Mi"), [fold("B0b Ехаmple"), fold("Bob Example")].join(" "));
+  check("…but different names stay different", fold("Bob Example") !== fold("Rob Example") && fold("Ann") !== fold("Anne"));
 }
 
 process.exit(failed ? 1 : 0);

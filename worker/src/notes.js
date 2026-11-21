@@ -18,6 +18,7 @@
 // else's: noticeOwn.
 //
 // A group's site (step 6c) sends notes to the same address, about its members' posts: groupcopies.js receiveGroupNote.
+import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
 import { signedGroup } from "./groupjoin.js";
 import { receiveGroupNote } from "./groupcopies.js";
@@ -25,6 +26,7 @@ import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js
 import { keepItem } from "./friendcopies.js";
 import { listEntries } from "./hosted.js";
 import { identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { TAKEN_SQL } from "./sentchecks.js";
 import { ID_RE, ownHost } from "./items.js";
 import { checkHead, headOf, signHead } from "./lists.js";
 import { rateWindow } from "./limits.js";
@@ -231,8 +233,9 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
   if (note.kind === "change") return receiveChange(env, url, work, { connection, person }, me, got, entry);
   const author = got.record.author;
   if (author === me.person) return json({ ok: true }, 202); // the owner's own comment
+  if (await isBlocked(env.DB, author)) return json({ ok: true }, 202); // someone the owner's blocked: dropped, quietly (blocks.js)
   const mentioned = (got.record.mentions ?? []).includes(me.person);
-  const there = !mentioned && (await env.DB.prepare("SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' LIMIT 1").bind(item).first());
+  const there = !mentioned && (await env.DB.prepare(`SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' AND ${TAKEN_SQL} LIMIT 1`).bind(item).first());
   if (!mentioned && !there) return json({ ok: true }, 202);
   // Named as the owner here knows them: the friend whose site it is, another friend, or as they sign themselves.
   const friend = author === person ? connection : await env.DB.prepare("SELECT name FROM connections WHERE identity = ? AND approved_at IS NOT NULL").bind(author).first();

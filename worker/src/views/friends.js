@@ -11,7 +11,7 @@ import { host } from "../sites.js";
 import { now } from "../util.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
-import { feed, has, pager } from "./parts.js";
+import { blockButton, feed, has, pager } from "./parts.js";
 
 // --- a friend's shared Facebook archive and albums, read from their site (friends.js) ----------------------------
 
@@ -97,7 +97,7 @@ export function introductionCard(i, back, tag = "li") {
 }
 
 /** The owner's Friends: friends on afterwrd first, then everyone from the Facebook download, in one list. */
-export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], checks = [] }) {
+export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], checks = [], blocked = [] }) {
   const people = has(ctx, "friends"); // Facebook people have pages only if the friends list is published
   const fbLink = (p) => (people && p.id ? html`<a href="/people/${p.id}">${p.name}</a>` : p.name);
   const linkForm = (c, body) => html`<form method="post" action="/_admin/connections/${c.id}/facebook" class="fb-link">${body}</form>`;
@@ -123,8 +123,17 @@ so check the address is one you expect; if not, decline.</p>
       <button class="chip primary" formaction="/_admin/connections/${r.id}/approve">Approve</button>
       <button class="chip danger" formaction="/_admin/connections/${r.id}/decline" data-confirm="Decline? Their site will be told no." data-confirm-ok="Decline">Decline</button>
     </form>
+    ${r.identity && blockButton({ person: r.identity, name: r.name, back: "/friend", look: "link" })}
   </li>`)}
 </ul>`}
+
+${blocked.length > 0 && html`<section id="blocked">
+<h2>Blocked</h2>
+<p class="meta">You don't see what they write, or hear from them, and they can't ask to be friends. They haven't been told.</p>
+<ul class="friend-list">
+  ${blocked.map((b) => html`<li class="card"><span class="what"><strong>${b.name}</strong><span class="meta">since ${fmtDate(b.created_at)}</span></span>
+    <form method="post" action="/_admin/blocks/${b.person}/unblock"><input type="hidden" name="back" value="/friend#blocked"><button class="chip">Unblock</button></form></li>`)}
+</ul></section>`}
 
 ${introductions.length > 0 && html`<section id="introductions">
 <h2>Introductions</h2>
@@ -315,6 +324,10 @@ ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cove
 </div>
 <div class="meta">${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}
   · a friend you're connected with. Only you see this here. ${removeFriend(c, "link")}</div>
+${c.renamed && html`<form class="notice" method="post" action="/_admin/connections/${c.id}/rename">
+  <input type="hidden" name="name" value="${c.renamed}">
+  ${c.name} now calls themselves ${c.renamed}. You'll go on seeing ${c.name} everywhere until you choose otherwise.
+  <button class="link">Call them ${c.renamed}</button></form>`}
 <nav class="tabs">
   ${[["posts", "Posts"], ["photos", "Photos"]].map(([key, label]) =>
     html`<a href="${friendBase(c)}/${key}" ${key === tab && raw('aria-current="page"')}>${label}</a>`)}

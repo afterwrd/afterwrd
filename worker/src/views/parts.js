@@ -153,7 +153,9 @@ export function pollBlock(ctx, poll, { id, action = null, hidden = {}, closeActi
   const back = ctx.url.pathname + ctx.url.search;
   const share = (o) => (poll.voters ? Math.round((o.count / poll.voters) * 100) : 0);
   const facts = [
-    !poll.voters ? "Nobody's answered yet" : poll.voters === 1 ? "1 person answered" : `${poll.voters} people answered`,
+    !poll.voters ? "Nobody's answered yet" : (poll.voters === 1 ? "1 person answered" : `${poll.voters} people answered`)
+      // Split by who the owner here knows (names.js), when some of them aren't.
+      + (poll.knownVoters !== null && poll.knownVoters !== undefined && poll.knownVoters < poll.voters ? `, ${poll.knownVoters} you know` : ""),
     poll.open && poll.multiple && "Pick as many as you like",
     !poll.open ? "Closed" : poll.closes_at && `Closes ${fmtDate(poll.closes_at)}`,
   ].filter(Boolean).join(" · ");
@@ -322,3 +324,12 @@ export function composer({ action = null, max = null, placeholder = "Write somet
 </form>
 <script type="module" src="${asset("/static/compose.js")}"></script>`;
 }
+
+/**
+ * A Block button for `person` (blocks.js) (asks first: ui.js), going back to `back`. `look`: the button's class. A friend's ends
+ * the friendship too.
+ */
+export const blockButton = ({ person, name, back, friend = false, look = "block" }) => html`<form method="post" action="/_admin/blocks"
+    data-confirm="Block ${name}? ${friend ? "You'll stop being friends. " : ""}You won't see what they write, or hear from them. They won't be told you've blocked them."
+    data-confirm-ok="Block"><input type="hidden" name="person" value="${person}"><input type="hidden" name="name" value="${name}">
+    <input type="hidden" name="back" value="${back}"><button class="${look}">Block</button></form>`;

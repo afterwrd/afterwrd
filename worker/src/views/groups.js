@@ -9,8 +9,8 @@ import { host } from "../sites.js";
 import { html, raw } from "./html.js";
 import { faceFor } from "./friends.js";
 import { mentionData, page } from "./layout.js";
-import { composer, feed } from "./parts.js";
-import { groupItemCard, groupItemEventForm, signedGroupPhoto as itemPhotoPage } from "./items.js";
+import { blockButton, composer, feed } from "./parts.js";
+import { groupItemCard, groupItemEventForm, whoTags, signedGroupPhoto as itemPhotoPage } from "./items.js";
 
 // --- groups, each its own Worker, read from there (membership.js) -----------------------------------------------------
 
@@ -395,10 +395,11 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
   };
   const person = (m, actions) => html`<li class="card member" data-from="${m.from ?? ""}">
     ${faceFor(ctx, m.from, m.name, m.id ?? 0)}
-    <span class="what"><strong>${m.name}</strong>${m.from && html`<span class="meta">${host(m.from)}</span>`}</span>
+    <span class="what"><strong>${m.name}</strong>${m.from && html`<span class="meta">${host(m.from)}</span>`}${whoTags(m)}</span>
     ${ROLE_NAMES[m.role] && html`<span class="badge as-written">${ROLE_NAMES[m.role]}</span>`}
     ${friendship(m)}
     ${actions}
+    ${m.person && m.from !== ctx.url.origin && m.role !== "owner" && blockButton({ person: m.person, name: m.name, back: here, look: "chip" })}
   </li>`;
   // Buttons for an admin: what they can do about someone (only the owner deals with admins).
   const choices = (m) => {

@@ -12,13 +12,14 @@
 //     POST /_groups/<id>/items/<item>/records   form: sent (JSON), back: a comment, edit, delete, vote, answer, end,
 //                                               change, or (an admin) remove or calloff
 // - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
+import { blockedAmong, isBlocked } from "./blocks.js";
 import { callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
 import { ID_RE, namesFor, ownHost } from "./items.js";
-import { checkHead, checkList, dateList, headOf, listOf } from "./lists.js";
+import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
@@ -26,12 +27,14 @@ import { pushAllowed } from "./notify.js";
 import { checkPhotos, removeUnusedFiles } from "./posts.js";
 import { notifyLater } from "./push.js";
 import { checkGroupReceipts, queueReceipts } from "./receipts.js";
+import { friendsAmong, peopleShown } from "./names.js";
+import { compareMine, compareThread, keepSent as keepSentAs, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { signedFile } from "./share.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
-import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { decode, fromB64url } from "../public/static/signed.js";
 import { html, json, now, Refusal } from "./util.js";
 
 export const KEEP = 50; // a group's newest posts kept here (docs/signed-conversations.md section 3)
@@ -81,6 +84,8 @@ export async function pullGroup(env, from, group) {
       break;
     }
     if (page === 0) info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
+    // Anything signed as the owner here that this site never sent (sentchecks.js).
+    if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
     await learnPeople(env, data.people);
     const rules = await copyRules(env, group, data);
     const statements = [];
@@ -145,20 +150,24 @@ export async function groupCopiesShown(env, group, rows, people = []) {
     const t = r.tally ? JSON.parse(String(r.tally)) : null;
     return [String(r.author), ...Object.keys(t?.votes ?? t?.answers ?? {}), ...Object.values(t?.dates ?? {}).flatMap((d) => Object.keys(d?.answers ?? {}))];
   });
-  const [known, mine] = await Promise.all([namesFor(db, people),
-    rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) ORDER BY created_at, rowid`)
-      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }]);
+  const [known, mine, friends] = await Promise.all([namesFor(db, people),
+    rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) AND ${TAKEN_SQL} ORDER BY created_at, rowid`)
+      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }, friendsAmong(db, people)]);
   for (const [p, name] of known) names.set(p, name);
+  // Someone the owner's blocked (blocks.js): their posts folded away, and they're counted in polls and events unnamed.
+  const blocked = await blockedAmong(db, people);
+  for (const p of blocked) names.set(p, "someone you've blocked");
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
   // The owner's newest record on each date of a repeating event (step 6d: each date's list is its own).
   const repeating = rows.filter((r) => JSON.parse(String(r.content)).event?.rrule).map((r) => String(r.id));
   for (const id of repeating) {
-    const { results } = await db.prepare("SELECT item, fp FROM sent WHERE item > ? AND item < ? ORDER BY created_at, rowid").bind(`${id}/`, `${id}0`).all();
+    const { results } = await db.prepare(`SELECT item, fp FROM sent WHERE item > ? AND item < ? AND ${TAKEN_SQL} ORDER BY created_at, rowid`).bind(`${id}/`, `${id}0`).all();
     for (const x of results) last.set(String(x.item), String(x.fp));
   }
   return rows.map((r) => {
     const name = names.get(String(r.author)) ?? "Someone";
-    const shown = copyFromRow({ ...r, name, origin: "", connection_id: 0 }, { names, me: me?.person ?? null });
+    const shown = Object.assign(copyFromRow({ ...r, name, origin: "", connection_id: 0 }, { names, me: me?.person ?? null, known: friends }),
+      { blocked: blocked.has(String(r.author)) });
     const event = /** @type {any} */ (shown.event);
     if (event?.rrule && me) event.listBase = { host: String(group.identity), me: me.person };
     if (event?.dates && me) {
@@ -272,11 +281,17 @@ export async function groupThread(env, from, group, id, people = []) {
   }
   const known = await namesFor(env.DB, [...new Set(result.entries.map((e) => e.by).filter(Boolean))]);
   const names = new Map([...memberNames(people), ...signed, ...known]);
+  // Named as the owner here knows them (names.js): their friends marked, and look-alikes of friends, the owner or admins.
+  const shown = await peopleShown(env.DB, result.entries.map((e) => e.by), { signed: new Map([...memberNames(people), ...signed]),
+    group: { owner, names, admins }, me: me?.person ?? null });
+  // What the owner here sent to it, compared with what the group shows (sentchecks.js).
+  if (me && !result.problem) await compareThread(env, { where: { group }, host, list: id, entries: result.entries, me: me.person, names }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
   const heads = new Map(entries.map((e) => [e.n, e.head]));
-  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? names.get(e.by) ?? "Someone" : null,
+  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
+    ...(e.by && shown.tags.get(e.by)),
     removedByAdmin: e.removedBy && e.removedBy !== owner && admins.has(e.removedBy) })),
-  problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names };
+  problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names: new Map([...names, ...shown.names]), tags: shown.tags };
 }
 
 /** The owner's signed record, with the delegation behind it and their signed name, ready to pass on to `group`. */
@@ -295,12 +310,7 @@ async function ready(env, group, sent, check) {
  * Keeps the owner's own copy of what they sent a group, with the group's receipt. `item` is the list it's on (lists.js
  * listOf): for one date of a repeating event, that date's, so the owner's next answer to it follows this one (prev).
  */
-async function keepSent(env, record, sent, receipt) {
-  const fp = await fingerprintOf("record", fromB64url(sent.record));
-  await env.DB.prepare("INSERT OR REPLACE INTO sent (fp, host, item, kind, record, receipt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(fp, record.host, listOf(record, fp), record.kind, JSON.stringify(sent), receipt ? JSON.stringify(receipt) : null, now()).run();
-  return fp;
-}
+const keepSent = (env, record, sent, receipt, error = null) => keepSentAs(env, { record, sent, receipt, error });
 
 /**
  * POST /_groups/<id>/items: the owner's new post (or event) in `group`, signed by the composer, its photos (uploaded
@@ -322,6 +332,8 @@ export async function postSigned(env, url, group, body) {
     try {
       reply = await ask(env, url.origin, group, "/_p/items", { sent: body.sent, photos, files: links, delegation: post.delegation, ...(post.profile && { profile: post.profile }) });
     } catch (error) {
+      // Kept if the group may have taken it (sentchecks.js).
+      await keepSent(env, post.record, body.sent, null, error);
       throw new Refusal(`Couldn't post in ${group.name}: ${error.message}`);
     }
     const id = await keepSent(env, post.record, body.sent, reply.receipt ?? null);
@@ -349,7 +361,12 @@ export async function relayToGroup(request, env, url, group, id) {
   let answer;
   try {
     answer = await ask(env, url.origin, group, "/_p/records", { sent, delegation: ready_.delegation, ...(ready_.profile && { profile: ready_.profile }) });
-  } catch (error) { return refused(`Couldn't send it: ${error.message}`); }
+  } catch (error) {
+    // Kept if it may have been taken, or is a delete to send again (sentchecks.js).
+    await keepSent(env, record, sent, null, error);
+    if (error.status === 409 && error.message === "duplicate") answer = {};
+    else return refused(`Couldn't send it: ${error.message}.${willRetry(record)}`);
+  }
   const fp = await keepSent(env, record, sent, answer.receipt ?? null);
   // Those it mentions are sent the group's receipt too, from here (receipts.js).
   if (answer.receipt) await queueReceipts(env, url.origin, record, fp);
@@ -414,7 +431,8 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     await kept.statement.run();
     const id = String(note.item.id);
     const author = kept.record.author;
-    if (author === me.person) return json({ ok: true }, 202);
+    // Their own, or from someone the owner's blocked (kept, folded away on the group's page: blocks.js): nothing to tell.
+    if (author === me.person || (await isBlocked(env.DB, author))) return json({ ok: true }, 202);
     const actor = (await namesFor(env.DB, [author])).get(author) ?? groupSays(note, author);
     const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
     if ((kept.record.mentions ?? []).includes(me.person)) {
@@ -474,6 +492,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   }
   const author = got.record.author;
   if (author === me.person) return json({ ok: true }, 202);
+  if (note.kind === "comment" && (await isBlocked(env.DB, author))) return json({ ok: true }, 202); // blocks.js
   const actor = (await namesFor(env.DB, [author])).get(author) ?? signed.get(author) ?? groupSays(note, author);
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
@@ -481,7 +500,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     const mentioned = (got.record.mentions ?? []).includes(me.person);
     const copy = await env.DB.prepare("SELECT author FROM copies WHERE id = ? AND group_id = ?").bind(photo ? photo.post : item, g).first();
     const own = copy && String(copy.author) === me.person ? 1 : 0;
-    const there = !mentioned && !own && (await env.DB.prepare("SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' LIMIT 1").bind(item).first());
+    const there = !mentioned && !own && (await env.DB.prepare(`SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' AND ${TAKEN_SQL} LIMIT 1`).bind(item).first());
     if (!mentioned && !own && !there) return json({ ok: true }, 202);
     const text = got.content?.text ?? "";
     const kept = await keepNotice(env.DB, { kind: mentioned ? "mention" : "comment", fp: entry.fp, group: g, own, item, target, actor, text });
@@ -583,7 +602,7 @@ async function dateCalledOff(env, url, work, { group, me, copy, was, item, date,
 export async function groupDate(env, from, group, id, date, admins = new Set()) {
   let data;
   try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: error.message }; }
-  const mine = (await env.DB.prepare("SELECT fp FROM sent WHERE item = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(dateList(id, date)).first())?.fp ?? null;
+  const mine = (await env.DB.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(dateList(id, date)).first())?.fp ?? null;
   if (data?.empty === true) return { answers: {}, off: null, seen: null, mine, problem: null };
   await learnPeople(env, data.people);
   const state = await identityState(env, String(group.identity));

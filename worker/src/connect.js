@@ -20,6 +20,8 @@
 //                      POST …/<id>/facebook (name, or none=1): which person in the Facebook download they are,
 //                      POST …/ask (origin, group or introduction, back), GET|POST …/<id>/introduce (to, note),
 //                      POST …/introductions/<n>/dismiss
+import { isBlocked } from "./blocks.js";
+import { peopleShown } from "./names.js";
 import { friendGone } from "./events.js";
 import { safeNext } from "./auth.js";
 import { testingHere } from "./cloudflare.js";
@@ -114,6 +116,8 @@ async function accept(request, env, url, token) {
     .bind(now(), await sha256(token)).run();
   if (!link || !spent.meta.changes) return json({ error: "This friend link has already been used." }, 404);
   const asked = bodyJson(bytes);
+  // Someone the owner's blocked (blocks.js): as if the link had gone, and nothing kept.
+  if (await isBlocked(db, caller.person)) return json({ error: "This friend link has already been used." }, 404);
   const name = await signedName(env, caller.person, asked.profile, asked.name);
   await db.batch([
     db.prepare("DELETE FROM connections WHERE origin = ?").bind(origin),
@@ -152,8 +156,9 @@ async function ask(request, env, url) {
   // Proved: now it may hear how things stand between it and the owner here.
   const existing = await db.prepare("SELECT approved_at FROM connections WHERE origin = ? AND connected_at IS NOT NULL").bind(origin).first();
   if (existing?.approved_at) return json({ error: "You're already friends." }, 409);
-  // Already asking, or turned down: the same answer.
-  if (existing || await db.prepare("SELECT 1 FROM declined_asks WHERE origin = ?").bind(origin).first()) return json({ error: "You've already asked." }, 409);
+  // Already asking, turned down, or blocked (blocks.js): the same answer.
+  if (existing || await db.prepare("SELECT 1 FROM declined_asks WHERE origin = ?").bind(origin).first()
+    || await isBlocked(db, caller.person)) return json({ error: "You've already asked." }, 409);
   const name = await signedName(env, caller.person, body.profile, body.name);
   const [, added] = await db.batch([
     db.prepare("DELETE FROM connections WHERE origin = ? AND connected_at IS NULL").bind(origin),
@@ -227,7 +232,8 @@ export async function receiveIntroduction(env, url, peer, body) {
   }
   // Already friends (or asking), turned down, or already introduced by them: nothing to do, and nothing said about which.
   const known = await db.prepare(`SELECT 1 FROM connections WHERE origin = ?1 AND connected_at IS NOT NULL
-    UNION SELECT 1 FROM declined_asks WHERE origin = ?1 UNION SELECT 1 FROM introductions WHERE origin = ?1 AND connection_id = ?2`)
+    UNION SELECT 1 FROM declined_asks WHERE origin = ?1 UNION SELECT 1 FROM introductions WHERE origin = ?1 AND connection_id = ?2
+    UNION SELECT 1 FROM blocks b JOIN identities i ON i.person = b.person WHERE i.origin = ?1`)
     .bind(origin, peer.id).first();
   if (known) return [{ ok: true }, 200];
   const at = now();
@@ -282,6 +288,18 @@ export async function handleConnections(request, env, url, owner) {
     await decideRequest(env, url.origin, Number(decide[1]), decide[2] === "approve");
     const back = url.searchParams.get("back");
     return Response.redirect(`${url.origin}${back === "home" ? "/" : back ? safeNext(back, url) : "/friend"}`, 303);
+  }
+  // A friend's new signed name, which the owner chooses to call them by (names.js: until then, the name they approved).
+  const rename = /^\/(\d+)\/rename$/.exec(path);
+  if (request.method === "POST" && rename) {
+    const form = await request.formData().catch(() => new FormData());
+    const row = await env.DB.prepare("SELECT identity FROM connections WHERE id = ? AND approved_at IS NOT NULL").bind(Number(rename[1])).first();
+    const now_ = row?.identity ? (await peopleShown(env.DB, [String(row.identity)])).tags.get(String(row.identity))?.renamed : null;
+    // Only the name their profile signs now, not whatever the form says.
+    if (now_ && now_ === String(form.get("name") ?? "")) {
+      await env.DB.prepare("UPDATE connections SET name = ? WHERE id = ?").bind(now_.slice(0, 100), Number(rename[1])).run();
+    }
+    return Response.redirect(`${url.origin}/friend/${Number(rename[1])}`, 303);
   }
   // Asking someone to be friends without a link: someone in one of the owner's groups, or someone a friend introduced.
   if (request.method === "POST" && path === "/ask") {

@@ -7,11 +7,13 @@
 //                              is, so a friend's site can tell when to read it again. "Nothing new" reads a row or three.
 //   GET  /_p/items/<id>        one post's whole list, with the signed head, and the delegations, identity chains and
 //                              signed profiles of everyone in it, so a reader can check comments from people it doesn't know.
+//   POST /_p/records/check     what became of the caller's owner's records here (sentchecks.js answerCheck)
 //   POST /_p/records           {sent, delegation, profile?}: the calling site's owner's own signed record (a comment, an
 //                              edit, a delete) on one of the owner's posts, with the delegation behind it, and their signed
 //                              name (kept, to name them to others in the thread). Answers with the receipt.
 //                              A comment tells the owner here, and those it's news to (notes.js).
 // (And POST /_p/notes, a friend's site telling this one about something new: notes.js.)
+import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
 import { listEntries, readList } from "./hosted.js";
 import { checkProfile, identityState } from "./identities.js";
@@ -22,6 +24,7 @@ import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { noticeOwn } from "./notes.js";
+import { answerCheck, mineSince } from "./sentchecks.js";
 
 const PAGE = 50;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -104,9 +107,12 @@ export async function handleFriendItems(request, env, url, work) {
     const until = more ? Number(rows.at(-1).changed_at) : Math.min(Number(rows.at(-1)?.changed_at ?? since), Math.max(since, now() - 1));
     // identity: how many documents the owner's identity has, so a friend's site whose copy is shorter (a new device, a
     // move under way) reads it again (friendcopies.js pullItems).
-    const own = await db.prepare("SELECT json_array_length(chain) AS n FROM own_identity WHERE id = 1").first();
+    const own = await db.prepare("SELECT json_array_length(chain) AS n, profile FROM own_identity WHERE id = 1").first();
+    // mine: the caller's owner's records taken here since, for their site to compare with what it sent (sentchecks.js).
     return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until, more, identity: Number(own?.n ?? 0),
-      delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))) });
+      delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))), mine: await mineSince(db, caller.person, since),
+      // The owner's signed name now, so a friend's site can show a rename (names.js).
+      ...(own?.profile && { profile: JSON.parse(String(own.profile)) }) });
   }
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);
   if (request.method === "GET" && one) {
@@ -119,6 +125,13 @@ export async function handleFriendItems(request, env, url, work) {
     return json({ v: 2, owner: list.owner, entries: list.entries, signedHead: list.signedHead, checkpoint: list.checkpoint ?? null,
       delegations: await delegationsFor(db, records.map((r) => r.key)), people: await peopleFor(db, [...new Set(records.map((r) => r.author))]) });
   }
+  if (request.method === "POST" && url.pathname === "/_p/records/check") {
+    let asked = null;
+    try { asked = JSON.parse(new TextDecoder().decode(body)); } catch {}
+    const host = await ownHost(env);
+    if (!host) return json({ error: "Not found." }, 404);
+    return json(await answerCheck(env, caller.person, asked, { host: host.person, mayRead: (id) => mayCallerSee(db, id, caller.connection.id) }));
+  }
   if (request.method === "POST" && url.pathname === "/_p/records") {
     let sent = null, delegation = null, profile = null;
     try { ({ sent, delegation, profile = null } = JSON.parse(new TextDecoder().decode(body))); } catch {}
@@ -126,6 +139,8 @@ export async function handleFriendItems(request, env, url, work) {
     if (!record || !ID_RE.test(record.item ?? "")) return json({ error: "That didn't work." }, 400);
     // A site passes on only its own owner's records, allowed by a delegation from their identity, on what they may see.
     if (record.author !== caller.person) return json({ error: "That isn't your site's to send." }, 403);
+    // Someone the owner's blocked (blocks.js): not taken, with no more said than any refusal.
+    if (await isBlocked(db, caller.person)) return json({ error: "That wasn't taken." }, 409);
     if (!(await mayCallerSee(db, record.item, caller.connection.id))) return json({ error: "That post isn't here any more." }, 404);
     const state = await identityState(env, caller.person);
     const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;

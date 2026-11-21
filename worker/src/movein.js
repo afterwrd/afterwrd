@@ -188,7 +188,7 @@ function lookupsFor(env, mi) {
  */
 export async function verifyLists(env, url, mi, after) {
   const db = env.DB;
-  await db.prepare("CREATE TABLE IF NOT EXISTS move_checked (list TEXT PRIMARY KEY, n INTEGER NOT NULL, head TEXT NOT NULL, checkpoints TEXT NOT NULL)").run();
+  await db.prepare("CREATE TABLE IF NOT EXISTS move_checked (list TEXT PRIMARY KEY, n INTEGER NOT NULL, head TEXT NOT NULL, checkpoints TEXT NOT NULL, authored TEXT)").run();
   const { results: lists } = await db.prepare("SELECT id, owner, n, head FROM lists_move WHERE id > ? AND deleted_at IS NULL ORDER BY id LIMIT ?")
     .bind(String(after ?? ""), VERIFY_BATCH).all();
   const key = await hostingKey(env);
@@ -217,8 +217,11 @@ export async function verifyLists(env, url, mi, after) {
     for (let at = CHECKPOINT; at <= n; at += CHECKPOINT) {
       checkpoints.push({ n: at, signed: JSON.stringify(await signHead(key.privateKey, { host: mi.person, list: id, n: at, head: entries[at - 1].head })) });
     }
-    await db.prepare("INSERT OR REPLACE INTO move_checked (list, n, head, checkpoints) VALUES (?, ?, ?, ?)")
-      .bind(id, n, head, JSON.stringify(checkpoints)).run();
+    // Others' records on it, indexed again here (sentchecks.js): those deleted or removed with no writer (decision 7).
+    const authored = checked.entries.filter((e) => (e.record ? e.record.author !== mi.person : true))
+      .map((e) => ({ fp: e.fp, author: e.record?.author ?? null, n: e.n, taken: e.taken }));
+    await db.prepare("INSERT OR REPLACE INTO move_checked (list, n, head, checkpoints, authored) VALUES (?, ?, ?, ?, ?)")
+      .bind(id, n, head, JSON.stringify(checkpoints), JSON.stringify(authored)).run();
   }
   return { next: lists.length === VERIFY_BATCH ? String(lists.at(-1).id) : null };
 }
@@ -235,6 +238,8 @@ export function identityStatements(url, mi) {
     [`SELECT CASE WHEN EXISTS (SELECT 1 FROM lists_move l WHERE l.deleted_at IS NULL AND NOT EXISTS
       (SELECT 1 FROM move_checked c WHERE c.list = l.id AND c.n = l.n AND c.head = l.head)) THEN json('not checked') END`],
     ["INSERT INTO checkpoints (list, n, signed) SELECT c.list, json_extract(j.value, '$.n'), json_extract(j.value, '$.signed') FROM move_checked c, json_each(c.checkpoints) j"],
+    [`INSERT OR IGNORE INTO authored (fp, author, list, n, taken) SELECT json_extract(j.value, '$.fp'), json_extract(j.value, '$.author'), c.list,
+      json_extract(j.value, '$.n'), json_extract(j.value, '$.taken') FROM move_checked c, json_each(COALESCE(c.authored, '[]')) j`],
     ["INSERT INTO own_identity (id, person, chain, created_at, moving_to, moving_at) VALUES (1, ?, ?, ?, ?, ?)",
       mi.person, JSON.stringify(mi.chain.map(({ bytes, sig }) => ({ bytes: b64url(bytes), sig }))), now(), move?.to ?? null, move?.at ?? null],
     ["DELETE FROM move_in"],

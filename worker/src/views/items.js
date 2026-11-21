@@ -10,7 +10,7 @@ import { initial } from "./nav.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { friendFace } from "./friends.js";
-import { collage, edited, moreMenu, menuEdit, ownerFace, pollBlock } from "./parts.js";
+import { blockButton, collage, edited, moreMenu, menuEdit, ownerFace, pollBlock } from "./parts.js";
 import { eventBlock, eventForm, guestPicker, repeatingSigned } from "./events.js";
 import { eventFormValues, finishedAt } from "../calendar.js";
 
@@ -56,20 +56,28 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
  * when something's sent from them (a photo's page), not the post they're in. `moderate`: in a signed group, {group (its
  * id here), may(person)}: whose comments the owner here may remove, as an admin or the group's owner.
  */
+/**
+ * How someone is known to the owner here, beside their name (names.js): "friend of Ann" or "your friend", "not your
+ * friend Bob" (a look-alike), and a friend's new name.
+ */
+export const whoTags = (p) => html`${p.label && html`<span class="from">${p.label}</span>`}${p.warn && html`<span class="from warn">${p.warn}</span>`}${p.renamed
+  && html`<span class="from">now calling themselves ${p.renamed}</span>`}`;
+
 export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
   const sign = { item: item.id, host: list.host, seen: list.seen, prev: list.mine };
   const name = (c) => (c.author === list.me ? ctx.ownerName : c.name ?? "Someone");
   return html`<section class="thread" id="t-${item.id}" aria-label="Comments"${region && raw(' data-region=""')}>
-  ${comments.map((c) => (c.state === "ok" ? html`<div class="comment" id="c-${c.fp}"${c.author !== list.me && raw(` data-person="${c.author}"`)}${c.author !== list.me && html` data-name="${name(c)}"`}>
+  ${comments.map((c) => (c.state === "ok" && c.blocked ? html`<p class="comment gone meta" id="c-${c.fp}">Hidden: someone you've blocked.</p>`
+    : c.state === "ok" ? html`<div class="comment" id="c-${c.fp}"${c.author !== list.me && raw(` data-person="${c.author}"`)}${c.author !== list.me && html` data-name="${name(c)}"`}>
     ${c.author === list.me ? ownerFace(ctx) : html`<span class="who who-${c.n % 6}" aria-hidden="true">${initial(name(c))}</span>`}
-    <div class="bubble"><strong>${name(c)}</strong><span class="said">${linkify(c.text, c.mentions)}</span></div>
+    <div class="bubble"><strong>${name(c)}</strong>${c.author !== list.me && whoTags(c)}<span class="said">${linkify(c.text, c.mentions)}</span></div>
     <div class="under">
       <time title="${fmtDatetime(c.taken)}">${fmtAgo(c.taken)}</time>
       ${c.author === list.me && moreMenu([c.editable && menuEdit(`edit-c-${c.fp}`),
         signedDelete(action, "Delete this comment?", { ...sign, about: c.fp }, { back, inplace: "refresh" })])}
-      ${c.author !== list.me && moderate?.may(c.author) && moreMenu([signedRemove(action, "Remove this comment? Everyone in the group will see it was removed by you.",
-        { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group })])}
+      ${c.author !== list.me && c.author && moreMenu([moderate?.may(c.author) && signedRemove(action, "Remove this comment? Everyone in the group will see it was removed by you.",
+        { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group }), c.author !== owner?.person && blockButton({ person: c.author, name: name(c), back })])}
     </div>
     ${edited(c)}
     ${c.author === list.me && c.editable && signedEdit(`edit-c-${c.fp}`, `c-${c.fp}`, action, c.text, back, MAX_COMMENT, { ...sign, about: c.fp })}
@@ -297,6 +305,8 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
   const sign = signing_ && { item: item.id, host: signing_.host, seen: signing_.seen, prev: signing_.mine, about: item.id };
   const editable = item.mine && !item.event && Date.now() / 1000 - item.created_at < EDIT_SECONDS && !item.comments && !(item.poll?.voters > 0);
   const stay = `?${new URLSearchParams({ in: "post", back: `${here}#gi-${item.id}` })}`;
+  // From someone the owner's blocked (blocks.js): folded away.
+  if (item.blocked && !item.mine) return html`<p class="card meta blocked" id="gi-${item.id}">Hidden: a post from someone you've blocked.</p>`;
   return html`<article class="card social in-group" id="gi-${item.id}" data-region="${base}" data-own-page data-person="${item.author}" data-name="${item.mine ? ctx.ownerName : item.name}">
   <header>
     ${item.mine ? ownerFace(ctx) : html`<span class="who who-${item.created_at % 6}" aria-hidden="true">${initial(item.name)}</span>`}
