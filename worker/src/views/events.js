@@ -23,10 +23,12 @@ function dateTile(e) {
  * (`edit`) and calling it off (`cancel`: the form's action), as allowed. `answer`: where an answer goes ({ action,
  * hidden }), or null for the host, who has none. `note`: who can see it, under the title.
  */
-function eventBlock(ctx, e, { href, full = false, answer = null, ics = null, edit = null, cancel = null, cancelNote = "", note = "" }) {
+export function eventBlock(ctx, e, { href, full = false, answer = null, ics = null, edit = null, cancel = null, cancelNote = "", note = "", cancelSign = "" }) {
   const over = finishedAt(e) < Date.now() / 1000;
   const back = ctx.url.pathname + ctx.url.search;
-  const names = (list) => list.map((x, i) => (x.from === ctx.url.origin ? (i ? "you" : "You") : x.name)).join(", ");
+  // Signed events (views/items.js) name the owner here with `me`, and mark answers given before it last changed.
+  const names = (list) => list.map((x, i) => (x.me || x.from === ctx.url.origin ? (i ? "you" : "You") : x.name)
+    + (x.earlier ? " (said before it changed)" : "")).join(", ");
   const counts = [e.going.length && `${e.going.length} going`, e.maybe.length && `${e.maybe.length} maybe`,
     e.invited && `${e.invited} invited`].filter(Boolean).join(" · ");
   const lists = [["Going", e.going], ["Maybe", e.maybe], ["Can't go", e.cantGo ?? []], ["Not answered yet", e.waiting ?? []]];
@@ -41,7 +43,7 @@ function eventBlock(ctx, e, { href, full = false, answer = null, ics = null, edi
       ${note && html`<p class="meta">${note}</p>`}
     </div>
   </div>
-  ${answer && !e.cancelled_at && !over && html`<form method="post" action="${answer.action}" class="answers" aria-label="Are you going?" data-inplace>
+  ${answer && !e.cancelled_at && !over && html`<form method="post" action="${answer.action}" class="answers" aria-label="Are you going?" data-inplace${raw(answer.sign ?? "")}>
     <input type="hidden" name="back" value="${back}">
     ${Object.entries(answer.hidden ?? {}).map(([k, v]) => html`<input type="hidden" name="${k}" value="${v}">`)}
     ${ANSWER_LABELS.map(([value, label]) => html`<button class="chip${e.answer === value ? " primary" : ""}" name="answer" value="${value}"
@@ -54,7 +56,7 @@ function eventBlock(ctx, e, { href, full = false, answer = null, ics = null, edi
     ${ics && !e.cancelled_at && html`<a class="chip" href="${ics}" download>${raw(icon("calendar"))}<span>Add to my calendar</span></a>`}
     ${edit && !e.cancelled_at && !over && html`<a class="chip" href="${edit}">Change it</a>`}
     ${cancel && !e.cancelled_at && !over && html`<form method="post" action="${cancel}" data-inplace
-      data-confirm="${cancelNote}" data-confirm-ok="Call it off">
+      data-confirm="${cancelNote}" data-confirm-ok="Call it off"${raw(cancelSign)}>
       <input type="hidden" name="back" value="${back}"><button class="chip">Call it off</button></form>`}
   </div>`}
 </div>`;
@@ -64,7 +66,7 @@ function eventBlock(ctx, e, { href, full = false, answer = null, ics = null, edi
  * Friends to tick, to invite to an event, with a box to find one by name when there are many. `none`: what to say if
  * there's nobody to invite.
  */
-function guestPicker(friends, { none = "" } = {}) {
+export function guestPicker(friends, { none = "" } = {}) {
   if (!friends.length) return none && html`<p class="meta">${none}</p>`;
   return html`<fieldset class="guest-picker">
   <legend>Who's invited</legend>
@@ -196,10 +198,10 @@ export function ownEventBlock(ctx, p, { full = false } = {}) {
 
 /**
  * Adding or changing an event. Its times are in `values.zone`, or, for a new one, the browser's own time zone.
- * @param {{ action: string, back: string, values?: Record<string, string>, text?: string, submit: string, guests?: any, repeats?: boolean }} options
+ * @param {{ action: string, back: string, values?: Record<string, string>, text?: string, submit: string, guests?: any, repeats?: boolean, sign?: string }} options
  */
-function eventForm({ action, back, values = {}, text = "", submit, guests = "", repeats = false }) {
-  return html`<form class="stack event-form" method="post" action="${action}">
+export function eventForm({ action, back, values = {}, text = "", submit, guests = "", repeats = false, sign = "" }) {
+  return html`<form class="stack event-form" method="post" action="${action}"${raw(sign)}>
   <input type="hidden" name="back" value="${back}">
   <input type="hidden" name="zone" value="${values.zone ?? ""}" data-zone>
   <label><span class="field">What's happening</span><input name="title" required maxlength="200" value="${values.title ?? ""}"></label>
@@ -376,11 +378,14 @@ function calendarList(ctx, items, { month, day }) {
 
 /** An invitation still to answer, with the three answers right there. */
 function invitationCard(ctx, e) {
+  // A signed invitation (afterwrd 2: views/items.js): its answer is signed here, and passed on by this site.
+  const signed = e.relay ? raw(` data-sign="answer" data-sign-item="${e.key}" data-sign-host="${e.list.host}" data-sign-seen-n="${e.list.seen.n}"`
+    + ` data-sign-seen-h="${e.list.seen.h}" data-sign-prev="${e.list.mine ?? ""}" data-sign-version="${e.version}"`) : "";
   return html`<li class="card invitation" id="inv-${e.connection}-${e.key}" data-region="">
   <a class="what" href="${e.href}">${dateTile(e)}<span><strong>${e.title}</strong>
     <span class="meta">${eventWhen(e, ctx.zone)}${e.place && ` · ${e.place}`}</span>
     <span class="meta">${e.who} invited you</span></span></a>
-  <form method="post" action="/_feed/answer" class="answers" aria-label="Are you going to ${e.title}?">
+  <form method="post" action="${e.relay ?? "/_feed/answer"}" class="answers" aria-label="Are you going to ${e.title}?"${signed}>
     <input type="hidden" name="back" value="/events"><input type="hidden" name="connection" value="${e.connection}">
     <input type="hidden" name="target" value="${e.key}">
     ${ANSWER_LABELS.map(([value, label]) => html`<button class="chip" name="answer" value="${value}">${label}</button>`)}
@@ -412,7 +417,7 @@ ${view === "month" ? html`${calendarGrid(ctx, items, { month, day, base: "/event
   <summary>Make an event</summary>
   <p class="meta">Only the friends you invite see it, on their own sites. They're told you've invited them, and those who
   haven't said no are told if it changes or is called off. Nothing else is sent.</p>
-  ${eventForm({ action: "/_admin/events", back: "/events", submit: "Make the event",
+  ${eventForm({ action: "/_admin/items", back: "/events", submit: "Make the event", sign: ' data-sign="event-new"',
     guests: guestPicker(friends, { none: "You have no friends on afterwrd to invite yet. You can still make it, and invite people later." }) })}
 </details>
 ${notificationsSwitch(pushKey)}

@@ -16,7 +16,11 @@ import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { html, json, now, Refusal } from "./util.js";
 import { says } from "./mentions.js";
-import { queueCommentNote, queueItemNote } from "./notes.js";
+import { queueChangeNotes, queueCommentNote, queueItemNote } from "./notes.js";
+import { CHANGE_SECONDS, eventShown, eventTrouble, pollShown, pollTrouble, workOut } from "./itemkinds.js";
+import { ANSWERS, cleanEvent, eventChanged, finishedAt } from "./calendar.js";
+import { choicesMask } from "./polls.js";
+import { audienceOf } from "../public/static/records.js";
 
 export const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 const EDIT_SECONDS = 15 * 60;
@@ -62,12 +66,26 @@ const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
  * listing them): a message saying what's wrong, or null. Checked in full before anything is taken.
  */
 async function checkNewPost(env, host, post, photos) {
-  if (!post?.record || post.record.kind !== "item" || post.record.author !== host.person || post.content?.type !== "post") return "That isn't a post of yours.";
+  const type = post?.content?.type;
+  if (!post?.record || post.record.kind !== "item" || post.record.author !== host.person || (type !== "post" && type !== "event")) return "That isn't a post of yours.";
   const text = typeof post.content.text === "string" ? post.content.text : "";
   if (text !== text.replace(/\r\n?/g, "\n").trim()) return "That post's words aren't as written.";
   if (text.length > MAX_POST_TEXT) return `Posts can be up to ${MAX_POST_TEXT} characters.`;
   const listed = Array.isArray(post.content.photos) ? post.content.photos : [];
-  if (!text && !listed.length) return "Write something, or add photos.";
+  // An event (itemkinds.js): its details, for its guests only; a post may ask a poll.
+  if (type === "event") {
+    if (listed.length || post.content.poll !== undefined) return "An event can't have photos or a poll.";
+    if (!post.record.audience) return "An event is for those invited.";
+    const wrong = eventTrouble(post.content.event, now());
+    if (wrong) return wrong;
+  } else {
+    if (post.record.audience) return "That isn't a post of yours.";
+    const wrong = pollTrouble(post.content.poll, now());
+    if (wrong) return wrong;
+    if (!text && !listed.length && !post.content.poll) return "Write something, or add photos.";
+    if (post.content.poll && !text) return "Write the question your poll asks.";
+  }
+  if (!text && !listed.length && type === "post") return "Write something, or add photos.";
   if (listed.length !== photos.length) return "That post's photos aren't all here.";
   const wrong = await wrongMentions(env, post, text, null);
   if (wrong) return wrong;
@@ -86,7 +104,7 @@ export async function handleItems(request, env, url, owner) {
     const body = await request.json().catch(() => ({}));
     if (!host) return json({ error: "Set up signing first, in Your devices." }, 409);
     try {
-      const made = await createItem(env, host, body.sent, Array.isArray(body.photos) ? body.photos : []);
+      const made = await createItem(env, host, body.sent, Array.isArray(body.photos) ? body.photos : [], { guests: body.guests, salt: body.salt });
       await queueItemNote(env, url.origin, made.id);
       return json(made);
     } catch (error) {
@@ -108,7 +126,7 @@ export async function handleItems(request, env, url, owner) {
       if (answer.refused) return refused(answer.refused);
       return Response.redirect(`${url.origin}/posts/${answer.post}`, 303);
     }
-    const answer = await recordOn(env, host, on[1], sent, url.origin);
+    const answer = await recordOn(env, host, on[1], sent, url.origin, { guests: parse("guests"), salt: form.get("salt") });
     if (answer.refused) return refused(answer.refused);
     if (answer.deleted) return Response.redirect(`${url.origin}/`, 303);
     back.hash = `i-${on[1]}`;
@@ -119,12 +137,41 @@ export async function handleItems(request, env, url, owner) {
 
 const NO_SIGNATURE = "This browser's signature didn't check. Sign out and in again.";
 
+export const MAX_GUESTS = 100; // friends invited to one event
+const MAX_HOSTING = 100; // events the owner has coming up
+
+/**
+ * An event's guests as the owner's browser chose them (`ids`: connection ids, and the `salt` it made the record's
+ * audience fingerprint with), checked: approved friends with an identity, no more than MAX_GUESTS, and exactly the
+ * people the fingerprint (`fp`) says. Returns [{connection, person}], or a message saying what's wrong.
+ */
+async function guestsFor(env, ids, salt, fp) {
+  const list = Array.isArray(ids) ? [...new Set(ids.map(Number).filter(Number.isSafeInteger))] : [];
+  if (list.length > MAX_GUESTS) return `You can invite up to ${MAX_GUESTS} friends to an event.`;
+  if (typeof salt !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(salt)) return "That invitation list didn't work. Try again.";
+  const { results } = list.length ? await env.DB.prepare(`SELECT id, identity FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
+    AND identity IS NOT NULL AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(list)).all() : { results: [] };
+  if (results.length !== list.length) return "Someone you picked can't be invited yet.";
+  const guests = results.map((r) => ({ connection: Number(r.id), person: String(r.identity) }));
+  if ((await audienceOf(salt, guests.map((g) => g.person))) !== fp) return "That invitation list isn't the one signed.";
+  return guests;
+}
+
 /** A new post with its photos (each an item, taken first): rows for each, and each photo's file. Returns {id}. */
-async function createItem(env, host, sent, photosSent) {
+async function createItem(env, host, sent, photosSent, { guests: guestIds = null, salt = null } = {}) {
   const post = sentRecord(sent);
   const photos = photosSent.slice(0, 21).map(sentRecord);
   const wrong = await checkNewPost(env, host, post, photos);
   if (wrong) throw new Refusal(wrong, 400);
+  let guests = [];
+  if (post.content.type === "event") {
+    const upcoming = (await env.DB.prepare("SELECT content FROM items WHERE audience = 'invited'").all()).results
+      .filter((r) => finishedAt(JSON.parse(String(r.content)).event) > now()).length;
+    if (upcoming >= MAX_HOSTING) throw new Refusal(`You can have up to ${MAX_HOSTING} events coming up.`, 400);
+    const checked = await guestsFor(env, guestIds, salt, post.record.audience.fp);
+    if (typeof checked === "string") throw new Refusal(checked, 400);
+    guests = checked;
+  }
   const lookups = lookupsFor(env);
   const taken = [];
   for (let i = 0; i < photos.length; i++) {
@@ -145,8 +192,13 @@ async function createItem(env, host, sent, photosSent) {
   await db.batch([
     // The "Posted on afterwrd" album, if there are photos and it isn't there yet.
     ...(taken.length ? [roleAlbum(db, "posts")] : []),
-    db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last) VALUES (?, ?, 'post', ?, ?, ?, ?)`)
-      .bind(id, host.person, JSON.stringify(post.content), answer.entry.taken, answer.entry.taken, id),
+    db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience, version, tally)
+      VALUES (?, ?, 'post', ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, host.person, JSON.stringify(post.content), answer.entry.taken, answer.entry.taken, id,
+        post.record.audience ? "invited" : "friends", id, post.content.poll ? JSON.stringify({ votes: {}, ended_at: null })
+          : post.content.type === "event" ? JSON.stringify({ answers: {} }) : null),
+    ...guests.map((g) => db.prepare("INSERT INTO item_guests (item, connection_id, person, added_at) VALUES (?, ?, ?, ?)")
+      .bind(id, g.connection, g.person, answer.entry.taken)),
     ...taken.flatMap((t, i) => [
       db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last) VALUES (?, ?, 'photo', ?, ?, ?, ?)`)
         .bind(t.id, host.person, JSON.stringify(t.content), t.at, t.at, t.id),
@@ -171,6 +223,8 @@ async function itemGone(env, id) {
     db.prepare("DELETE FROM items WHERE id = ?").bind(id),
     db.prepare("DELETE FROM media WHERE item_id = ?").bind(id),
     db.prepare("DELETE FROM item_photos WHERE photo = ?").bind(id),
+    db.prepare("DELETE FROM item_guests WHERE item = ?").bind(id),
+    db.prepare("DELETE FROM item_uninvited WHERE item = ?").bind(id),
     // The "Posted on afterwrd" album goes once nothing's in it.
     db.prepare("DELETE FROM albums WHERE role = 'posts' AND NOT EXISTS (SELECT 1 FROM media m WHERE m.album_id = albums.id)"),
   ]);
@@ -212,32 +266,91 @@ export const shownMentions = (record, content) => (Array.isArray(content?.mentio
   .map((m) => ({ name: m.name.slice(0, 100), person: m.person }));
 
 /**
+ * What a vote, an answer, a poll's end or an event's change on `item` (its row, and `content` as it is now) would do,
+ * checked before it's taken: {refused}, or what it means ({guests} for a change that says who's invited now, {moved},
+ * {cancelled}). Anything else: {}.
+ */
+async function kindPlan(env, item, content, { record, content: c }, { guestIds, salt }) {
+  const tally = item.tally ? JSON.parse(String(item.tally)) : null;
+  const at = now();
+  if (record.kind === "vote" || record.kind === "end") {
+    const poll = content.poll;
+    if (!poll) return { refused: "That post doesn't have a poll." };
+    if (tally?.ended_at || (poll.closes_at && poll.closes_at <= at)) return { refused: "That poll has closed." };
+    if (record.kind === "end") return {};
+    if (record.version !== item.version) return { refused: "That poll has changed. Try again." };
+    const mask = choicesMask(Array.isArray(c?.choices) ? c.choices : null, { options: JSON.stringify(poll.options), multiple: poll.multiple });
+    return mask === null ? { refused: poll.multiple ? "Those aren't options in this poll." : "Pick one of the options." } : {};
+  }
+  if (content.type !== "event") return record.kind === "answer" ? { refused: "That isn't an event." } : {};
+  const e = content.event;
+  if (record.kind === "answer") {
+    if (!ANSWERS.includes(c?.answer)) return { refused: "Answer going, maybe or no." };
+    const guest = await env.DB.prepare("SELECT 1 FROM item_guests WHERE item = ? AND person = ?").bind(item.id, record.author).first();
+    if (!guest) return { refused: "That event isn't there any more." };
+    if (e.cancelled) return { refused: "That event's been called off." };
+    if (finishedAt(e) <= at) return { refused: "That event is over." };
+    if (record.version !== item.version) return { refused: "That event has just changed. Have a look, then answer again." };
+    return {};
+  }
+  if (record.kind !== "change") return {};
+  const event = cleanEvent(c?.event);
+  if (!event) return { refused: "That event isn't as written." };
+  if (typeof c.text === "string" && c.text.length > MAX_POST_TEXT) return { refused: `The words about it can be up to ${MAX_POST_TEXT} characters.` };
+  if (e.cancelled) return { refused: "That event's been called off." };
+  if (finishedAt(e) <= at) return { refused: "That event is over." };
+  const moved = eventChanged(e, event);
+  const cancelled = Boolean(event.cancelled);
+  if (moved && finishedAt(event) <= at) return { refused: "That would be over already: pick a time still to come." };
+  if (moved && tally?.moved_at && tally.moved_at > at - CHANGE_SECONDS) return { refused: "You've just changed this event. Try again in a few minutes." };
+  let guests = null;
+  if (record.audience) {
+    const checked = await guestsFor(env, guestIds, salt, record.audience.fp);
+    if (typeof checked === "string") return { refused: checked };
+    guests = checked;
+  }
+  return { moved, cancelled, guests };
+}
+
+/**
  * A record on one of the owner's own items, taken, and the item worked out again. {refused} if not; {deleted} if it
  * was its writer deleting it. With `origin` (this site), a comment is noted to those who'll want to know (notes.js).
  */
-export async function recordOn(env, host, id, sent, origin = null) {
-  const item = await env.DB.prepare("SELECT id, type, content FROM items WHERE id = ?").bind(id).first();
+export async function recordOn(env, host, id, sent, origin = null, { guests: guestIds = null, salt = null } = {}) {
+  const item = await env.DB.prepare("SELECT id, type, content, version, tally, audience FROM items WHERE id = ?").bind(id).first();
   if (!item) return { refused: "That post isn't here any more." };
   const got = sentRecord(sent);
   if (!got?.record || got.record.item !== id) return { refused: "That didn't work. Try again." };
   const { record, content } = got;
+  const now_ = JSON.parse(String(item.content));
   if (content !== undefined) {
     const text = typeof content?.text === "string" ? content.text : "";
     if (record.kind === "comment" && (!text.trim() || text.length > MAX_COMMENT)) return { refused: `Comments need 1 to ${MAX_COMMENT} characters.` };
     if (record.kind === "edit" && text.length > (record.about === id ? MAX_POST_TEXT : MAX_COMMENT)) return { refused: "That's too long." };
-    // A post with no photos needs its words.
-    if (record.kind === "edit" && record.about === id && !text.trim() && !JSON.parse(String(item.content)).photos?.length) {
-      return { refused: "A post with no photos needs words." };
+    // A post with no photos needs its words (a poll, its question); an event needn't have any.
+    if (record.kind === "edit" && record.about === id && !text.trim() && now_.type !== "event" && (now_.poll || !now_.photos?.length)) {
+      return { refused: now_.poll ? "A poll needs its question." : "A post with no photos needs words." };
     }
     const wrong = await wrongMentions(env, got, text, id);
     if (wrong) return { refused: wrong };
   }
+  // An event's words change with the event (its form: a change), at any time, not by the 15-minute edit.
+  if (record.kind === "edit" && record.about === id && now_.type === "event") return { refused: "An event's words change with the event: use Change it." };
+  // Votes, answers, a poll's end and an event's changes (itemkinds.js).
+  const plan = await kindPlan(env, item, now_, got, { guestIds, salt });
+  if (plan.refused) return plan;
   const answer = await takeRecord(env.DB, { sent, host, lookups: lookupsFor(env) });
   if (answer.refused) {
     const said = { "Someone has replied since.": "Someone has replied since, so it can't be changed now.", "That's out of order.": "Something changed meanwhile. Try again." };
     return { refused: said[answer.refused] ?? answer.refused };
   }
   if (answer.deleted) {
+    // An event still to come: its guests are told it's off, and their copies go (notes.js).
+    if (now_.type === "event" && origin) {
+      const { results } = await env.DB.prepare("SELECT connection_id FROM item_guests WHERE item = ?").bind(id).all();
+      const off = !now_.event.cancelled && finishedAt(now_.event) > now();
+      await queueChangeNotes(env, origin, id, null, { removed: results.map((r) => Number(r.connection_id)), cancelled: off });
+    }
     // A post's photos go with it: its delete covers them, so their lists are closed as its is.
     for (const photo of await photosOf(env.DB, id)) {
       await tombstone(env.DB, photo);
@@ -246,8 +359,28 @@ export async function recordOn(env, host, id, sent, origin = null) {
     await itemGone(env, id);
     return { deleted: true };
   }
+  // Those invited, as the change says now: added and taken back, with who's left told what's changed.
+  if (plan.guests) {
+    const at = answer.entry.taken;
+    const before = new Map((await env.DB.prepare("SELECT connection_id, person FROM item_guests WHERE item = ?").bind(id).all()).results
+      .map((r) => [Number(r.connection_id), String(r.person)]));
+    const after = new Map(plan.guests.map((g) => [g.connection, g.person]));
+    plan.added = [...after.keys()].filter((c) => !before.has(c));
+    plan.removed = [...before.keys()].filter((c) => !after.has(c));
+    await env.DB.batch([
+      ...plan.added.flatMap((c) => [
+        env.DB.prepare("INSERT INTO item_guests (item, connection_id, person, added_at) VALUES (?, ?, ?, ?)").bind(id, c, after.get(c), at),
+        env.DB.prepare("DELETE FROM item_uninvited WHERE item = ? AND connection_id = ?").bind(id, c)]),
+      ...plan.removed.flatMap((c) => [
+        env.DB.prepare("DELETE FROM item_guests WHERE item = ? AND connection_id = ?").bind(id, c),
+        env.DB.prepare("INSERT OR REPLACE INTO item_uninvited (item, connection_id, at) VALUES (?, ?, ?)").bind(id, c, at)]),
+    ]);
+  }
   await refreshItem(env.DB, id);
   if (origin && record.kind === "comment") await queueCommentNote(env, origin, id, record, answer.entry.fp);
+  if (origin && record.kind === "change" && now_.type === "event") {
+    await queueChangeNotes(env, origin, id, answer.entry.fp, { added: plan.added ?? [], removed: plan.removed ?? [] });
+  }
   return { ok: true, receipt: answer.receipt, entry: answer.entry, record, content };
 }
 
@@ -275,13 +408,17 @@ async function removePhoto(env, host, photo, sent, changeSent) {
 
 /** Works an item's row out again from its list: its words now, what they were, its comments, and who else has written. */
 export async function refreshItem(db, id) {
-  const row = await db.prepare("SELECT author, content FROM items WHERE id = ?").bind(id).first();
+  const row = await db.prepare("SELECT author, content, audience FROM items WHERE id = ?").bind(id).first();
   if (!row) return;
   const author = String(row.author);
   const entries = await listEntries(db, id);
   const read = entries.map((e) => ({ e, r: readEntry(e) }));
-  const first = read[0]?.r;
-  let content = first?.content ?? JSON.parse(String(row.content));
+  // A poll's votes, an event's details as last changed and its guests' answers (itemkinds.js).
+  const guests = row.audience === "invited"
+    ? (await db.prepare("SELECT person FROM item_guests WHERE item = ?").bind(id).all()).results.map((r) => String(r.person)) : null;
+  const worked = workOut(read, { id, author, guests });
+  const tally = worked.tally && { ...worked.tally, ...(worked.movedAt ? { moved_at: worked.movedAt } : {}) };
+  let content = read[0]?.r ? { ...worked.content, text: read[0].r.content?.text ?? "" } : JSON.parse(String(row.content));
   const earlier = [];
   let editedAt = null;
   let comments = 0;
@@ -298,12 +435,22 @@ export async function refreshItem(db, id) {
       content = { ...content, text: r.content?.text ?? content.text };
       editedAt = e.taken;
     }
+    // An event's words change with its details (the owner's change), at any time.
+    if (r.record.kind === "change" && r.record.author === author && typeof r.content?.text === "string" && content.type === "event"
+      && r.content.text !== content.text) {
+      earlier.push({ text: content.text, replaced_at: e.taken });
+      content = { ...content, text: r.content.text };
+      editedAt = e.taken;
+    }
     // The owner's change to what isn't words: which photos a post has (one deleted from it).
     if (r.record.kind === "change" && r.record.author === author && Array.isArray(r.content?.photos)) content = { ...content, photos: r.content.photos };
   }
   comments = thread(read.map(({ e, r }) => ({ ...e, r })), { owner: author, item: id }).filter((c) => c.state === "ok").length;
-  await db.prepare(`UPDATE items SET content = ?, earlier = ?, edited_at = ?, comments = ?, others = ?, author_last = ?, changed_at = ? WHERE id = ?`)
-    .bind(JSON.stringify(content), earlier.length ? JSON.stringify(earlier) : null, editedAt, comments, others, authorLast, now(), id).run();
+  if (content.type === "event") content = { ...content, event: worked.content.event };
+  await db.prepare(`UPDATE items SET content = ?, earlier = ?, edited_at = ?, comments = ?, others = ?, author_last = ?, changed_at = ?,
+    version = ?, tally = ? WHERE id = ?`)
+    .bind(JSON.stringify(content), earlier.length ? JSON.stringify(earlier) : null, editedAt, comments, others, authorLast, now(),
+      worked.version, tally ? JSON.stringify(tally) : null, id).run();
 }
 
 /**
@@ -381,13 +528,32 @@ export async function ownItem(db, id) {
 
 async function itemFromRow(db, r) {
   const content = JSON.parse(String(r.content));
+  const tally = r.tally ? JSON.parse(String(r.tally)) : null;
+  const author = String(r.author);
+  // A poll's voters and an event's guests, named as the owner knows them (polls are public; everyone invited sees who's
+  // coming); for an event, who's invited, and what became of each invitation.
+  let poll = null;
+  let event = null;
+  if (content.poll) {
+    const names = await namesFor(db, Object.keys(tally?.votes ?? {}));
+    poll = pollShown(content.poll, tally, { viewer: author, names, me: author });
+  } else if (content.type === "event") {
+    const { results: guests } = await db.prepare(`SELECT g.connection_id AS id, g.person, g.delivery, c.name, c.origin FROM item_guests g
+      JOIN connections c ON c.id = g.connection_id WHERE g.item = ? ORDER BY c.name COLLATE NOCASE`).bind(String(r.id)).all();
+    const names = new Map(guests.map((g) => [String(g.person), String(g.name)]));
+    event = { ...eventShown(content, tally, { names, me: author, version: r.version ? String(r.version) : null, invited: guests.length }),
+      guests: guests.map((g) => ({ id: Number(g.id), name: String(g.name), from: String(g.origin), delivery: g.delivery ?? null,
+        answer: tally?.answers?.[String(g.person)]?.answer ?? null })) };
+    event.waiting = event.guests.filter((g) => !g.answer);
+  }
   // A post's photos, each an item of its own, in the post's order: their files as pages draw them (media rows).
   const { results: media } = r.type === "post"
     ? await db.prepare(`SELECT m.id, m.hash, m.thumb_hash, m.width, m.height, m.kind, m.item_id FROM item_photos ip JOIN media m ON m.item_id = ip.photo
       WHERE ip.post = ? ORDER BY ip.position`).bind(String(r.id)).all()
     : { results: [] };
   return {
-    id: String(r.id), author: String(r.author), type: String(r.type), text: content.text ?? "",
+    poll, event, version: r.version ? String(r.version) : String(r.id),
+    id: String(r.id), author, type: String(r.type), text: content.text ?? "",
     media, photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [],
     created_at: Number(r.created_at), edited_at: r.edited_at ? Number(r.edited_at) : null,
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], comments: Number(r.comments), others: Number(r.others),

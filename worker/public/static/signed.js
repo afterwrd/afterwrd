@@ -10,7 +10,7 @@
 // - Checks never throw: anything malformed is simply "doesn't check".
 
 export const PROTOCOL = 2;
-export const KINDS = /** @type {const} */ (["record", "head", "delegation", "identity", "profile", "statements", "recovery", "enrol", "request"]);
+export const KINDS = /** @type {const} */ (["record", "head", "delegation", "identity", "profile", "statements", "recovery", "enrol", "request", "audience"]);
 const ED25519 = { name: "Ed25519" };
 const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });

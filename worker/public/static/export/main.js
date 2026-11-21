@@ -16,7 +16,7 @@ const TABLES = ["settings", "facebook_people", "albums", "posts", "facebook_post
   "connections", "friend_links", "users", "groups", "group_mine", "post_versions", "comment_versions",
   "comments_elsewhere_versions", "events", "event_answers", "post_audience", "events_elsewhere",
   // afterwrd 2: signed posts and photos, their lists, and what the owner has signed and sent (src/export.js).
-  "items", "item_photos", "lists", "list_pages", "sent", "own_identity"];
+  "items", "item_photos", "lists", "list_pages", "sent", "own_identity", "item_guests"];
 /** JSON from base64url (a signed record's content), or null. */
 const fromB64json = (text) => {
   try { return JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)))); } catch { return null; }
@@ -172,8 +172,19 @@ function documents(t) {
   const signedPosts = t.items.filter((i) => i.type === "post").map((i) => {
     const content = JSON.parse(i.content);
     const photos = t.item_photos.filter((p) => p.post === i.id).sort((a, b) => a.position - b.position).map((p) => signedMedia(p.photo)).filter(Boolean);
+    const tally = i.tally ? JSON.parse(i.tally) : null;
+    // A signed poll, with how many chose each option (who chose what is in signed.json's lists), and a signed event,
+    // with who was invited and what each answered (step 4d: src/itemkinds.js).
+    const votes = Object.values(tally?.votes ?? {});
+    const poll = content.poll && { type: "Question", [content.poll.multiple ? "anyOf" : "oneOf"]: content.poll.options.map((name, n) => ({
+      type: "Note", name, replies: { type: "Collection", totalItems: votes.filter((m) => m & (1 << n)).length } })),
+      endTime: iso(content.poll.closes_at ?? undefined), closed: iso(tally?.ended_at ?? undefined), votersCount: votes.length };
+    const answers = tally?.answers ?? {};
+    const event = content.event && { ...eventFields({ ...content.event, cancelled_at: content.event.cancelled ? content.event.cancelled_at : undefined }),
+      "afterwrd:invited": t.item_guests.filter((g) => g.item === i.id).map((g) => ({ ...friend(g.connection_id), "afterwrd:answer": answers[g.person]?.answer })) };
     return { type: "Note", id: postId(site, i.id), attributedTo: actorId(site), published: iso(i.created_at), mediaType: "text/plain",
       content: content.text ?? "", attachment: photos.map(media), "afterwrd:source": "afterwrd", "afterwrd:signed": true, created_at: i.created_at,
+      ...(poll && { "afterwrd:poll": poll }), ...(event && { "afterwrd:event": event }),
       ...editedFields({ edited_at: i.edited_at, earlier: i.earlier ? JSON.parse(i.earlier) : [] }), replies: signedReplies(i.id) };
   });
   const postIds = new Map();

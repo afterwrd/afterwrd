@@ -1,6 +1,6 @@
 // Polls: three people's sites (Ann on 8787, Bob on 8788, Cat on 8789) and a group's Worker (G, 8790). Ann is friends
-// with Bob and with Cat, who aren't friends with each other. Ann asks a poll in a post: everyone sees how many chose
-// what, and their own choice; only Ann sees who. Answers can change, a poll can take several choices and close by
+// with Bob and with Cat, who aren't friends with each other. Ann asks a poll in a signed post (step 4d): votes are
+// signed records, and polls are public, so everyone who can see it sees who chose what. Answers can change, a poll can take several choices and close by
 // itself or when its writer closes it; forged answers are refused. Then the same in a group, where only the writer's
 // site is told who chose what, and leaving takes a member's answers with them.
 //   node polls.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
@@ -17,9 +17,6 @@ const C = "http://localhost:8789";
 const G = "http://localhost:8790";
 const CODE = "local-test-setup-code";
 const GROUP_KEY = "local-test-group-key";
-// Home shows friends' posts from the copy a site keeps (feed.js). Answers and closing send no note, so they reach a
-// friend's Home when its copy is next fetched, within minutes: made out of date here, so Home asks while it waits.
-const copiesOld = (state) => sql(state, "UPDATE connections SET copy_until = 0");
 const results = [];
 const check = (name, ok, extra = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}${extra ? `  (${extra})` : ""}`); };
 const errors = [];
@@ -114,116 +111,145 @@ check("…and two options", (await text(ann, "#composer .error")) === "Give your
 await ann.setViewport({ width: 390, height: 844 });
 await ann.screenshot({ path: `${OUT}/poll-composer-phone.png` });
 await ann.setViewport({ width: 1280, height: 800 });
-check("nothing was posted", n(stateA, "posts WHERE source = 'afterwrd'") === 0);
-check("the server says the same", (await post(ann, "/_admin/posts", { text: "Q", poll: { options: ["a"] } })).status === 400
-  && (await post(ann, "/_admin/posts", { text: "", poll: { options: ["a", "b"] } })).status === 400
-  && (await post(ann, "/_admin/posts", { text: "Q", poll: { options: ["a", "A"] } })).status === 400);
+check("nothing was posted", n(stateA, "items") === 0);
+// What a browser could still sign and send: the site checks every poll as the composer would.
+const signPoll = (page, words, poll) => page.evaluate(async (words, poll) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "item", author: key.person, host: key.person }, { type: "post", text: words, photos: [], poll }, key);
+  const res = await fetch("/_admin/items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sent: made.sent, photos: [] }) });
+  return res.status;
+}, words, poll);
+check("the server says the same", (await signPoll(ann, "Q", { options: ["a"], multiple: 0, closes_at: null })) === 400
+  && (await signPoll(ann, "", { options: ["a", "b"], multiple: 0, closes_at: null })) === 400
+  && (await signPoll(ann, "Q", { options: ["a", "A"], multiple: 0, closes_at: null })) === 400
+  && (await signPoll(ann, "Q", { options: [" a", "b"], multiple: 0, closes_at: null })) === 400);
 
-// Ann asks.
+// Ann asks: a signed post with its poll (step 4d: src/itemkinds.js).
+const personOf = (state) => sql(state, "SELECT person FROM own_identity")[0].person;
+const tallyOf = (state, id) => JSON.parse(sql(state, `SELECT tally FROM items WHERE id = '${id}'`)[0]?.tally ?? "null");
 await ann.goto(`${A}/posts`);
 await ask(ann, "Which Saturday for the walk?", ["Sat 5th", "Sat 12th", "Sat 19th"]);
 let annPoll = await pollIn(ann, "article.own");
 check("Ann's post shows her poll: three options, nobody's answered", annPoll?.options.map((o) => o.name).join() === "Sat 5th,Sat 12th,Sat 19th"
   && counts(annPoll) === "0,0,0" && annPoll.facts.includes("Nobody's answered yet") && annPoll.buttons === 3 && annPoll.canClose, JSON.stringify(annPoll));
-check("…kept with the post", n(stateA, "polls") === 1);
+const pollId = sql(stateA, "SELECT id FROM items WHERE content LIKE '%Which Saturday%'")[0]?.id;
+check("…signed, in the post's own record", Boolean(pollId) && JSON.parse(sql(stateA, `SELECT content FROM items WHERE id = '${pollId}'`)[0].content).poll.options.length === 3);
 await choose(ann, "article.own", 0);
 annPoll = await pollIn(ann, "article.own");
-check("one tap answers it", counts(annPoll) === "1,0,0" && chosen(annPoll) === "Sat 5th" && annPoll.facts.includes("1 person answered"), JSON.stringify(annPoll));
+check("one tap answers it, with a signed vote", counts(annPoll) === "1,0,0" && chosen(annPoll) === "Sat 5th" && annPoll.facts.includes("1 person answered")
+  && tallyOf(stateA, pollId)?.votes[personOf(stateA)] === 1, JSON.stringify(annPoll));
 check("…without a new page", !new URL(ann.url()).hash, ann.url());
 
-// Bob answers from his Home; he sees the totals and his own choice, never who.
+// Bob answers from his Home: his browser signs his vote, and his site passes it on to Ann's.
+// Home shows friends' signed posts from the copies a site keeps (friendcopies.js). Votes and closing send no note, so
+// they reach a friend's Home at its next pull: made due here, so Home asks while it waits.
+const copiesOld = (state) => sql(state, "UPDATE connections SET items_checked_at = NULL");
+const card = "article.from-friend";
 copiesOld(stateB);
 await bob.goto(`${B}/`);
-let bobPoll = await pollIn(bob, "article.from-friend");
-check("Bob's Home shows Ann's poll with its totals", counts(bobPoll) === "1,0,0" && !chosen(bobPoll) && bobPoll.who === null && !bobPoll.canClose, JSON.stringify(bobPoll));
-await choose(bob, "article.from-friend", 1);
-bobPoll = await pollIn(bob, "article.from-friend");
+let bobPoll = await pollIn(bob, card);
+check("Bob's Home shows Ann's poll with its totals", counts(bobPoll) === "1,0,0" && !chosen(bobPoll) && !bobPoll.canClose, JSON.stringify(bobPoll));
+await choose(bob, card, 1);
+bobPoll = await pollIn(bob, card);
 check("Bob answers it from his own site", counts(bobPoll) === "1,1,0" && chosen(bobPoll) === "Sat 12th", JSON.stringify(bobPoll));
-check("…Ann's site keeps it, under his name", sql(stateA, "SELECT voter, name, choices FROM poll_votes WHERE voter != 'site'")
-  .some((v) => v.voter === B && v.name === "Bob Example" && v.choices === 2));
-check("…and his site keeps nothing about it", !JSON.stringify(sql(stateB, "SELECT name FROM sqlite_master WHERE type = 'table'")).includes("vote")
-  || n(stateB, "poll_votes") === 0);
+check("…Ann's site takes his signed vote", tallyOf(stateA, pollId)?.votes[personOf(stateB)] === 2);
+check("…and his site keeps his own copy of it, with her site's receipt", sql(stateB, "SELECT kind, receipt FROM sent").some((r) => r.kind === "vote" && r.receipt));
 await cat.goto(`${C}/`);
-await choose(cat, "article.from-friend", 1);
+await choose(cat, card, 1);
 copiesOld(stateB);
 await bob.goto(`${B}/`);
-bobPoll = await pollIn(bob, "article.from-friend");
-check("Bob sees Cat's answer counted, but not that it's hers", counts(bobPoll) === "1,2,0" && !(await text(bob, "article.from-friend")).includes("Cat"), JSON.stringify(bobPoll));
-const bobKey = sql(stateB, "SELECT their_key FROM connections")[0].their_key;
-const feed = await (await call(A, "/_peer/feed", bobKey)).json();
-check("…nor anywhere in what Ann's site sends him", !JSON.stringify(feed).includes("Cat Example") && JSON.stringify(feed["orderedItems"][0]["afterwrd:poll"]["afterwrd:chosen"]) === "[1]");
-await choose(bob, "article.from-friend", 2);
-bobPoll = await pollIn(bob, "article.from-friend");
+bobPoll = await pollIn(bob, card);
+check("Bob sees Cat's answer counted", counts(bobPoll) === "1,2,0", JSON.stringify(bobPoll));
+await bob.goto(`${B}/friend/${sql(stateB, "SELECT id FROM connections")[0].id}/posts/${pollId}`);
+bobPoll = await pollIn(bob, "article.card");
+check("polls are public: everyone who can see it sees who chose what, counted from the votes themselves", /Sat 12th\s+You, Cat Example|Sat 12th\s+Cat Example, You/.test(bobPoll.who ?? "")
+  && /Sat 5th\s+Ann Example/.test(bobPoll.who ?? "") && bobPoll.who.includes("Everyone who can see this poll"), bobPoll.who);
+await bob.goto(`${B}/`);
+await choose(bob, card, 2);
+bobPoll = await pollIn(bob, card);
 check("Bob changes his mind", counts(bobPoll) === "1,1,1" && chosen(bobPoll) === "Sat 19th", JSON.stringify(bobPoll));
 
 await ann.goto(`${A}/`);
 annPoll = await pollIn(ann, "article.own");
-check("Ann, who asked, sees who chose what", annPoll.who?.includes("Only you can see this") && /Sat 5th\s+You/.test(annPoll.who)
-  && /Sat 12th\s+Cat Example/.test(annPoll.who) && /Sat 19th\s+Bob Example/.test(annPoll.who), annPoll.who);
+check("Ann sees who chose what too", /Sat 5th\s+You/.test(annPoll.who ?? "") && /Sat 12th\s+Cat Example/.test(annPoll.who ?? "") && /Sat 19th\s+Bob Example/.test(annPoll.who ?? ""), annPoll.who);
 
-// Forged answers.
-const key = sql(stateA, "SELECT id FROM posts WHERE source = 'afterwrd'")[0];
-const postKey = (await bob.$eval("article.from-friend", (a) => a.id)).replace(/^f\d+-/, "");
-const vote = (choices, target = `${A}/posts/${postKey}`, k = bobKey) => call(A, "/_peer/vote", k, { type: "afterwrd:Vote", inReplyTo: target, "afterwrd:choices": choices });
-check("two choices on a one-choice poll are refused", (await vote([0, 1])).status === 400);
-check("…as are options it doesn't have", (await vote([3])).status === 400 && (await vote(["x"])).status === 400 && (await vote("0")).status === 400);
-check("…and posts that aren't there", (await vote([0], `${A}/posts/post-1-00000000`)).status === 404 && (await vote([0], `${B}/posts/${postKey}`)).status === 404);
-check("…and anyone who isn't a friend", (await vote([0], undefined, "x".repeat(43))).status === 401);
-check("Bob's answer is still his last", sql(stateA, `SELECT choices FROM poll_votes WHERE voter = '${B}'`)[0]?.choices === 4);
-check("an answer with nothing chosen takes it back", (await vote([])).status === 200 && n(stateA, `poll_votes WHERE voter = '${B}'`) === 0);
-await vote([2]);
+// Forged votes: what Bob's browser could sign, which Ann's site refuses (his site shows why).
+const annForBob = sql(stateB, "SELECT id FROM connections")[0].id;
+const signVote = (page, path, choices, { version = null, kind = "vote" } = {}) => page.evaluate(async (path, choices, version, kind) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const doc = new DOMParser().parseFromString(await (await fetch(path)).text(), "text/html");
+  const form = doc.querySelector("form.say");
+  const d = form.dataset;
+  const key = await savedKey();
+  const mine = doc.querySelector("form.poll-form")?.dataset.signPrev || d.signPrev || null;
+  const made = await makeRecord({ kind, author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: mine, ...(kind === "vote" && { version: version ?? doc.querySelector("form.poll-form")?.dataset.signVersion ?? d.signItem }) },
+    kind === "vote" ? { choices } : undefined, key);
+  const body = new URLSearchParams({ sent: JSON.stringify(made.sent), back: path });
+  const res = await fetch(form.getAttribute("action"), { method: "POST", body, redirect: "manual" });
+  return res.status === 0 || res.type === "opaqueredirect" ? 303 : res.status;
+}, path, choices, version, kind);
+const bobsPage = `/friend/${annForBob}/posts/${pollId}`;
+check("two choices on a one-choice poll are refused", (await signVote(bob, bobsPage, [0, 1])) === 400);
+check("…as are options it doesn't have", (await signVote(bob, bobsPage, [3])) === 400 && (await signVote(bob, bobsPage, ["x"])) === 400);
+check("…and a vote on a version it never had", (await signVote(bob, bobsPage, [0], { version: "v".repeat(43) })) === 400);
+check("…and only Ann can end her poll", (await signVote(bob, bobsPage, [], { kind: "end" })) === 400);
+check("Bob's answer is still his last", tallyOf(stateA, pollId)?.votes[personOf(stateB)] === 4);
+check("an answer with nothing chosen takes it back", (await signVote(bob, bobsPage, [])) === 303 && tallyOf(stateA, pollId)?.votes[personOf(stateB)] === undefined);
+await signVote(bob, bobsPage, [2]);
 
-// Closing.
+// Closing: Ann ends the poll's voting (a signed `end`); comments carry on.
 await ann.goto(`${A}/`);
 await Promise.all([settled(ann), ann.click("article.own .poll form:not(.poll-form) button")]);
 annPoll = await pollIn(ann, "article.own");
 check("Ann closes her poll: the totals stay, the buttons go", counts(annPoll) === "1,1,1" && annPoll.buttons === 0 && annPoll.facts.includes("Closed") && !annPoll.canClose, JSON.stringify(annPoll));
-check("…and no answer is taken after, or taken back", (await vote([0])).status === 400 && (await vote([])).status === 400
-  && sql(stateA, `SELECT choices FROM poll_votes WHERE voter = '${B}'`)[0]?.choices === 4);
+check("…and no answer is taken after, or taken back", (await signVote(bob, bobsPage, [0])) === 400 && (await signVote(bob, bobsPage, [])) === 400
+  && tallyOf(stateA, pollId)?.votes[personOf(stateB)] === 4);
+const commentsBefore = sql(stateA, `SELECT comments FROM items WHERE id = '${pollId}'`)[0].comments;
+await bob.goto(`${B}${bobsPage}`);
+await bob.type("article.card .say textarea", "Shame I missed it");
+await Promise.all([settled(bob), bob.click("article.card .say button")]);
+check("…but comments carry on", sql(stateA, `SELECT comments FROM items WHERE id = '${pollId}'`)[0].comments === commentsBefore + 1);
 copiesOld(stateB);
 await bob.goto(`${B}/`);
-bobPoll = await pollIn(bob, "article.from-friend");
+bobPoll = await pollIn(bob, card);
 check("Bob sees it closed, his answer still marked", bobPoll.facts.includes("Closed") && bobPoll.buttons === 0 && chosen(bobPoll) === "Sat 19th", JSON.stringify(bobPoll));
 
 // Several choices, closing on a day.
 const tomorrow = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
 await ann.goto(`${A}/posts`);
 await ask(ann, "What shall we bring?", ["Sandwiches", "Cake", "Flask of tea"], { multiple: true, closes: tomorrow });
-await bob.goto(`${B}/`);
-bobPoll = await pollIn(bob, "article.from-friend");
-check("a poll that takes several shows ticks, and when it closes", bobPoll?.ticks === 3 && bobPoll.facts.includes("Pick as many as you like")
-  && bobPoll.facts.includes("Closes"), JSON.stringify(bobPoll));
-await bob.click("article.from-friend .poll-option:nth-of-type(1) input");
-await bob.click("article.from-friend .poll-option:nth-of-type(3) input");
-await Promise.all([settled(bob), bob.click("article.from-friend .poll-form button.chip")]);
-bobPoll = await pollIn(bob, "article.from-friend");
-check("Bob picks two", counts(bobPoll) === "1,0,1" && chosen(bobPoll) === "Sandwiches,Flask of tea", JSON.stringify(bobPoll));
-// Bob's answer had his site fetch Ann's posts again (feed.js copyChanged): once it has, his Home shows its copy.
-const past = Math.floor(Date.now() / 1000) - 1;
-for (const end = Date.now() + 15_000; Date.now() < end && !(sql(stateB, "SELECT copy_until FROM connections")[0].copy_until > past + 600);) {
-  await new Promise((r) => setTimeout(r, 300));
-}
-// A copy fetched before the poll's closing time shows it closed once that's passed, without asking Ann's site.
-sql(stateB, `UPDATE friend_posts SET data = json_set(data, '$.poll.closes_at', ${past}) WHERE data LIKE '%Flask of tea%'`);
-await bob.goto(`${B}/`);
-bobPoll = await pollIn(bob, "article.from-friend");
-check("a copy of a friend's poll shows it closed once its time has passed", bobPoll.facts.includes("Closed") && bobPoll.ticks === 0, JSON.stringify(bobPoll));
-const multiPost = sql(stateA, "SELECT post_id FROM polls WHERE multiple = 1")[0].post_id;
-sql(stateA, `UPDATE polls SET closes_at = ${past} WHERE post_id = ${multiPost}`);
+const multiId = sql(stateA, "SELECT id FROM items WHERE content LIKE '%What shall we bring%'")[0]?.id;
 copiesOld(stateB);
 await bob.goto(`${B}/`);
-bobPoll = await pollIn(bob, "article.from-friend");
-check("a poll closes by itself at its time", bobPoll.facts.includes("Closed") && bobPoll.ticks === 0, JSON.stringify(bobPoll));
+const multiCard = `#fi${annForBob}-${multiId}`;
+bobPoll = await pollIn(bob, multiCard);
+check("a poll that takes several shows ticks, and when it closes", bobPoll?.ticks === 3 && bobPoll.facts.includes("Pick as many as you like")
+  && bobPoll.facts.includes("Closes"), JSON.stringify(bobPoll));
+await bob.click(`${multiCard} .poll-option:nth-of-type(1) input`);
+await bob.click(`${multiCard} .poll-option:nth-of-type(3) input`);
+await Promise.all([settled(bob), bob.click(`${multiCard} .poll-form button.chip`)]);
+bobPoll = await pollIn(bob, multiCard);
+check("Bob picks two", counts(bobPoll) === "1,0,1" && chosen(bobPoll) === "Sandwiches,Flask of tea", JSON.stringify(bobPoll));
+// Its closing time passes: Bob's copy shows it closed without asking, and Ann's site takes no more.
+const past = Math.floor(Date.now() / 1000) - 1;
+sql(stateB, `UPDATE copies SET content = json_set(content, '$.poll.closes_at', ${past}) WHERE id = '${multiId}'`);
+await bob.goto(`${B}/`);
+bobPoll = await pollIn(bob, multiCard);
+check("a copy of a friend's poll shows it closed once its time has passed", bobPoll.facts.includes("Closed") && bobPoll.ticks === 0, JSON.stringify(bobPoll));
+sql(stateA, `UPDATE items SET content = json_set(content, '$.poll.closes_at', ${past}) WHERE id = '${multiId}'`);
+check("a poll closes by itself at its time", (await signVote(bob, `/friend/${annForBob}/posts/${multiId}`, [1])) === 400);
 
-// In the archive and the download; and deleting the post takes the poll with it.
-const rows = await ann.evaluate(() => fetch("/_admin/export/rows?table=poll_votes").then((r) => r.json()));
-check("Download everything includes polls and answers", rows.rows?.length === 4, JSON.stringify(rows).slice(0, 200));
+// In the download; and deleting the post takes the poll and its votes with it.
+const rows = await ann.evaluate(() => fetch("/_admin/export/rows?table=items").then((r) => r.json()));
+check("Download everything includes signed polls and their votes", rows.rows?.filter((r) => r.content.includes('"poll"') && r.tally?.includes("votes")).length === 2,
+  JSON.stringify(rows).slice(0, 200));
 await ann.goto(`${A}/posts`);
-await ann.click("article.own header details.more summary");
-await Promise.all([settled(ann), ann.click("article.own header .delete")]);
-check("deleting a post deletes its poll and answers", n(stateA, `polls WHERE post_id = ${multiPost}`) === 0 && n(stateA, `poll_votes WHERE post_id = ${multiPost}`) === 0
-  && n(stateA, "polls") === 1);
-await ann.screenshot({ path: `${OUT}/poll-own.png`, fullPage: true });
+await ann.click(`#i-${multiId} header details.more summary`);
+await Promise.all([settled(ann), ann.click(`#i-${multiId} header .delete`)]);
+check("deleting a post deletes its poll and votes", n(stateA, `items WHERE id = '${multiId}'`) === 0 && n(stateA, `list_pages WHERE list = '${multiId}'`) === 0
+  && n(stateA, "items WHERE content LIKE '%\"poll\"%'") === 1);
 
 // --- in a group ---------------------------------------------------------------------------------------------------------
 

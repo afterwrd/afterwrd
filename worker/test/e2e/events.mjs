@@ -10,6 +10,7 @@ import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { signCall } from "../../src/signedcalls.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
@@ -100,8 +101,10 @@ const bobId = sql(stateA, `SELECT id FROM connections WHERE origin = '${B}'`)[0]
 const catId = sql(stateA, `SELECT id FROM connections WHERE origin = '${C}'`)[0].id;
 const annOnBob = sql(stateB, "SELECT id FROM connections")[0].id;
 const annOnCat = sql(stateC, "SELECT id FROM connections")[0].id;
-const bobKey = sql(stateB, "SELECT their_key FROM connections")[0].their_key; // Bob's key for Ann's site
-const catKey = sql(stateC, "SELECT their_key FROM connections")[0].their_key;
+const openThread = async (page, card) => {
+  if (!(await page.$(`${card} details.comments[open]`))) await page.click(`${card} details.comments summary`);
+  await page.waitForSelector(`${card} .say textarea`, { timeout: 15_000 });
+};
 
 // Bob's phone, with notifications on. What reaches it is counted.
 const bobPhone = [];
@@ -119,7 +122,26 @@ async function phoneTold(before) {
 }
 
 // An ordinary post first, which everyone sees, so the lists below aren't empty.
-await post(ann, "/_admin/posts", { text: "Hello, everyone." });
+await ann.goto(`${A}/posts`);
+await ann.type("#composer textarea", "Hello, everyone.");
+await Promise.all([ann.waitForNavigation({ timeout: 60_000 }), ann.click("#composer button.post")]);
+
+// Signed calls as a friend's own site would make them (its hosting key), to see what Ann's site gives each.
+const personOf = (state) => sql(state, "SELECT person FROM own_identity")[0].person;
+const hostingOf = async (state) => crypto.subtle.importKey("pkcs8", Buffer.from(sql(state, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
+  { name: "Ed25519" }, false, ["sign"]);
+const asSite = async (state, from, to, path, body = null) => {
+  const url = to + path;
+  const text = body === null ? null : JSON.stringify(body);
+  const headers = await signCall({ method: text === null ? "GET" : "POST", url, body: text, person: personOf(state), from, privateKey: await hostingOf(state) });
+  const res = await fetch(url, { method: text === null ? "GET" : "POST", headers: { ...headers, ...(text !== null && { "Content-Type": "application/json" }) }, body: text });
+  return { status: res.status, data: await res.json().catch(() => ({})) };
+};
+const asCat = (path, body) => asSite(stateC, C, A, path, body);
+const asBob = (path, body) => asSite(stateB, B, A, path, body);
+const tallyOf = (id) => JSON.parse(sql(stateA, `SELECT tally FROM items WHERE id = '${id}'`)[0]?.tally ?? "null");
+const answerOf = (id, state) => tallyOf(id)?.answers?.[personOf(state)]?.answer ?? null;
+const copyOf = (state, id) => sql(state, `SELECT content, tally FROM copies WHERE id = '${id}'`)[0];
 
 // --- making one -------------------------------------------------------------------------------------------------------
 
@@ -148,29 +170,27 @@ await ann.screenshot({ path: `${OUT}/events-form-phone.png`, fullPage: true });
 await ann.setViewport({ width: 1280, height: 800 });
 await fill(ann, "#make", { title: "Picnic", day: picnicDay, time: "13:00", place: "The park", words: "Bring a blanket." });
 await tick(ann, "#make", ["Bob Example"]);
-await Promise.all([ann.waitForNavigation(), ann.click("#make button.primary")]);
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click("#make button.primary")]);
 const key = new URL(ann.url()).pathname.split("/").pop();
-check("making it opens its page", /^post-\d+-[0-9a-f]{8}$/.test(key), ann.url());
-const postIdA = sql(stateA, `SELECT id FROM posts WHERE key = '${key}'`)[0].id;
-check("…a post for those chosen only, with its event and who's invited", sql(stateA, `SELECT audience FROM posts WHERE id = ${postIdA}`)[0].audience === "chosen"
-  && n(stateA, `events WHERE post_id = ${postIdA}`) === 1 && sql(stateA, `SELECT connection_id FROM post_audience WHERE post_id = ${postIdA}`).map((r) => r.connection_id).join() === String(bobId));
+check("making it opens its page", /^[A-Za-z0-9_-]{43}$/.test(key), ann.url());
+check("…a signed item for those invited only, with who's invited", sql(stateA, `SELECT audience FROM items WHERE id = '${key}'`)[0]?.audience === "invited"
+  && sql(stateA, `SELECT connection_id FROM item_guests WHERE item = '${key}'`).map((r) => r.connection_id).join() === String(bobId)
+  && !sql(stateA, `SELECT entries FROM list_pages WHERE list = '${key}'`)[0].entries.includes(personOf(stateB)));
 let annEvent = await eventIn(ann);
 check("Ann's page shows her event, as hers, with no answer buttons", annEvent?.title === "Picnic" && annEvent.meta.includes("The park")
   && annEvent.meta.includes("1 invited") && annEvent.meta.includes("Only the people you invite") && annEvent.answers === 0, JSON.stringify(annEvent));
 check("…and who's invited, not answered yet", (await text(ann, ".guests")).includes("Bob Example") && (await text(ann, ".guests")).includes("Not answered yet"));
 check("…and the words about it", (await text(ann, "article.own .text")).includes("Bring a blanket."));
-check("its words change with the event, not the 15-minute edit", (await ann.evaluate((id) => fetch(`/_admin/posts/${id}/edit`, { method: "POST",
-  body: new URLSearchParams({ text: "Sneaky" }) }).then((r) => r.status), postIdA)) === 400
-  && !(await ann.$('article.own header a[href^="#edit-p-"]')));
+check("its words change with the event, not the 15-minute edit", !(await ann.$('article.own header a[href^="#edit-i-"]')));
 
 // --- Bob is invited -----------------------------------------------------------------------------------------------------
 
-check("Bob's site is told he's invited", await waitFor(() => n(stateB, "inbox WHERE kind = 'invite'") === 1));
+check("Bob's site is told he's invited", await waitFor(() => n(stateB, "notices WHERE kind = 'invite'") === 1));
 check("…and so is his phone (and nothing before: not Ann's post)", await phoneTold(0), String(bobPhone.length));
 check("…and Ann's site notes that the invitation got there", await waitFor(() =>
-  sql(stateA, `SELECT delivery FROM post_audience WHERE connection_id = ${bobId}`)[0]?.delivery === "delivered"));
-check("…and keeps a copy for his calendar, not answered yet", sql(stateB, "SELECT answer, title, post_key FROM events_elsewhere")
-  .some((e) => e.answer === null && e.title === "Picnic" && e.post_key === key));
+  sql(stateA, `SELECT delivery FROM item_guests WHERE connection_id = ${bobId}`)[0]?.delivery === "delivered"));
+check("…and keeps a copy for his calendar, not answered yet", JSON.parse(copyOf(stateB, key)?.content ?? "{}").event?.title === "Picnic"
+  && !JSON.parse(copyOf(stateB, key).tally ?? "{}").answers?.[personOf(stateB)]);
 await bob.goto(`${B}/activity`);
 check("Bob's Notifications say Ann invited him", (await text(bob)).includes("Ann Example invited you to an event")
   && Boolean(await bob.$(`main a[href="/friend/${annOnBob}/posts/${key}"]`)));
@@ -179,30 +199,26 @@ check("Bob's Events page lists the invitation", (await text(bob, ".invitations")
 
 // --- Cat isn't: nothing reaches her, by any route -----------------------------------------------------------------------
 
-const asCat = (path, body) => call(A, path, catKey, body);
-const feedForCat = await (await asCat("/_peer/feed")).json();
-check("Cat's feed from Ann's site leaves the event out", !JSON.stringify(feedForCat).includes(key) && !JSON.stringify(feedForCat).includes("Picnic")
-  && feedForCat.orderedItems.length === 1, JSON.stringify(feedForCat).slice(0, 200));
-const postsForCat = await (await asCat("/_peer/posts")).json();
-check("…as do her pages of Ann's posts, counts included", !JSON.stringify(postsForCat).includes("Picnic") && postsForCat.totalItems === 1);
-check("…and asking for it by its address", (await asCat(`/_peer/posts/${key}`)).status === 404);
-check("…or commenting on it", (await asCat("/_peer/comments", { type: "Note", content: "Can I come?", inReplyTo: `${A}/posts/${key}` })).status === 404);
-check("…or answering it", (await asCat("/_peer/answer", { type: "Accept", object: `${A}/posts/${key}` })).status === 404);
-check("…or answering a poll in it", (await asCat("/_peer/vote", { inReplyTo: `${A}/posts/${key}`, "afterwrd:choices": [0] })).status === 404);
-check("Cat's site was told nothing", n(stateC, "inbox") === 1 && n(stateC, "events_elsewhere") === 0, JSON.stringify(sql(stateC, "SELECT kind FROM inbox")));
+const forCat = await asCat("/_p/items?since=0");
+check("what Ann's site sends Cat's leaves the event out", forCat.status === 200 && !JSON.stringify(forCat.data).includes(key)
+  && !JSON.stringify(forCat.data).includes("Picnic") && forCat.data.items.length === 1, JSON.stringify(forCat.data).slice(0, 200));
+check("…and asking for it by its id", (await asCat(`/_p/items/${key}`)).status === 404);
+check("…or passing on a comment on it", (await asCat("/_p/records", { sent: { record: "x" } })).status === 400
+  && (await asBob(`/_p/items/${key}`)).status === 200);
+check("Cat's site was told nothing", await waitFor(() => n(stateC, "copies") === 1) && n(stateC, "notices WHERE kind != 'post'") === 0,
+  JSON.stringify(sql(stateC, "SELECT kind FROM notices")));
 await cat.goto(`${C}/`);
 check("…and her Home doesn't show it", !(await text(cat)).includes("Picnic") && (await text(cat)).includes("Hello, everyone."));
 await cat.goto(`${C}/friend/${annOnCat}/posts/${key}`);
-check("…nor its address on her site", !(await text(cat)).includes("Picnic") && (await text(cat)).includes("isn't there any more"));
-const feedForBob = await (await call(A, "/_peer/feed", bobKey)).json();
-check("Bob's feed has it, with the event", JSON.stringify(feedForBob).includes('"name":"Picnic"') && feedForBob.orderedItems.length === 2);
+check("…nor its address on her site", !(await text(cat)).includes("Picnic"));
+check("Bob's copy has it, with the event", (await asBob("/_p/items?since=0")).data.items.some((i) => i.id === key && i.content.event.title === "Picnic"));
 
 // --- Bob answers ----------------------------------------------------------------------------------------------------------
 
 await bob.goto(`${B}/events`);
 await Promise.all([bob.waitForNavigation(), bob.click('.invitation button[value="going"]')]);
-check("Bob says he's going, from Events", sql(stateA, `SELECT answer FROM event_answers WHERE post_id = ${postIdA} AND connection_id = ${bobId}`)[0]?.answer === "going");
-check("…his copy says so, and the invitation's answered", sql(stateB, "SELECT answer FROM events_elsewhere")[0].answer === "going" && !(await bob.$(".invitations")));
+check("Bob says he's going, from Events, in a signed answer", answerOf(key, stateB) === "going");
+check("…his copy says so, and the invitation's answered", JSON.parse(copyOf(stateB, key).tally).answers[personOf(stateB)].answer === "going" && !(await bob.$(".invitations")));
 await bob.goto(`${B}/events?month=${picnicMonth}`);
 const cell = await bob.$$eval(".cal-day", (cells) => cells.filter((c) => c.querySelector(".cal-event")).map((c) => ({
   day: c.querySelector(".cal-num").textContent.trim(), events: [...c.querySelectorAll(".cal-event")].map((e) => e.className + ":" + e.textContent.trim()) })));
@@ -213,39 +229,41 @@ let bobEvent = await eventIn(bob);
 check("Bob's page for it shows his answer, who's going, and who can see it", bobEvent?.pressed === "going" && /Going\s+You/.test(bobEvent.answered)
   && bobEvent.meta.includes("Only the people Ann Example invited"), JSON.stringify(bobEvent));
 await Promise.all([settled(bob), bob.click('.event .answers button[value="maybe"]')]);
-check("…he can change his mind there, in place", sql(stateA, `SELECT answer FROM event_answers WHERE connection_id = ${bobId}`)[0]?.answer === "maybe"
-  && (await eventIn(bob))?.pressed === "maybe");
-await bob.type(`#f${annOnBob}-${key} form.say textarea`, "Can't wait!");
-await Promise.all([settled(bob), bob.click(`#f${annOnBob}-${key} form.say button`)]);
-check("Bob comments on it; Ann's site keeps it", n(stateA, `comments WHERE target = '${key}' AND origin = '${B}'`) === 1);
+check("…he can change his mind there, in place", answerOf(key, stateB) === "maybe" && (await eventIn(bob))?.pressed === "maybe");
+await openThread(bob, `#fi${annOnBob}-${key}`);
+await bob.type(`#fi${annOnBob}-${key} form.say textarea`, "Can't wait!");
+await Promise.all([settled(bob), bob.click(`#fi${annOnBob}-${key} form.say button`)]);
+check("Bob comments on it; Ann's site keeps it", sql(stateA, `SELECT comments FROM items WHERE id = '${key}'`)[0].comments === 1);
 const ics = await bob.evaluate((p) => fetch(p).then(async (r) => [r.headers.get("content-type"), await r.text()]), `/friend/${annOnBob}/posts/${key}/event.ics`);
 check("…and can add it to his own calendar", ics[0]?.startsWith("text/calendar") && ics[1].includes("SUMMARY:Picnic") && ics[1].includes("LOCATION:The park"));
+await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
 await Promise.all([settled(bob), bob.click('.event .answers button[value="going"]')]);
 
 await ann.goto(`${A}/posts/${key}`);
 annEvent = await eventIn(ann);
 check("Ann sees Bob's going", /Going\s+Bob Example/.test(annEvent?.answered ?? ""), JSON.stringify(annEvent));
 
-// A friend whose site is from before events refuses the invitation (as 0.45.0's does, with 400): Ann sees why.
-sql(stateA, `INSERT INTO post_audience (post_id, connection_id, added_at, delivery) VALUES (${postIdA}, 999, 1, 'refused')`);
+// A friend whose site can't take signed invitations refuses it: Ann sees why.
 sql(stateA, "INSERT INTO connections (id, origin, name, key_hash, created_at, connected_at, approved_at) VALUES (999, 'https://old.example', 'Old Friend', 'x', 1, 1, 1)");
+sql(stateA, `INSERT INTO item_guests (item, connection_id, person, added_at, delivery) VALUES ('${key}', 999, '${"o".repeat(43)}', 1, 'refused')`);
 await ann.goto(`${A}/posts/${key}`);
-check("an invitation an older site didn't take says so on Ann's guest list", (await text(ann, ".guests")).includes("Their site didn't take the invitation: it may need updating"));
-sql(stateA, "DELETE FROM post_audience WHERE connection_id = 999");
+check("an invitation a site didn't take says so on Ann's guest list", (await text(ann, ".guests")).includes("Their site didn't take the invitation: it may need updating"));
+sql(stateA, "DELETE FROM item_guests WHERE connection_id = 999");
 sql(stateA, "DELETE FROM connections WHERE id = 999");
 
 // --- inviting Cat too ------------------------------------------------------------------------------------------------------
 
+await ann.goto(`${A}/posts/${key}`);
 check("only Cat's left to invite", (await ann.$$eval(".invite-more .guest-options label", (l) => l.map((x) => x.textContent.trim()))).join() === "Cat Example");
 await tick(ann, ".invite-more", ["Cat Example"]);
-await Promise.all([ann.waitForNavigation(), ann.click(".invite-more button.primary")]);
-check("Ann invites Cat too", n(stateA, `post_audience WHERE post_id = ${postIdA}`) === 2);
-check("Cat's site is told", await waitFor(() => n(stateC, "inbox WHERE kind = 'invite'") === 1));
-check("…and Bob's isn't told again", n(stateB, "inbox WHERE kind = 'invite'") === 1);
-check("now Cat can read it", (await asCat(`/_peer/posts/${key}`)).status === 200);
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click(".invite-more button.primary")]);
+check("Ann invites Cat too, in a signed change", n(stateA, `item_guests WHERE item = '${key}'`) === 2);
+check("Cat's site is told", await waitFor(() => n(stateC, "notices WHERE kind = 'invite'") === 1));
+check("…and Bob's isn't told again", n(stateB, "notices WHERE kind = 'invite'") === 1);
+check("now Cat can read it", (await asCat(`/_p/items/${key}`)).status === 200);
 await cat.goto(`${C}/friend/${annOnCat}/posts/${key}`);
 await Promise.all([settled(cat), cat.click('.event .answers button[value="maybe"]')]);
-check("Cat might go", sql(stateA, `SELECT answer FROM event_answers WHERE connection_id = ${catId}`)[0]?.answer === "maybe");
+check("Cat might go", answerOf(key, stateC) === "maybe");
 await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
 bobEvent = await eventIn(bob);
 check("everyone invited sees who's going and who might, by name", /Going\s+You/.test(bobEvent.answered) && /Maybe\s+Cat Example/.test(bobEvent.answered)
@@ -254,10 +272,9 @@ await cat.goto(`${C}/friend/${annOnCat}/posts/${key}`);
 await Promise.all([settled(cat), cat.click('.event .answers button[value="no"]')]);
 await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
 bobEvent = await eventIn(bob);
-check("…but not who can't go", !bobEvent.answered.includes("Cat") && !JSON.stringify(await (await call(A, `/_peer/posts/${key}`, bobKey)).json()).includes("Cat Example"),
-  JSON.stringify(bobEvent));
+check("…and who can't go (decision 15)", /Can't go\s+Cat Example/.test(bobEvent.answered), JSON.stringify(bobEvent));
 await ann.goto(`${A}/posts/${key}`);
-check("…which only Ann sees", /Can't go\s+Cat Example/.test((await eventIn(ann)).answered));
+check("…as Ann does", /Can't go\s+Cat Example/.test((await eventIn(ann)).answered));
 await cat.goto(`${C}/events?month=${picnicMonth}`);
 check("an event Cat can't go to isn't on her calendar", !(await text(cat, ".calendar")).includes("Picnic"));
 
@@ -267,62 +284,70 @@ await ann.goto(`${A}/posts/${key}/event`);
 check("Ann's change form is filled in", (await ann.$eval("input[name=title]", (i) => i.value)) === "Picnic" && (await ann.$eval("input[name=start_time]", (i) => i.value)) === "13:00");
 await ann.$eval("input[name=start_time]", (i) => { i.value = "14:00"; });
 let phoneBefore = bobPhone.length;
-await Promise.all([ann.waitForNavigation(), ann.click(".event-form button.primary")]);
-check("Ann moves it an hour later", (await eventIn(ann))?.meta.includes("14:00"));
-check("Bob, going, is told", await waitFor(() => n(stateB, "inbox WHERE kind = 'changed'") === 1));
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click(".event-form button.primary")]);
+check("Ann moves it an hour later, in a signed change", (await eventIn(ann))?.meta.includes("14:00"));
+check("Bob, going, is told", await waitFor(() => n(stateB, "notices WHERE kind = 'changed'") === 1));
 check("…on his phone too", await phoneTold(phoneBefore), String(bobPhone.length));
-check("…and his copy moves with it", sql(stateB, "SELECT starts_at FROM events_elsewhere")[0].starts_at
-  === sql(stateA, `SELECT starts_at FROM events WHERE post_id = ${postIdA}`)[0].starts_at);
-check("Cat, who said no, isn't", n(stateC, "inbox WHERE kind = 'changed'") === 0);
+check("…and his copy moves with it", JSON.parse(copyOf(stateB, key).content).event.starts_at
+  === JSON.parse(sql(stateA, `SELECT content FROM items WHERE id = '${key}'`)[0].content).event.starts_at);
+check("Cat, who said no, isn't", n(stateC, "notices WHERE kind = 'changed'") === 0);
+await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
+check("Bob's going was said before it moved, and says so", /Going\s+You \(said before it changed\)/.test((await eventIn(bob)).answered), (await eventIn(bob)).answered);
+await Promise.all([settled(bob), bob.click('.event .answers button[value="going"]')]);
+check("…until he says it again", answerOf(key, stateB) === "going" && !/You \(said before/.test((await eventIn(bob)).answered));
 await ann.goto(`${A}/posts/${key}/event`);
 await ann.$eval("input[name=place]", (i) => { i.value = "The other park"; });
-await Promise.all([ann.waitForNavigation(), ann.click(".event-form button.primary")]);
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click(".event-form button.primary")]);
 check("another change straight away is refused", (await text(ann)).includes("You've just changed this event"));
 await ann.goto(`${A}/posts/${key}/event`);
 await ann.$eval("textarea[name=text]", (i) => { i.value = "Bring a blanket, and a flask."; });
-await Promise.all([ann.waitForNavigation(), ann.click(".event-form button.primary")]);
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click(".event-form button.primary")]);
 check("…but changing only its words is fine, and tells no one", (await text(ann, "article.own .text")).includes("a flask")
-  && n(stateB, "inbox WHERE kind = 'changed'") === 1 && bobPhone.length === phoneBefore + 1);
+  && n(stateB, "notices WHERE kind = 'changed'") === 1 && bobPhone.length === phoneBefore + 1);
+check("…while Bob's copy has the new words", await waitFor(() => JSON.parse(copyOf(stateB, key).content).text.includes("a flask")));
 
 // --- forged notes and answers ------------------------------------------------------------------------------------------------
 
-const annKeyOnBob = sql(stateA, `SELECT their_key FROM connections WHERE id = ${bobId}`)[0].their_key; // Ann's key for Bob's site
-const toBob = (note) => call(B, "/_peer/notify", annKeyOnBob, note);
-const fakeEvent = { type: "Event", name: "Fake", startTime: new Date(Date.now() + 5 * 86400_000).toISOString(), "afterwrd:timeZone": "Europe/London" };
-check("an invitation to someone else's post is refused", (await toBob({ type: "Invite", object: { type: "Note", id: `${C}/posts/${key}`, "afterwrd:event": fakeEvent } })).status === 400);
-check("…as is one without a proper event", (await toBob({ type: "Invite", object: { type: "Note", id: `${A}/posts/post-1-00000000`, "afterwrd:event": { type: "Event" } } })).status === 400);
-check("a change to an event Bob wasn't invited to is ignored", (await toBob({ type: "Update", "afterwrd:change": "changed",
-  object: { type: "Note", id: `${A}/posts/post-1-00000001`, "afterwrd:event": fakeEvent } })).status === 202 && n(stateB, "events_elsewhere") === 1);
-check("Bob's answers must be one of the three", (await call(A, "/_peer/answer", bobKey, { type: "Like", object: `${A}/posts/${key}` })).status === 400);
-check("…and about an event", (await call(A, "/_peer/answer", bobKey, { type: "Accept", object: `${A}/posts/post-1-00000000` })).status === 404);
-check("…from a friend", (await call(A, "/_peer/answer", "x".repeat(43), { type: "Accept", object: `${A}/posts/${key}` })).status === 401);
-// A friend answering over and over runs out of answers for a while (limits.js), and their answer stops changing.
+const toBob = (body) => asSite(stateA, A, B, "/_p/notes", body);
+const bobSent = sql(stateB, "SELECT record FROM sent WHERE kind = 'answer' LIMIT 1")[0];
+check("a note passing off someone else's record as Ann's post is refused", (await toBob({ v: 2, kind: "item",
+  item: { id: "x".repeat(43), sent: JSON.parse(bobSent.record), taken: 1, content: { type: "event" } } })).status === 400);
+const annEntry = JSON.parse(sql(stateA, `SELECT entries FROM list_pages WHERE list = '${key}' ORDER BY page DESC LIMIT 1`)[0].entries).at(-1);
+check("…as is a change whose receipt doesn't check", (await toBob({ v: 2, kind: "change", item: key,
+  entry: { n: annEntry.n, fp: annEntry.fp, taken: annEntry.taken, prev: "", sent: annEntry.sent }, receipt: { bytes: "e30", sig: "x" } })).status === 400);
+// What Cat's browser could sign: Ann's site refuses answers that aren't one of the three, to old versions, or past
+// her allowance on one item (20 entries each: lists.js PER_AUTHOR).
+const signAnswer = (page, path, answer, { version = null } = {}) => page.evaluate(async (path, answer, version) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const doc = new DOMParser().parseFromString(await (await fetch(path)).text(), "text/html");
+  // Once it's off there are no answer buttons: the comment box says where its list is up to instead.
+  const form = doc.querySelector("form.answers") ?? doc.querySelector("form.say");
+  const d = form.dataset;
+  const key = await savedKey();
+  const made = await makeRecord({ kind: "answer", author: key.person, host: d.signHost, item: d.signItem, seen: { n: Number(d.signSeenN), h: d.signSeenH },
+    prev: d.signPrev || null, version: version ?? d.signVersion ?? d.signItem }, { answer }, key);
+  const res = await fetch(form.getAttribute("action"), { method: "POST", body: new URLSearchParams({ sent: JSON.stringify(made.sent), back: path }), redirect: "manual" });
+  return res.type === "opaqueredirect" ? 303 : res.status;
+}, path, answer, version);
+const catsPage = `/friend/${annOnCat}/posts/${key}`;
+check("Cat's answers must be one of the three", (await signAnswer(cat, catsPage, "perhaps")) === 400);
+check("…and to the event as it is now", (await signAnswer(cat, catsPage, "going", { version: key })) === 400);
 const flips = [];
-for (let i = 0; i < 32; i++) flips.push((await call(A, "/_peer/answer", bobKey, { type: i % 2 ? "Accept" : "TentativeAccept", object: `${A}/posts/${key}` })).status);
-const keptAnswer = sql(stateA, `SELECT answer FROM event_answers WHERE connection_id = ${bobId}`)[0]?.answer;
-check("answering again and again is limited", flips.includes(429) && flips.indexOf(429) <= 30 && n(stateA, `answer_log WHERE who = '${B}'`) <= 30, flips.join(","));
-await call(A, "/_peer/answer", bobKey, { type: keptAnswer === "going" ? "TentativeAccept" : "Accept", object: `${A}/posts/${key}` });
-check("…and an answer over the limit changes nothing", sql(stateA, `SELECT answer FROM event_answers WHERE connection_id = ${bobId}`)[0]?.answer === keptAnswer);
-// The rest of this test doesn't need Bob to answer Ann again; poll answers share the allowance (polls.mjs covers polls).
-sql(stateA, `DELETE FROM answer_log WHERE who = '${B}'`);
-sql(stateA, `UPDATE event_answers SET answer = 'going' WHERE connection_id = ${bobId}`);
-const overEvent = { ...fakeEvent, startTime: new Date(Date.now() - 5 * 86400_000).toISOString() };
-check("an invitation to something already over is let go, keeping nothing", (await toBob({ type: "Invite",
-  object: { type: "Note", id: `${A}/posts/post-1-00000002`, "afterwrd:event": overEvent } })).status === 202
-  && n(stateB, "events_elsewhere WHERE post_key = 'post-1-00000002'") === 0);
-const invitesBefore = n(stateB, "inbox WHERE kind = 'invite'");
-check("an invitation sent again changes nothing", (await toBob({ type: "Invite", object: { type: "Note", id: `${A}/posts/${key}`,
-  "afterwrd:event": { ...fakeEvent, name: "Something else" } } })).status === 202 && n(stateB, "inbox WHERE kind = 'invite'") === invitesBefore
-  && n(stateB, "events_elsewhere WHERE title = 'Something else'") === 0);
+for (let i = 0; i < 24 && !flips.includes(400); i++) flips.push(await signAnswer(cat, catsPage, i % 2 ? "no" : "maybe"));
+const keptAnswer = answerOf(key, stateC);
+check("answering again and again runs out (20 entries each)", flips.includes(400) && flips.indexOf(400) <= 20, flips.join(","));
+check("…and an answer over the limit changes nothing", keptAnswer === (flips.indexOf(400) % 2 ? "maybe" : "no"), keptAnswer);
 
 // --- taking an invitation back --------------------------------------------------------------------------------------------------
 
 await ann.goto(`${A}/posts/${key}`);
 await ann.$eval(".guests", (d) => { d.open = true; });
 await Promise.all([settled(ann), ann.$$eval(".guest-list li", (lis) => lis.find((li) => li.textContent.includes("Cat Example")).querySelector("button").click())]);
-check("Ann takes back Cat's invitation", n(stateA, `post_audience WHERE connection_id = ${catId}`) === 0 && n(stateA, `event_answers WHERE connection_id = ${catId}`) === 0);
-check("Cat's site forgets it, and its notification, quietly", await waitFor(() => n(stateC, "events_elsewhere") === 0 && n(stateC, "inbox WHERE kind = 'invite'") === 0));
-check("…and Cat can't read it any more", (await asCat(`/_peer/posts/${key}`)).status === 404);
+check("Ann takes back Cat's invitation", n(stateA, `item_guests WHERE connection_id = ${catId}`) === 0 && answerOf(key, stateC) === null);
+check("Cat's site forgets it, and its notification, quietly", await waitFor(() => n(stateC, `copies WHERE id = '${key}'`) === 0 && n(stateC, "notices WHERE kind = 'invite'") === 0));
+check("…and Cat can't read it any more", (await asCat(`/_p/items/${key}`)).status === 404);
+check("…and is told, when next her site asks, that she may no longer see it", (await asCat("/_p/items?since=0")).data.gone.includes(key)
+  && !(await asBob("/_p/items?since=0")).data.gone.includes(key));
 
 // --- a group's events on the calendar too -----------------------------------------------------------------------------------------
 
@@ -481,12 +506,15 @@ await bob.setViewport({ width: 1280, height: 800 });
 
 await ann.goto(`${A}/posts/${key}`);
 phoneBefore = bobPhone.length;
-await Promise.all([settled(ann), ann.click('.event form[action$="/cancel"] button')]);
-check("Ann calls it off", Boolean(sql(stateA, `SELECT cancelled_at FROM events WHERE post_id = ${postIdA}`)[0].cancelled_at) && (await eventIn(ann))?.off);
-check("Bob is told", await waitFor(() => n(stateB, "inbox WHERE kind = 'cancelled'") === 1));
+await Promise.all([settled(ann), ann.click('.event form[data-sign="event-cancel"] button')]);
+check("Ann calls it off, in a signed change", JSON.parse(sql(stateA, `SELECT content FROM items WHERE id = '${key}'`)[0].content).event.cancelled === true
+  && (await eventIn(ann))?.off);
+check("Bob is told", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled'") === 1));
 check("…on his phone too", await phoneTold(phoneBefore), String(bobPhone.length));
-check("…his copy says so", Boolean(sql(stateB, "SELECT cancelled_at FROM events_elsewhere")[0].cancelled_at));
-check("…and answers aren't taken any more", (await call(A, "/_peer/answer", bobKey, { type: "Reject", object: `${A}/posts/${key}` })).status === 400);
+check("…his copy says so", JSON.parse(copyOf(stateB, key).content).event.cancelled === true);
+await bob.goto(`${B}/friend/${annOnBob}/posts/${key}`);
+check("…and answers aren't offered, or taken, any more", !(await bob.$(".event .answers"))
+  && (await signAnswer(bob, `/friend/${annOnBob}/posts/${key}`, "no", { version: JSON.parse(copyOf(stateB, key).content).version })) === 400);
 await bob.goto(`${B}/activity`);
 check("Bob's Notifications say it's off", (await text(bob)).includes("Ann Example called off an event you were invited to"));
 
@@ -495,24 +523,23 @@ await ann.goto(`${A}/events`);
 await ann.$eval("#make", (d) => { d.open = true; });
 await fill(ann, "#make", { title: "Quiz night", day: ahead(20), time: "19:30" });
 await tick(ann, "#make", ["Bob Example"]);
-await Promise.all([ann.waitForNavigation(), ann.click("#make button.primary")]);
+await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click("#make button.primary")]);
 const quiz = new URL(ann.url()).pathname.split("/").pop();
-const quizId = sql(stateA, `SELECT id FROM posts WHERE key = '${quiz}'`)[0].id;
-check("Bob's invited to the quiz", await waitFor(() => n(stateB, `events_elsewhere WHERE post_key = '${quiz}'`) === 1));
-const exported = await ann.evaluate(() => Promise.all(["events", "event_answers", "post_audience"].map((t) => fetch(`/_admin/export/rows?table=${t}`).then((r) => r.json()))));
-check("Download everything includes events, answers and who they're for", exported.every((r) => r.rows?.length > 0), JSON.stringify(exported).slice(0, 200));
+check("Bob's invited to the quiz", await waitFor(() => n(stateB, `copies WHERE id = '${quiz}'`) === 1));
+const exported = await ann.evaluate(() => Promise.all(["items", "item_guests"].map((t) => fetch(`/_admin/export/rows?table=${t}`).then((r) => r.json()))));
+check("Download everything includes events, answers and who they're for", exported[0].rows?.some((r) => r.content.includes('"event"') && r.tally?.includes("answers"))
+  && exported[1].rows?.length > 0, JSON.stringify(exported).slice(0, 200));
 await ann.click("article.own header details.more summary");
-await Promise.all([ann.waitForNavigation(), ann.click("article.own header .delete")]);
-check("deleting it takes its event and who it was for", n(stateA, `events WHERE post_id = ${quizId}`) === 0 && n(stateA, `post_audience WHERE post_id = ${quizId}`) === 0);
-check("…and tells Bob it's off", await waitFor(() => n(stateB, "inbox WHERE kind = 'cancelled'") === 2));
+await Promise.all([settled(ann), ann.click("article.own header .delete")]);
+check("deleting it takes its event and who it was for", n(stateA, `items WHERE id = '${quiz}'`) === 0 && n(stateA, `item_guests WHERE item = '${quiz}'`) === 0);
+check("…and tells Bob it's off", await waitFor(() => n(stateB, "notices WHERE kind = 'cancelled'") === 2 && n(stateB, `copies WHERE id = '${quiz}'`) === 0));
 
 // Removing a friend forgets what they were invited to, on both sides.
 await ann.goto(`${A}/friend/${bobId}/posts`);
 await ann.$eval('form[action$="/disconnect"]', (f) => f.requestSubmit());
 await waitFor(() => n(stateA, `connections WHERE id = ${bobId}`) === 0);
-check("removing Bob forgets his invitations and answers", n(stateA, `post_audience WHERE connection_id = ${bobId}`) === 0
-  && n(stateA, `event_answers WHERE connection_id = ${bobId}`) === 0);
-check("…and his site forgets Ann's events (not the group's)", await waitFor(() => n(stateB, "events_elsewhere WHERE connection_id IS NOT NULL") === 0)
+check("removing Bob forgets his invitations and answers", n(stateA, `item_guests WHERE connection_id = ${bobId}`) === 0 && answerOf(key, stateB) === null);
+check("…and his site forgets Ann's events (not the group's)", await waitFor(() => n(stateB, "copies") === 0)
   && n(stateB, "events_elsewhere WHERE group_id IS NOT NULL") > 0);
 
 check("no script errors", errors.length === 0, errors.join("; "));

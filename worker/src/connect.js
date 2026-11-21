@@ -451,12 +451,12 @@ export async function removeFriend(env, id) {
   await callSite(connection.origin, "/_peer/disconnect", { key: connection.their_key, body: {} }).catch(() => {});
   // The owner's copies of what they said on that site (comments_elsewhere) stay: they're theirs.
   await db.batch([
+    ...friendGone(db, connection.id), // first: it reads who they were
     db.prepare("DELETE FROM connections WHERE id = ?").bind(connection.id),
     db.prepare("DELETE FROM friend_links WHERE connection_id = ?").bind(connection.id),
     db.prepare("DELETE FROM introductions WHERE connection_id = ? OR origin = ?").bind(connection.id, connection.origin),
     // Someone the owner removed can't ask again without a link (the owner still can).
     db.prepare("INSERT OR REPLACE INTO declined_asks (origin, declined_at) VALUES (?, ?)").bind(connection.origin, now()),
-    ...friendGone(db, connection.id),
   ]);
 }
 

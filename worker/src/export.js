@@ -51,6 +51,9 @@ export const TABLES = {
   // and sent to friends' posts, and their identity (public anyway). No private keys: those never leave a device or site.
   items: { columns: "*" },
   item_photos: { columns: "*" },
+  // Who's invited to the owner's signed events, and whose invitation was taken back (step 4d).
+  item_guests: { columns: "*" },
+  item_uninvited: { columns: "*" },
   lists: { columns: "*" },
   list_pages: { columns: "*" },
   sent: { columns: "*" },

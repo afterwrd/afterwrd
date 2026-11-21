@@ -90,9 +90,9 @@ form.addEventListener("submit", async (event) => {
     status.textContent = "Posting…";
     // Who it mentions, as picked (ui/mentions.js): the site keeps those whose @name is still in the words.
     const mentions = /** @type {HTMLInputElement | null} */ (form.querySelector("input[name=mentions]"))?.value ?? null;
-    if (ACTION === "/_admin/posts" && !question) {
-      // afterwrd 2: the owner's own post is a record signed here, with this browser's key (src/items.js). (Polls and
-      // groups follow in later steps.)
+    if (ACTION === "/_admin/posts") {
+      // afterwrd 2: the owner's own post (and any poll in it) is a record signed here, with this browser's key
+      // (src/items.js). (Groups follow in a later step.)
       const [{ makeRecord, pickedMentions }, { savedKey }, { CANT_SIGN }] = await Promise.all([import("./records.js"), import("./browserkey.js"), import("./ui/sign.js")]);
       const key = await savedKey();
       if (!key?.person || key.expires < Date.now() / 1000) throw new Error(CANT_SIGN);
@@ -104,8 +104,11 @@ form.addEventListener("submit", async (event) => {
       const listed = photos.map((p, i) => ({ item: madePhotos[i].fp, ...Object.fromEntries(fields.map((f) => [f, p[f]])) }));
       // Who it mentions: in the record by identity, and named in its content.
       const picked = pickedMentions(text, mentions);
+      // A poll, as the site keeps one (polls.js readPoll): its options tidied, one choice or several, when it closes.
+      const poll = question && { options: question.options.map((o) => o.replace(/\s+/g, " ").trim()).filter(Boolean),
+        multiple: question.multiple ? 1 : 0, closes_at: question.closes_at ?? null };
       const made = await makeRecord({ ...own, ...(picked.mentions.length && { mentions: picked.mentions }) },
-        { type: "post", text, photos: listed, ...(picked.shown.length && { mentions: picked.shown }) }, key);
+        { type: "post", text, photos: listed, ...(poll && { poll }), ...(picked.shown.length && { mentions: picked.shown }) }, key);
       await call("/_admin/items", { sent: made.sent, photos: madePhotos.map((m) => m.sent) });
     } else {
       await call(ACTION, { text, photos, ...(question && { poll: question }), ...(mentions && { mentions }) });

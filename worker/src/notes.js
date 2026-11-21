@@ -29,6 +29,7 @@ import { outbox } from "./outbox.js";
 import { notifyLater } from "./push.js";
 import { checkRecord } from "./records.js";
 import { json, now } from "./util.js";
+import { cleanEvent, eventChanged, eventWhen } from "./calendar.js";
 import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 
@@ -42,9 +43,34 @@ const snippet = (text, size = SNIPPET) => (typeof text === "string" ? text.repla
 
 // --- sending ----------------------------------------------------------------------------------------------------------
 
-/** Tells every friend about the owner's new post `id`, a batch at a time (the Outbox). `origin`: this site. */
+/**
+ * Tells every friend about the owner's new post `id`, a batch at a time (the Outbox), or, for an event, those invited.
+ * `origin`: this site.
+ */
 export async function queueItemNote(env, origin, id) {
+  const row = await env.DB.prepare("SELECT audience FROM items WHERE id = ?").bind(id).first();
+  if (row?.audience === "invited") {
+    const { results } = await env.DB.prepare("SELECT connection_id FROM item_guests WHERE item = ? ORDER BY connection_id").bind(id).all();
+    if (results.length) await outbox(env).sendNote({ origin, kind: "item", item: id, recipients: results.map((r) => Number(r.connection_id)) });
+    return;
+  }
   await outbox(env).sendNote({ origin, kind: "item", item: id, audience: "friends" });
+}
+
+/**
+ * After the owner changes their event `id` (`fp`: the change; none when it's been deleted): those just invited are sent
+ * it (`added`), those whose invitation was taken back are told it's gone (`removed`, with `cancelled` if it was still
+ * to come and they're to hear it's off), and everyone else invited is sent the change, which updates their copy (their
+ * site decides whether to tell them).
+ */
+export async function queueChangeNotes(env, origin, id, fp, { added = [], removed = [], cancelled = false } = {}) {
+  const box = outbox(env);
+  if (added.length) await box.sendNote({ origin, kind: "item", item: id, recipients: added });
+  if (removed.length) await box.sendNote({ origin, kind: cancelled ? "gone-off" : "gone", item: id, recipients: removed });
+  if (!fp) return;
+  const { results } = await env.DB.prepare("SELECT connection_id FROM item_guests WHERE item = ? ORDER BY connection_id").bind(id).all();
+  const rest = results.map((r) => Number(r.connection_id)).filter((c) => !added.includes(c));
+  if (rest.length) await box.sendNote({ origin, kind: "change", item: id, fp, recipients: rest });
 }
 
 /**
@@ -75,6 +101,11 @@ const keyOfRecord = (sent) => (typeof sent?.record === "string" ? parseRecord(fr
  */
 export async function noteFor(env, note, connection) {
   const db = env.DB;
+  if (note.kind === "gone" || note.kind === "gone-off") return { v: 2, kind: "gone", item: note.item, cancelled: note.kind === "gone-off" };
+  // An event's notes go only to those still invited when they're sent.
+  const invited = await db.prepare("SELECT audience FROM items WHERE id = ?").bind(note.item).first();
+  if (invited?.audience === "invited"
+    && !(await db.prepare("SELECT 1 FROM item_guests WHERE item = ? AND connection_id = ?").bind(note.item, connection.id).first())) return null;
   if (note.kind === "item") {
     const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
       WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
@@ -92,7 +123,7 @@ export async function noteFor(env, note, connection) {
   // A photo in a post: which post, and where in it, so the note can say where to look.
   const photo = await db.prepare("SELECT post, position FROM item_photos WHERE photo = ?").bind(note.item).first();
   return {
-    v: 2, kind: "comment", item: note.item,
+    v: 2, kind: note.kind === "change" ? "change" : "comment", item: note.item,
     ...(photo && { photo: { post: String(photo.post), index: Number(photo.position) + 1 } }),
     entry: { n: entry.n, fp: entry.fp, taken: entry.taken, prev: at > 0 ? entries[at - 1].head : "", sent: entry.sent },
     receipt, delegations: await delegationsFor(db, [record.key]), people: await peopleFor(db, [record.author]),
@@ -135,7 +166,8 @@ export async function receiveNotes(request, env, url, work) {
   const me = await ownHost(env);
   if (!me || note?.v !== 2) return json({ error: "That didn't work." }, 400);
   if (note.kind === "item") return receiveItem(env, url, work, caller, me, note);
-  if (note.kind === "comment") return receiveComment(env, url, work, caller, me, note);
+  if (note.kind === "comment" || note.kind === "change") return receiveComment(env, url, work, caller, me, note);
+  if (note.kind === "gone") return receiveGone(env, url, work, caller, me, note);
   return json({ error: "That didn't work." }, 400);
 }
 
@@ -145,6 +177,15 @@ async function receiveItem(env, url, work, { connection, person }, me, note) {
   await kept.statement.run();
   const id = String(note.item.id);
   const name = String(connection.name);
+  // An invitation to their event: on Notifications and the owner's phones, as before.
+  if (kept.content.event) {
+    const words = eventWords(kept.content.event);
+    if (await keepNotice(env.DB, { kind: "invite", fp: id, connection: connection.id, item: id, target: id, actor: name, text: words })) {
+      notifyLater(env, url.origin, work, { title: name, text: `Invited you: ${words}`, hidden: "Invited you to an event",
+        url: `/friend/${connection.id}/posts/${id}`, tag: `event-${connection.id}-${id}` });
+    }
+    return json({ ok: true }, 202);
+  }
   const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
   await keepNotice(env.DB, { kind: "post", fp: id, connection: connection.id, item: id, target: id, actor: name, text });
   if ((kept.record.mentions ?? []).includes(me.person)
@@ -176,9 +217,10 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
     if (profile) name = profile.name;
   }
   const got = await checkRecord(entry.sent, { identityOf: (p) => identityState(env, p), delegationOf: async (key) => note.delegations?.[key] ?? null, at: entry.taken });
-  if (!got || got.fp !== entry.fp || got.record.kind !== "comment" || got.record.host !== person || got.record.item !== item) {
+  if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== person || got.record.item !== item) {
     return json({ error: "That comment doesn't check." }, 400);
   }
+  if (note.kind === "change") return receiveChange(env, url, work, { connection, person }, me, got, entry);
   const author = got.record.author;
   if (author === me.person) return json({ ok: true }, 202); // the owner's own comment
   const mentioned = (got.record.mentions ?? []).includes(me.person);
@@ -216,3 +258,62 @@ export async function noticeOwn(env, origin, work, { item, record, content, fp, 
   }
 }
 
+
+/** An event's title, when, and where: what a note about it says. */
+const eventWords = (e) => `${e.title} · ${eventWhen(e)}${e.place ? ` · ${e.place}` : ""}`.slice(0, 400);
+
+/**
+ * The owner of a friend's event changed it (its signed `change`, checked by receiveComment): the copy here is brought up
+ * to date, and, if it moved or was called off and the owner here hasn't said no, they're told, as before.
+ */
+async function receiveChange(env, url, work, { connection, person }, me, got, entry) {
+  const id = got.record.item;
+  if (got.record.author !== person) return json({ error: "That isn't theirs to change." }, 400);
+  const copy = await env.DB.prepare("SELECT content, tally FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id).first();
+  if (!copy) return json({ ok: true }, 202);
+  const was = JSON.parse(String(copy.content));
+  const event = cleanEvent(got.content?.event);
+  if (!was.event || !event) return json({ error: "That isn't a change to an event." }, 400);
+  const cancelled = Boolean(event.cancelled) && !was.event.cancelled;
+  const moved = eventChanged(was.event, event);
+  const now_ = { ...was, event: { ...event, ...(event.cancelled ? { cancelled_at: was.event.cancelled_at ?? entry.taken } : {}) },
+    ...(typeof got.content.text === "string" ? { text: got.content.text.slice(0, 5000) } : {}) };
+  await env.DB.prepare("UPDATE copies SET content = ?, changed_at = ? WHERE id = ? AND connection_id = ?")
+    .bind(JSON.stringify(now_), entry.taken, id, connection.id).run();
+  const mine = JSON.parse(String(copy.tally ?? "{}"))?.answers?.[me.person]?.answer ?? null;
+  if ((moved || cancelled) && mine !== "no") {
+    const kind = cancelled ? "cancelled" : "changed";
+    const words = eventWords(now_.event);
+    if (await keepNotice(env.DB, { kind, fp: entry.fp, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })) {
+      notifyLater(env, url.origin, work, { title: String(connection.name), text: `${cancelled ? "Called off" : "Changed"}: ${words}`,
+        hidden: cancelled ? "Called off an event you were invited to" : "Changed an event you're invited to",
+        url: `/friend/${connection.id}/posts/${id}`, tag: `event-${connection.id}-${id}` });
+    }
+  }
+  return json({ ok: true }, 202);
+}
+
+/**
+ * A friend's site saying the owner here may no longer see its post `item` (an invitation taken back, or the event
+ * deleted): the copy goes, and what Notifications said about it, quietly; or, for an event still to come that's been
+ * deleted (`cancelled`), they're told it's off, unless they'd said no.
+ */
+async function receiveGone(env, url, work, { connection }, me, note) {
+  const id = String(note.item ?? "");
+  if (!ID_RE.test(id)) return json({ error: "That didn't work." }, 400);
+  const copy = await env.DB.prepare("SELECT content, tally FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id).first();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id),
+    env.DB.prepare("DELETE FROM notices WHERE item = ? AND connection_id = ?").bind(id, connection.id),
+  ]);
+  const was = copy && JSON.parse(String(copy.content));
+  const mine = copy && JSON.parse(String(copy.tally ?? "{}"))?.answers?.[me.person]?.answer;
+  if (note.cancelled === true && was?.event && !was.event.cancelled && mine !== "no") {
+    const words = eventWords(was.event);
+    if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })) {
+      notifyLater(env, url.origin, work, { title: String(connection.name), text: `Called off: ${words}`, hidden: "Called off an event you were invited to",
+        url: `/friend/${connection.id}/posts`, tag: `event-${connection.id}-${id}` });
+    }
+  }
+  return json({ ok: true }, 202);
+}

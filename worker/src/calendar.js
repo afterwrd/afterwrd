@@ -169,6 +169,20 @@ export function parseEvent(o) {
   return event;
 }
 
+/** The fields of a signed event (afterwrd 2: itemkinds.js), as its content holds them. */
+export const EVENT_FIELDS = ["title", "starts_at", "ends_at", "all_day", "time_zone", "place"];
+
+/**
+ * A signed event's details (its content's `event`) if they're exactly as this site would have made them from the form
+ * (readEventForm): a one-off event, nothing extra. null if not.
+ */
+export function cleanEvent(e) {
+  if (!e || typeof e !== "object" || Array.isArray(e) || Object.keys(e).some((k) => !EVENT_FIELDS.includes(k) && k !== "cancelled")) return null;
+  const parsed = parseEvent(eventObject({ ...e, all_day: e.all_day === 1, rrule: null, cancelled_at: null }));
+  if (!parsed || e.all_day !== parsed.all_day || (e.cancelled !== undefined && e.cancelled !== true)) return null;
+  return EVENT_FIELDS.every((k) => (e[k] ?? null) === (parsed[k] ?? null)) ? e : null;
+}
+
 /** Whether two events differ in anything someone going would want to hear about (not the words about it). */
 export const eventChanged = (a, b) => ["title", "starts_at", "ends_at", "all_day", "time_zone", "place", "rrule"].some((k) => (a[k] ?? null) !== (b[k] ?? null));
 

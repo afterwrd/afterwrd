@@ -614,7 +614,10 @@ const ask = async (since) => {
 };
 const tick = () => new Promise((r) => setTimeout(r, 1100)); // what's changed is told to the second
 check("Ann's site keeps what Bob's posts are copied as of", asOf() > 0, String(asOf()));
-let since = asOf();
+// A change in the very second Ann's site last asked is sent again once that second is over (friendhost.js): so ask
+// once more after it, and go on from what that says.
+await tick();
+let since = (await ask(asOf())).until;
 const nothing = await ask(since);
 check("…asked again, Bob's site has nothing new", nothing.items?.length === 0 && nothing.gone?.length === 0 && nothing.until === since, JSON.stringify(nothing).slice(0, 160));
 await tick();

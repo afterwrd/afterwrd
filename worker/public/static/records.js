@@ -12,13 +12,16 @@
 //   about                   for edit, delete, remove: the record it acts on
 //   version                 for vote and answer: the fingerprint of the item's version they answer
 //   mentions                person ids it mentions
+//   audience                for item and change: who it's for, {kind: "invited", fp} (an event's guests: audienceOf),
+//                           never the list itself; none for everyone the writer's friends with
 //   body                    SHA-256 of a 16-byte salt then the content: the content itself travels beside the
 //                           record, so it can be thrown away for good while the signature still checks
 //   at                      when the writer says they wrote it (shown nowhere: hosts' "taken at" times are)
 // A record's fingerprint (fingerprintOf("record", bytes)) is its id: the same bytes sent twice are the same record.
-import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url, signAs } from "./signed.js";
+import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url, signAs, utf8 } from "./signed.js";
 
-export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove"]);
+// `end`: a poll's owner ending its voting (comments carry on); `close` closes a whole item.
+export const KINDS = /** @type {const} */ (["item", "change", "comment", "edit", "delete", "vote", "answer", "close", "remove", "end"]);
 /** Kinds that carry content (and so a body). */
 export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote", "answer"]);
 /** Kinds that act on another record (about). */
@@ -71,6 +74,7 @@ export function parseRecord(bytes) {
   if (ABOUT.has(r.kind) !== ID_RE.test(r.about ?? "")) return null;
   if (VERSIONED.has(r.kind) !== ID_RE.test(r.version ?? "")) return null;
   if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
+  if (r.audience !== undefined && (!["item", "change"].includes(r.kind) || r.audience?.kind !== "invited" || !ID_RE.test(r.audience.fp ?? ""))) return null;
   return r;
 }
 
@@ -123,3 +127,10 @@ export function says(text, name) {
   }
   return false;
 }
+
+/**
+ * The salted fingerprint of an audience: who an event is for (their person ids), as its records carry it. The salt
+ * (base64url, 16 random bytes) stays with the host, so nobody reading the record can work out who else is invited.
+ * @param {string} salt @param {string[]} people
+ */
+export const audienceOf = (salt, people) => fingerprintOf("audience", concat(fromB64url(salt), utf8([...new Set(people)].sort().join("\n"))));

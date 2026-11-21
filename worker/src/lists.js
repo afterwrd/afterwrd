@@ -58,6 +58,7 @@ export class Rules {
     this.chainOf = new Map(); // author -> Set of fps in their chain of prev (their own records, gone ones included)
     this.count = new Map(); // author -> entries
     this.closed = false;
+    this.ended = false; // a poll's voting, ended by its owner (`end`)
     this.n = 0;
   }
 
@@ -78,7 +79,12 @@ export class Rules {
     if (record.item !== this.list) return "That belongs to something else.";
     if (this.closed && record.kind !== "remove") return "This is closed.";
     // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
-    if (!byHost && record.kind !== "delete" && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) return "That's as many as anyone can add here.";
+    // Not the item's owner's changes (inviting people to an event one by one, say, mustn't run out); their words and
+    // comments are held to it like anyone's.
+    if (!byHost && record.kind !== "delete" && !(record.kind === "change" && record.author === this.owner)
+      && (this.count.get(record.author) ?? 0) >= PER_AUTHOR) {
+      return "That's as many as anyone can add here.";
+    }
     // seen: a real point in this list, before this entry.
     const seen = record.seen;
     if (!seen || seen.n >= n || (seen.n >= checkpointed && this.heads.get(seen.n) !== seen.h)) return "That says it saw something this list never was.";
@@ -110,6 +116,9 @@ export class Rules {
     }
     if (record.kind === "close" && !byHost && record.author !== this.owner && record.author !== this.host) return "Only its owner can close it.";
     if (record.kind === "change" && record.author !== this.owner) return "Only its owner can change it.";
+    // A poll's voting ends once, by its owner; then no more votes (comments carry on).
+    if (record.kind === "end" && (record.author !== this.owner || this.ended)) return this.ended ? "That's already ended." : "Only its owner can end it.";
+    if (record.kind === "vote" && this.ended) return "That poll has closed.";
     return null;
   }
 
@@ -133,6 +142,7 @@ export class Rules {
       this.chainOf.set(author, chain);
     }
     if (record?.kind === "close") this.closed = true;
+    if (record?.kind === "end") this.ended = true;
     return head;
   }
 

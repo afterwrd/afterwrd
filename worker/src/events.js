@@ -47,6 +47,14 @@ const APPROVED = (c = "") => `${c}connected_at IS NOT NULL AND ${c}approved_at I
  * copy of their posts Home shows (feed.js), and their notes (notify.js).
  */
 export const friendGone = (db, connectionId) => [
+  // afterwrd 2: their answers on the owner's signed events, their invitations, their posts kept here, and notices.
+  db.prepare(`UPDATE items SET tally = json_remove(tally, '$.answers."' || (SELECT identity FROM connections WHERE id = ?1) || '"')
+    WHERE audience = 'invited' AND tally IS NOT NULL AND id IN (SELECT item FROM item_guests WHERE connection_id = ?1)
+    AND (SELECT identity FROM connections WHERE id = ?1) IS NOT NULL`).bind(connectionId),
+  db.prepare("DELETE FROM item_guests WHERE connection_id = ?").bind(connectionId),
+  db.prepare("DELETE FROM item_uninvited WHERE connection_id = ?").bind(connectionId),
+  db.prepare("DELETE FROM copies WHERE connection_id = ?").bind(connectionId),
+  db.prepare("DELETE FROM notices WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM friend_posts WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM inbox WHERE connection_id = ?").bind(connectionId),
   db.prepare("DELETE FROM post_audience WHERE connection_id = ?").bind(connectionId),
@@ -307,6 +315,7 @@ export async function answerFromFriend(db, postId, peer, answer) {
 export async function handleEvents(request, env, url) {
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   const form = await request.formData().catch(() => new FormData());
+  if (url.pathname === "/_admin/events/read") return readForSigning(env, form, request.cf?.timezone);
   const back = new URL(safeNext(String(form.get("back") ?? "/events"), url), url.origin);
   const guests = form.getAll("guest").map(String);
   try {
@@ -332,6 +341,64 @@ export async function handleEvents(request, env, url) {
     if (error instanceof Refusal) {
       return html(messagePage(error.message, { href: back.pathname + back.search, label: "Go back" }), error.status);
     }
+    throw error;
+  }
+}
+
+/**
+ * POST /_admin/events/read (afterwrd 2: signed events, itemkinds.js): what the owner's browser is to sign for one of the
+ * event forms, worked out here exactly as the site will check it. `op`: new (the form), change (the form, for `item`),
+ * cancel, invite (`guest`… more) or uninvite (`guest`) on `item`. Answers {event, text, guests?: [{id, person}]} (guests
+ * only when who's invited changes), or {error}.
+ */
+async function readForSigning(env, form, zone) {
+  const db = env.DB;
+  const op = String(form.get("op") ?? "");
+  const fail = (error) => Response.json({ error }, { status: 400 });
+  const plain = ({ title, starts_at, ends_at, all_day, time_zone, place }) => ({ title, starts_at, ends_at, all_day, time_zone, place });
+  const words = (value) => {
+    const text = typeof value === "string" ? value.replace(/\r\n?/g, "\n").trim() : "";
+    return text.length > MAX_POST_TEXT ? null : text;
+  };
+  // Friends with an identity, as invitations name them; anyone without one can't be invited to a signed event yet.
+  const people = async (ids) => {
+    const list = [...new Set(ids.map(Number).filter((n) => Number.isSafeInteger(n) && n > 0))];
+    if (list.length > MAX_GUESTS) throw new Refusal(`You can invite up to ${MAX_GUESTS} friends to an event.`);
+    const { results } = list.length ? await db.prepare(`SELECT id, name, identity FROM connections WHERE ${APPROVED()} AND id IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(list)).all() : { results: [] };
+    const missing = results.find((r) => !r.identity);
+    if (missing) throw new Refusal(`${missing.name}'s site needs updating before they can be invited.`);
+    return results.map((r) => ({ id: Number(r.id), person: String(r.identity) }));
+  };
+  try {
+    if (op === "new") {
+      const read = readEventForm(form, zone);
+      if (read.error) return fail(read.error);
+      if (finishedAt(read.event) <= now()) return fail("That's already over: pick a time still to come.");
+      const text = words(form.get("text"));
+      if (text === null) return fail(`The words about it can be up to ${MAX_POST_TEXT} characters.`);
+      return Response.json({ event: plain(read.event), text, guests: await people(form.getAll("guest").map(String)) });
+    }
+    const item = await db.prepare("SELECT content FROM items WHERE id = ? AND audience = 'invited'").bind(String(form.get("item") ?? "")).first();
+    if (!item) return fail("That event isn't there any more.");
+    const content = JSON.parse(String(item.content));
+    const was = plain(content.event);
+    if (op === "change") {
+      const read = readEventForm(form, zone);
+      if (read.error) return fail(read.error);
+      const text = words(form.get("text"));
+      if (text === null) return fail(`The words about it can be up to ${MAX_POST_TEXT} characters.`);
+      return Response.json({ event: plain(read.event), text });
+    }
+    if (op === "cancel") return Response.json({ event: { ...was, cancelled: true }, text: content.text ?? "" });
+    const { results } = await db.prepare("SELECT connection_id FROM item_guests WHERE item = ?").bind(String(form.get("item"))).all();
+    const now_ = results.map((r) => Number(r.connection_id));
+    const picked = form.getAll("guest").map(Number);
+    const ids = op === "invite" ? [...now_, ...picked] : op === "uninvite" ? now_.filter((c) => !picked.includes(c)) : null;
+    if (!ids) return fail("That didn't work.");
+    return Response.json({ event: was, text: content.text ?? "", guests: await people(ids) });
+  } catch (error) {
+    if (error instanceof Refusal) return fail(error.message);
     throw error;
   }
 }

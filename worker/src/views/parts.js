@@ -157,7 +157,9 @@ export function ownerFace(ctx) {
  * several, ticks and Save). `action` takes the answer, with `hidden` fields; `closeAction`, for whoever asked, closes
  * it. Who chose what shows only where the poll says (to whoever asked), folded away.
  */
-export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = null, whoNote = "Only you can see this.", whoLink = null }) {
+export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = null, whoNote = "Only you can see this.", whoLink = null,
+  sign = "", closeSign = "" }) {
+  // `sign` and `closeSign` (afterwrd 2: views/items.js): a signed poll's forms' data-sign-* attributes (ui/sign.js).
   const back = ctx.url.pathname + ctx.url.search;
   const share = (o) => (poll.voters ? Math.round((o.count / poll.voters) * 100) : 0);
   const facts = [
@@ -173,19 +175,19 @@ export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = nu
   if (!poll.open) {
     options = poll.options.map((o) => html`<div class="poll-option${o.chosen ? " chosen" : ""}" style="--share: ${share(o)}%">${inside(o)}</div>`);
   } else if (poll.multiple) {
-    options = html`<form method="post" action="${action}" class="poll-form" data-inplace>${fields}
+    options = html`<form method="post" action="${action}" class="poll-form" data-inplace${raw(sign)}>${fields}
       ${poll.options.map((o, i) => html`<label class="poll-option${o.chosen ? " chosen" : ""}" style="--share: ${share(o)}%">
         <input type="checkbox" name="choice" value="${i}" ${o.chosen && "checked"}>${inside(o)}</label>`)}
       <button class="chip">${poll.answered ? "Change my answer" : "Answer"}</button>
     </form>`;
   } else {
-    options = html`<form method="post" action="${action}" class="poll-form" data-inplace>${fields}
+    options = html`<form method="post" action="${action}" class="poll-form" data-inplace${raw(sign)}>${fields}
       ${poll.options.map((o, i) => html`<button class="poll-option${o.chosen ? " chosen" : ""}" style="--share: ${share(o)}%"
         name="choice" value="${i}" aria-pressed="${o.chosen ? "true" : "false"}">${inside(o)}</button>`)}
     </form>`;
   }
   const named = poll.options.some((o) => o.voters?.length);
-  const who = (v) => (!v.from || v.from === ctx.url.origin ? "You" : v.name);
+  const who = (v) => (v.me !== undefined ? v.name : !v.from || v.from === ctx.url.origin ? "You" : v.name);
   return html`<div class="poll" id="${id}">
   ${options}
   <p class="meta">${facts}</p>
@@ -193,7 +195,7 @@ export function pollBlock(ctx, poll, { id, action, hidden = {}, closeAction = nu
     <p class="meta">${whoNote}</p>
     <dl>${poll.options.filter((o) => o.voters?.length).map((o) => html`<dt>${o.name}</dt><dd>${o.voters.map(who).join(", ")}</dd>`)}</dl>
   </details>` : whoLink && poll.voters > 0 && html`<p class="meta"><a href="${whoLink}">See who chose what</a></p>`}
-  ${closeAction && poll.open && html`<form method="post" action="${closeAction}" data-inplace data-confirm="Close this poll? Nobody will be able to answer any more." data-confirm-ok="Close it">
+  ${closeAction && poll.open && html`<form method="post" action="${closeAction}" data-inplace data-confirm="Close this poll? Nobody will be able to answer any more." data-confirm-ok="Close it"${raw(closeSign)}>
     <input type="hidden" name="back" value="${back}"><button class="chip">Close poll</button></form>`}
 </div>`;
 }

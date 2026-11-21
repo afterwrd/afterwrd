@@ -177,10 +177,10 @@ export async function handlePeer(request, env, url, work) {
   if (route === "POST /_peer/disconnect") {
     // The owner's copies of what they said on that site (comments_elsewhere) stay: they're theirs.
     await db.batch([
+      ...friendGone(db, peer.id), // first: it reads who they were
       db.prepare("DELETE FROM connections WHERE id = ?").bind(peer.id),
       db.prepare("DELETE FROM friend_links WHERE connection_id = ?").bind(peer.id),
       db.prepare("DELETE FROM introductions WHERE connection_id = ?").bind(peer.id),
-      ...friendGone(db, peer.id),
     ]);
     return json({ ok: true });
   }

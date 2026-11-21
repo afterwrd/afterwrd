@@ -317,13 +317,17 @@ export class Outbox extends DurableObject {
     const { results } = await this.env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
       AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
     const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
+    // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
+    const deliveries = [];
     await Promise.all(calls.map(async ({ note, connection, retry }) => {
       const friend = friends.get(connection);
       let again = false;
+      let delivered = false;
       if (friend) {
         try {
           const body = await noteFor(this.env, note, friend);
           if (body) await callFriend(this.env, String(note.origin), String(friend.origin), "/_p/notes", { body, timeout: TIMEOUT_MS });
+          delivered = Boolean(body);
         } catch (error) {
           // Not reached, or busy: tried again later. Anything else won't change by asking again.
           const status = /** @type {any} */ (error).status;
@@ -331,6 +335,10 @@ export class Outbox extends DurableObject {
         }
       }
       const tries = retry ? Number(retry.tries) + 1 : 0;
+      if (note.kind === "item" && note.recipients && friend && (delivered || !again || tries >= NOTE_RETRY_SECONDS.length)) {
+        deliveries.push(this.env.DB.prepare("UPDATE item_guests SET delivery = ? WHERE item = ? AND connection_id = ?")
+          .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.item, connection));
+      }
       if (!again || tries >= NOTE_RETRY_SECONDS.length) {
         if (retry) this.sql.exec("DELETE FROM note_retries WHERE id = ?", retry.id);
       } else if (retry) {
@@ -339,6 +347,7 @@ export class Outbox extends DurableObject {
         this.sql.exec("INSERT INTO note_retries (note, connection_id, tries, due) VALUES (?, ?, 0, ?)", note.id, connection, at + NOTE_RETRY_SECONDS[0] * 1000);
       }
     }));
+    if (deliveries.length) await this.env.DB.batch(deliveries);
     // A note sent to everyone, with nobody left to try again, is done with.
     this.sql.exec(`DELETE FROM fat_notes WHERE due = ? AND NOT EXISTS (SELECT 1 FROM note_retries r WHERE r.note = fat_notes.id)`, DONE);
     return calls.length;

@@ -158,6 +158,25 @@ for (let i = 1; i <= PER_AUTHOR + 1 && !refusedAt; i++) {
 check(`one person can add ${PER_AUTHOR} entries to an item, not more`, refusedAt === PER_AUTHOR + 1, `refused at ${refusedAt}`);
 const lastOfBob = writes.get(mineOn(capped, bob));
 check("…but can always delete what's theirs, even then", !(await writeAndTake(bob, capped, { kind: "delete", about: lastOfBob }, undefined)).refused);
+writes.set(mineOn(capped, ann), capped.list);
+let ownRefused = null;
+for (let i = 1; i <= PER_AUTHOR + 2 && !ownRefused; i++) ownRefused = (await writeAndTake(ann, capped, { kind: "change" }, { text: `Cap ${i}` })).refused ?? null;
+check("…while the item's owner isn't held to it for changes to their own item", ownRefused === null, ownRefused);
+check("…though their comments are", (await writeAndTake(ann, capped, { kind: "comment" }, { text: "One more" })).refused === "That's as many as anyone can add here.");
+
+// --- a poll's voting ending (comments carry on) -------------------------------------------------------------------------
+
+const poll = new Host(ann);
+const asked = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Hills or canal?", poll: { options: ["Hills", "Canal"], multiple: 0 } }, ann.browser);
+await poll.take(asked.sent);
+writes.set(mineOn(poll, ann), asked.fp);
+check("a vote is taken", !(await writeAndTake(bob, poll, { kind: "vote", version: asked.fp }, { choices: [0] })).refused);
+check("only the poll's owner can end it", (await writeAndTake(bob, poll, { kind: "end" }, undefined)).refused === "Only its owner can end it.");
+check("…which she does", !(await writeAndTake(ann, poll, { kind: "end" }, undefined)).refused);
+check("then no more votes", (await writeAndTake(cat, poll, { kind: "vote", version: asked.fp }, { choices: [1] })).refused === "That poll has closed.");
+check("…but comments carry on", !(await writeAndTake(cat, poll, { kind: "comment" }, { text: "Too late!" })).refused);
+check("…and it can't end twice", (await writeAndTake(ann, poll, { kind: "end" }, undefined)).refused === "That's already ended.");
+check("readers check it the same way", !(await read(poll)).problem);
 
 // --- deleting, removing, closing --------------------------------------------------------------------------------------
 

@@ -60,9 +60,25 @@ export async function itemForFriend(env, origin, r, connectionId) {
   const content = JSON.parse(String(r.content));
   const photos = await Promise.all((content.photos ?? []).map(async (p) => ({ ...p,
     src: await signedFile(env, origin, p.hash, { friend: connectionId }), thumbSrc: await signedFile(env, origin, p.thumb_hash, { friend: connectionId }) })));
+  // A poll's votes or an event's answers, as this site counts them (the reader counts again when it opens one), and how
+  // many are invited to an event.
+  const tally = r.tally ? JSON.parse(String(r.tally)) : null;
+  const invited = r.audience === "invited"
+    ? Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM item_guests WHERE item = ?").bind(String(r.id)).first())?.n ?? 0) : null;
   return { id: String(r.id), sent: first.sent, taken: first.taken, content: { ...content, photos },
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], edited_at: r.edited_at, comments: Number(r.comments),
-    changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) } };
+    changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) },
+    ...(tally && { tally: { ...tally, ...(invited !== null && { invited }) } }), ...(r.version && { version: String(r.version) }) };
+}
+
+/** SQL: item `i` may be seen by friend ?1 (a connection id): everyone's, or an event they're invited to. */
+const SEES = (i = "i") => `(${i}.audience = 'friends' OR EXISTS (SELECT 1 FROM item_guests g WHERE g.item = ${i}.id AND g.connection_id = ?1))`;
+
+/** Whether friend `connectionId` may see item `id` (a post or photo here: a photo goes by the post it's in). */
+export async function mayCallerSee(db, id, connectionId) {
+  const row = await db.prepare(`SELECT 1 FROM items i WHERE i.id = COALESCE((SELECT post FROM item_photos WHERE photo = ?2), ?2) AND ${SEES()}`)
+    .bind(connectionId, id).first();
+  return Boolean(row);
 }
 
 export const keyOf = (sent) => parseRecord(fromB64url(sent.record))?.key;
@@ -75,16 +91,22 @@ export async function handleFriendItems(request, env, url, work) {
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
     const { results } = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
-      WHERE i.type = 'post' AND i.changed_at > ? ORDER BY i.changed_at LIMIT ?`).bind(since, PAGE + 1).all();
+      WHERE i.type = 'post' AND i.changed_at > ?2 AND ${SEES()} ORDER BY i.changed_at LIMIT ?3`).bind(caller.connection.id, since, PAGE + 1).all();
     const more = results.length > PAGE;
     const rows = results.slice(0, PAGE);
-    const { results: gone } = await db.prepare("SELECT id FROM lists WHERE deleted_at > ?").bind(since).all();
+    // Deleted since, and events this friend's invitation to was taken back from (nobody else learns they exist).
+    const { results: gone } = await db.prepare(`SELECT id FROM lists WHERE deleted_at > ?2
+      UNION SELECT item FROM item_uninvited WHERE connection_id = ?1 AND at > ?2`).bind(caller.connection.id, since).all();
     const items = await Promise.all(rows.map((r) => itemForFriend(env, url.origin, r, caller.connection.id)));
-    return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until: rows.at(-1)?.changed_at ?? since, more,
+    // Up to the last change sent, but never this second: something changing later this second would otherwise be
+    // missed (times are to the second), so the next ask covers this second again (taking a copy twice is harmless).
+    const until = more ? Number(rows.at(-1).changed_at) : Math.min(Number(rows.at(-1)?.changed_at ?? since), Math.max(since, now() - 1));
+    return json({ v: 2, items, gone: gone.map((g) => String(g.id)), until, more,
       delegations: await delegationsFor(db, items.map((i) => keyOf(i.sent))) });
   }
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);
   if (request.method === "GET" && one) {
+    if (!(await mayCallerSee(db, one[1], caller.connection.id))) return json({ error: "Not found." }, 404);
     const host = await ownHost(env);
     const list = host && (await readList(db, one[1], { host }));
     if (!list) return json({ error: "Not found." }, 404);
@@ -98,8 +120,9 @@ export async function handleFriendItems(request, env, url, work) {
     try { ({ sent, delegation, profile = null } = JSON.parse(new TextDecoder().decode(body))); } catch {}
     const record = typeof sent?.record === "string" ? parseRecord(fromB64url(sent.record)) : null;
     if (!record || !ID_RE.test(record.item ?? "")) return json({ error: "That didn't work." }, 400);
-    // A site passes on only its own owner's records, allowed by a delegation from their identity.
+    // A site passes on only its own owner's records, allowed by a delegation from their identity, on what they may see.
     if (record.author !== caller.person) return json({ error: "That isn't your site's to send." }, 403);
+    if (!(await mayCallerSee(db, record.item, caller.connection.id))) return json({ error: "That post isn't here any more." }, 404);
     const state = await identityState(env, caller.person);
     const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
     if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return json({ error: "That isn't signed by them." }, 400);

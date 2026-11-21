@@ -419,6 +419,8 @@ function friendActivityItem(c) {
  * own ("own"). `target` is the post, or <post>/photos/<n> for one of its photos.
  */
 function noticeItem(c) {
+  // A friend's invitation to their event, or a change to it (as before: friendEventItem).
+  if (["invite", "changed", "cancelled"].includes(c.kind)) return friendEventItem(c);
   const own = c.source === "own";
   const isPhoto = c.target.includes("/photos/");
   const href = own ? `/posts/${c.target.split("/")[0]}` : `/friend/${c.connection_id}/posts/${c.target}`;

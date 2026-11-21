@@ -56,8 +56,9 @@ const GROUP_THERE = "FROM group_inbox i JOIN groups g ON g.id = i.group_id AND g
 // a repeating group event, when a note's about one date. `mentions`: who a comment here mentions (mentions.js).
 const FRIEND_NOTES = "('comment', 'invite', 'changed', 'cancelled', 'mention')";
 // Signed posts (afterwrd 2: notes.js): comments and mentions on friends' posts the owner's in, and on their own
-// ('own' rows), from friends still here. (A friend's new post is a notice too, but only for the live bar.)
-const NOTICES = "FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL WHERE n.kind IN ('comment', 'mention')";
+// ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new post is a notice too, but only for the live bar.)
+const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
+  WHERE n.kind IN ('comment', 'mention', 'invite', 'changed', 'cancelled')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions

@@ -10,7 +10,18 @@ import { initial } from "./nav.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { friendFace } from "./friends.js";
-import { collage, edited, moreMenu, menuEdit, ownerFace } from "./parts.js";
+import { collage, edited, moreMenu, menuEdit, ownerFace, pollBlock } from "./parts.js";
+import { eventBlock, eventForm, guestPicker } from "./events.js";
+import { eventFormValues, finishedAt } from "../calendar.js";
+
+/**
+ * The data-sign-* attributes for a record of `kind` on item `item`, from where its list is up to (`list`: {host, seen,
+ * mine}), as a string: for a poll's or an event's forms (pollBlock, eventBlock), and the event forms (ui/sign.js).
+ */
+const signAttrs = (kind, list, item, { version = null } = {}) => ` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${list.host}"`
+  + ` data-sign-seen-n="${list.seen.n}" data-sign-seen-h="${list.seen.h}" data-sign-prev="${list.mine ?? ""}"${version ? ` data-sign-version="${version}"` : ""}`;
+
+const PUBLIC_POLL = "Everyone who can see this poll can see who chose what.";
 
 /** The data-sign-* attributes a signed form carries: what its record says besides its words. */
 const signing = (kind, { item, host, seen, prev, about = null }) => raw(` data-sign="${kind}" data-sign-item="${item}" data-sign-host="${host}"`
@@ -74,13 +85,20 @@ export function itemCard(ctx, item, { thread = null, list = item.list ?? null, o
     ${ownerFace(ctx)}
     <span class="what"><strong>You</strong></span>
     <a class="when" href="/posts/${item.id}" title="${fmtDatetime(item.created_at)}"><time>${fmtAgo(item.created_at)}</time></a>
-    ${sign && moreMenu([item.editable && menuEdit(`edit-i-${item.id}`),
+    ${sign && moreMenu([item.editable && !item.event && menuEdit(`edit-i-${item.id}`),
       signedDelete(action, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back, inplace: "remove" })])}
   </header>
   ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
   ${edited(item)}
-  ${sign && item.editable && signedEdit(`edit-i-${item.id}`, `i-${item.id}`, action, item.text, back, MAX_POST_TEXT, sign, { required: !item.media?.length })}
+  ${sign && item.editable && !item.event && signedEdit(`edit-i-${item.id}`, `i-${item.id}`, action, item.text, back, MAX_POST_TEXT, sign,
+    { required: !item.media?.length || Boolean(item.poll) })}
   ${collage(item.media, { back: `${back}#i-${item.id}` })}
+  ${item.poll && pollBlock(ctx, item.poll, { id: `poll-${item.id}`, action, whoNote: PUBLIC_POLL,
+    sign: list ? signAttrs("vote", list, item.id, { version: item.version }) : "", closeAction: list ? action : null, closeSign: list ? signAttrs("end", list, item.id) : "" })}
+  ${item.event && eventBlock(ctx, item.event, { href: `/posts/${item.id}`, full: open, ics: `/posts/${item.id}/event.ics`, edit: `/posts/${item.id}/event`,
+    cancel: list ? action : null, cancelSign: list ? signAttrs("event-cancel", list, item.id) : "",
+    cancelNote: "Call this event off? Everyone invited who hasn't said no will be told.", note: "Your event. Only the people you invite can see it." })}
+  ${item.event && open && list && guestsSigned(ctx, item, list)}
   <details class="comments"${open && raw(" open")} data-thread="/posts/${item.id}">
     <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
     ${thread && list ? itemThread(ctx, item, thread, list) : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
@@ -119,6 +137,10 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
   const c = item.connection;
   const page = `/friend/${c.id}/posts/${item.id}`;
   const n = item.photos.length;
+  // Votes and answers are signed here and passed on by this site (friendcopies.js relayRecord), from where its list is
+  // up to: as its thread was just read, or as its site last sent it.
+  const relay = `/_admin/friend/${c.id}/items/${item.id}/records`;
+  const signing_ = list ?? item.list ?? null;
   // A photo opened from here pages through this post's photos, and ✕ comes back here.
   const stay = `?${new URLSearchParams({ in: "post", back: back ?? `${ctx.url.pathname}${ctx.url.search}#fi${c.id}-${item.id}` })}`;
   return html`<article class="card social from-friend" id="fi${c.id}-${item.id}" data-region="${page}" data-own-page data-who="${c.origin}" data-name="${c.name}">
@@ -133,6 +155,11 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
     ${item.photos.slice(0, 4).map((m, i) => html`<a href="${page}/photos/${i + 1}${stay}" class="tile"><img src="${m.thumbSrc}" alt="" loading="lazy"${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
       ${i === 3 && n > 4 && html`<span class="more">+${n - 4}</span>`}</a>`)}
   </div>`}
+  ${item.poll && pollBlock(ctx, item.poll, { id: `poll-${item.id}`, action: relay, whoNote: PUBLIC_POLL,
+    sign: signing_ ? signAttrs("vote", signing_, item.id, { version: item.version }) : "" })}
+  ${item.event && eventBlock(ctx, item.event, { href: page, full: open, ics: `${page}/event.ics`,
+    answer: signing_ ? { action: relay, sign: signAttrs("answer", signing_, item.id, { version: item.version }) } : null,
+    note: `${c.name}'s event. Only the people ${c.name} invited can see it.` })}
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${page}">
     <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
@@ -187,4 +214,47 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
   });
 </script>`;
   return layout(ctx, { title: c.name, bodyClass: "viewer", main });
+}
+
+/**
+ * On the owner's own event's page (afterwrd 2): who's invited, with their answers and what became of each invitation,
+ * taking one back, and inviting more. Each changes who's invited, so each is signed (ui/sign.js event-uninvite,
+ * event-invite): the event as it is, with a fingerprint of everyone now invited.
+ */
+function guestsSigned(ctx, item, list) {
+  const e = item.event;
+  const back = ctx.url.pathname + ctx.url.search;
+  const over = e.cancelled_at || finishedAt(e) < Date.now() / 1000;
+  const answers = { going: "Going", maybe: "Maybe", no: "Can't go" };
+  const waiting = (g) => (g.delivery === "refused" ? "Their site didn't take the invitation: it may need updating"
+    : g.delivery === "unreachable" ? "Their site couldn't be reached, so they haven't been told" : "Not answered yet");
+  const action = `/_admin/items/${item.id}/records`;
+  return html`<details class="guests" id="guests-${item.id}" open>
+  <summary>Who's invited (${e.guests.length})</summary>
+  ${e.guests.length ? html`<ul class="guest-list">${e.guests.map((g) => html`<li>
+    <span class="name">${g.name}</span> <span class="meta">${g.answer ? answers[g.answer] : waiting(g)}</span>
+    <form method="post" action="${action}" data-inplace${raw(signAttrs("event-uninvite", list, item.id))}
+      data-confirm="Take back ${g.name}'s invitation? They won't see this event any more, and they aren't told." data-confirm-ok="Take it back">
+      <input type="hidden" name="back" value="${back}"><input type="hidden" name="guest" value="${g.id}">
+      <button class="chip">Take back</button></form>
+  </li>`)}</ul>` : html`<p class="meta">Nobody yet.</p>`}
+  ${!over && html`<form method="post" action="${action}" class="stack invite-more"${raw(signAttrs("event-invite", list, item.id))}>
+    <input type="hidden" name="back" value="${back}">
+    ${guestPicker(item.invitable ?? [], { none: e.guests.length ? "You've invited all your friends." : "You have no friends on afterwrd to invite yet." })}
+    ${item.invitable?.length > 0 && html`<div class="actions-row"><button class="chip primary">Invite them</button></div>`}
+  </form>`}
+</details>`;
+}
+
+/** Changing the owner's own event (afterwrd 2): the form, signed as a change (ui/sign.js event-change). */
+export function itemEventEditPage(ctx, { item, list }) {
+  return page(ctx, "Change the event", html`
+<p class="crumbs"><a href="/events">Events</a> /</p>
+<section class="card">
+  <h2>Change the event</h2>
+  <p class="meta">If you change its name, time or place, everyone invited who hasn't said no is told. Its times are in
+  ${item.event.time_zone.replace(/_/g, " ")} time.</p>
+  ${eventForm({ action: `/_admin/items/${item.id}/records`, back: `/posts/${item.id}`, values: eventFormValues(item.event),
+    text: item.text ?? "", submit: "Save", sign: signAttrs("event-change", list, item.id) })}
+</section>`);
 }
