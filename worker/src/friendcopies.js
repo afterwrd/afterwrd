@@ -15,9 +15,9 @@ import { checkReceipts, queueReceipts } from "./receipts.js";
 import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
-import { DATE_RE, parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord, writtenAt } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
-import { itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
+import { frozenUntil, itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
 import { friendsAmong, peopleShown } from "./names.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
 import { ANSWERS, cleanEvent, hasDate } from "./calendar.js";
@@ -200,6 +200,8 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
   // Its words and details as its signed records make them, never as its host says: a friend's site isn't its writer's
   // browser either, and could be taken over or run by a bad release (section 10).
   item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules })) };
+  // When it was written: brought over from afterwrd 1, when it first was (records.js `before`); otherwise when taken.
+  const written = writtenAt(got.record, Number(item.taken));
   // A poll is as its signed first record asked it; an event is as its site says it is now (its changes are signed
   // records too, checked when they're sent as notes or its thread is opened), and only if its first record said it's
   // one: for those invited, from a friend; for every member, in a group.
@@ -212,11 +214,13 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
     photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")),
     ...(Array.isArray(got.content?.mentions) && { mentions: shownMentions(got.record, got.content) }),
     ...(group && got.content?.here === true && { here: true }),
-    ...(got.content?.poll && !pollTrouble(got.content.poll, Number(item.taken)) && { poll: got.content.poll }),
+    ...(got.content?.poll && !pollTrouble(got.content.poll, written) && { poll: got.content.poll }),
     ...(event && { type: "event", event: { ...event, ...(event.cancelled && Number.isSafeInteger(item.content.event.cancelled_at) ? { cancelled_at: item.content.event.cancelled_at } : {}),
       ...(skipped.length && { skipped }) } }),
     // What a vote or answer names now (the item, or the owner's latest change that moved their event).
-    ...(ID_RE.test(item.version ?? "") && { version: item.version }) };
+    ...(ID_RE.test(item.version ?? "") && { version: item.version }),
+    // Brought over from afterwrd 1, and taking no new comments until those from before are in (before.js): its host says.
+    ...(Number.isSafeInteger(item.before_until) && { before_until: item.before_until }) };
   if (got.content?.type === "event" && !event) return null;
   const tally = cleanTally(item.tally);
   const list = Number.isSafeInteger(item.list?.n) && item.list.n >= 1 && ID_RE.test(item.list.head ?? "") ? item.list : null;
@@ -228,7 +232,7 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
     list_n = excluded.list_n, list_head = excluded.list_head
     WHERE copies.connection_id IS excluded.connection_id AND copies.group_id IS excluded.group_id`)
     .bind(item.id, connection, group, got.record.author, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
-      Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, Number(item.taken), Number(item.changed_at) || now(),
+      Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, written, Number(item.changed_at) || now(),
       tally ? JSON.stringify(tally) : null, list?.n ?? null, list?.head ?? null);
   return { statement, record: got.record, content };
 }
@@ -356,7 +360,7 @@ async function copiesShown(db, rows) {
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
   return rows.map((r) => ({ ...copyFromRow(r, { names, me: me ? String(me.person) : null, known }),
     list: r.list_n && me ? { host: String(r.author), me: String(me.person), seen: { n: Number(r.list_n), h: String(r.list_head) },
-      mine: last.get(String(r.id)) ?? null } : null }));
+      mine: last.get(String(r.id)) ?? null, frozenUntil: frozenUntil(JSON.parse(String(r.content)).before_until) } : null }));
 }
 
 export function copyFromRow(r, { names = new Map(), me = null, known = null } = {}) {

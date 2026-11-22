@@ -24,6 +24,8 @@ import { choicesMask } from "./polls.js";
 import { audienceOf } from "../public/static/records.js";
 
 export const ID_RE = /^[A-Za-z0-9_-]{43}$/;
+/** Until when an item brought over from afterwrd 1 takes no new comments (before.js), if that's still to come; else null. */
+export const frozenUntil = (until) => (Number.isSafeInteger(Number(until)) && Number(until) > now() ? Number(until) : null);
 const EDIT_SECONDS = 15 * 60;
 
 /** This site as host: the owner's person id and the hosting key; null before signing is set up. */
@@ -155,7 +157,7 @@ const MAX_HOSTING = 100; // events the owner has coming up
  * audience fingerprint with), checked: approved friends with an identity, no more than MAX_GUESTS, and exactly the
  * people the fingerprint (`fp`) says. Returns [{connection, person}], or a message saying what's wrong.
  */
-async function guestsFor(env, ids, salt, fp) {
+export async function guestsFor(env, ids, salt, fp) {
   const list = Array.isArray(ids) ? [...new Set(ids.map(Number).filter(Number.isSafeInteger))] : [];
   if (list.length > MAX_GUESTS) return `You can invite up to ${MAX_GUESTS} friends to an event.`;
   if (typeof salt !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(salt)) return "That invitation list didn't work. Try again.";
@@ -182,43 +184,59 @@ async function createItem(env, host, sent, photosSent, { guests: guestIds = null
     if (typeof checked === "string") throw new Refusal(checked, 400);
     guests = checked;
   }
+  return takePost(env, host, { sent, post, photosSent, photos, guests });
+}
+
+/**
+ * Takes a post's photos (each an item of its own, first) and then the post, checked already, and writes their rows:
+ * for the composer (createItem), and for posts brought over from afterwrd 1 (before.js: `bringing`, whose records say
+ * when they were first written, `before`). `media`: brought over, the photos' rows already here (media ids, in order),
+ * pointed at their items rather than added again. `frozen`: until when it takes no new comments (hosted.js). Returns
+ * {id, photos (their item ids)}.
+ * @param {Env} env @param {{ person: string, privateKey: CryptoKey }} host
+ * @param {{ sent: any, post: any, photosSent: any[], photos: any[], guests: { connection: number, person: string }[] }} what
+ * @param {{ bringing?: boolean, media?: number[] | null, frozen?: number | null }} [options]
+ */
+export async function takePost(env, host, { sent, post, photosSent, photos, guests }, { bringing = false, media = null, frozen = null } = {}) {
   const lookups = lookupsFor(env);
   const taken = [];
   for (let i = 0; i < photos.length; i++) {
-    const answer = await takeRecord(env.DB, { sent: photosSent[i], host, lookups });
+    const answer = await takeRecord(env.DB, { sent: photosSent[i], host, lookups, bringing });
     if (answer.refused) {
       for (const t of taken) await tombstone(env.DB, t.id);
       throw new Refusal(answer.refused === "That didn't check." ? NO_SIGNATURE : answer.refused, 400);
     }
-    taken.push({ id: answer.entry.fp, at: answer.entry.taken, content: photos[i].content });
+    taken.push({ id: answer.entry.fp, at: answer.entry.taken, written: photos[i].record.before ?? answer.entry.taken, content: photos[i].content });
   }
-  const answer = await takeRecord(env.DB, { sent, host, lookups });
+  const answer = await takeRecord(env.DB, { sent, host, lookups, bringing });
   if (answer.refused) {
     for (const t of taken) await tombstone(env.DB, t.id);
     throw new Refusal(answer.refused === "That didn't check." ? NO_SIGNATURE : answer.refused, 400);
   }
   const id = answer.entry.fp;
+  const written = post.record.before ?? answer.entry.taken;
   const db = env.DB;
   await db.batch([
     // The "Posted on afterwrd" album, if there are photos and it isn't there yet.
-    ...(taken.length ? [roleAlbum(db, "posts")] : []),
-    db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience, version, tally)
-      VALUES (?, ?, 'post', ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(id, host.person, JSON.stringify(post.content), answer.entry.taken, answer.entry.taken, id,
+    ...(taken.length && !media ? [roleAlbum(db, "posts")] : []),
+    db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience, version, tally, before_until)
+      VALUES (?, ?, 'post', ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(id, host.person, JSON.stringify(post.content), written, answer.entry.taken, id,
         post.record.audience ? "invited" : "friends", id, post.content.poll ? JSON.stringify({ votes: {}, ended_at: null })
-          : post.content.type === "event" ? JSON.stringify({ answers: {} }) : null),
+          : post.content.type === "event" ? JSON.stringify({ answers: {} }) : null, frozen),
     ...guests.map((g) => db.prepare("INSERT INTO item_guests (item, connection_id, person, added_at) VALUES (?, ?, ?, ?)")
       .bind(id, g.connection, g.person, answer.entry.taken)),
     ...taken.flatMap((t, i) => [
-      db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last) VALUES (?, ?, 'photo', ?, ?, ?, ?)`)
-        .bind(t.id, host.person, JSON.stringify(t.content), t.at, t.at, t.id),
+      db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, before_until) VALUES (?, ?, 'photo', ?, ?, ?, ?, ?)`)
+        .bind(t.id, host.person, JSON.stringify(t.content), t.written, t.at, t.id, frozen),
       db.prepare("INSERT INTO item_photos (photo, post, position) VALUES (?, ?, ?)").bind(t.id, id, i),
-      db.prepare(`INSERT INTO media (source, path, kind, created_at, width, height, album_id, hash, thumb_hash, size, type, item_id)
+      media ? db.prepare("UPDATE media SET item_id = ?, post_id = NULL WHERE id = ?").bind(t.id, media[i])
+        : db.prepare(`INSERT INTO media (source, path, kind, created_at, width, height, album_id, hash, thumb_hash, size, type, item_id)
         VALUES ('afterwrd', ?, 'photo', ?, ?, ?, (SELECT id FROM albums WHERE role = 'posts'), ?, ?, ?, 'image/jpeg', ?)`)
         .bind(`afterwrd/${t.content.hash}.jpg`, t.at, t.content.width, t.content.height, t.content.hash, t.content.thumb_hash, t.content.size, t.id),
     ]),
   ]);
-  return { id };
+  return { id, photos: taken.map((t) => t.id) };
 }
 
 /** The photo items of a post (in order), and the post a photo item is in. */
@@ -632,7 +650,8 @@ async function itemFromRow(db, r) {
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], comments: Number(r.comments), others: Number(r.others),
     editable: now() - Number(r.created_at) < EDIT_SECONDS && Number(r.others) === 0,
     // For the signed forms on it (views/items.js): where its list is up to, and its writer's newest record on it.
-    list: { host: String(r.author), me: String(r.author), seen: { n: Number(r.list_n), h: String(r.list_head) }, mine: String(r.author_last) },
+    list: { host: String(r.author), me: String(r.author), seen: { n: Number(r.list_n), h: String(r.list_head) }, mine: String(r.author_last),
+      frozenUntil: frozenUntil(r.before_until) },
   };
 }
 

@@ -72,17 +72,27 @@ export async function overDailyRecords(db, author, kind, members = "") {
   return Number(row?.n ?? 0) >= LIMITS.records;
 }
 export const DAILY_RECORDS_SAID = "That's a lot for one day here. Try again tomorrow.";
+/** Why a comment on an item brought over from afterwrd 1 is refused for now (`until`: when it opens at the latest). */
+export const frozenSaid = (until) => `Comments from before afterwrd 2 are being brought over here until ${new Date(until * 1000)
+  .toLocaleDateString("en-GB", { day: "numeric", month: "long", timeZone: "UTC" })}. You can comment once they're in.`;
 /**
  * Takes a record (`sent`: {record, sig, content?, salt?}) onto the list it belongs to, as host `host` ({person, privateKey}:
  * the site's identity and hosting key), at `taken` (now). `lookups` find writers' identities and browser keys
  * (records.js). A record for one date of a repeating event (lists.js dateList) starts that date's list if it's the first:
- * `owner` is then the event's writer (the caller has checked the event is here, and has that date). Returns {entry,
- * receipt} or {refused: why}.
+ * `owner` is then the event's writer (the caller has checked the event is here, and has that date). `bringing`: it's
+ * being brought over from afterwrd 1 (before.js), which alone may say when it was first written (`before`), and may
+ * comment on an item brought over while it waits for its old comments. Returns {entry, receipt} or {refused: why}.
  */
-export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000), group = null, owner = null }) {
+export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(Date.now() / 1000), group = null, owner = null, bringing = false }) {
   const got = await checkRecord(sent, { ...lookups, at: taken });
   if (!got) return { refused: "That didn't check." };
   if (got.record.host !== host.person) return { refused: "That belongs somewhere else." };
+  if (got.record.before !== undefined && !bringing) return { refused: "Only what's brought over from before afterwrd 2 can say it was written earlier." };
+  // An item brought over from afterwrd 1 takes no new comments until those made on it before have come (step 10).
+  if (!bringing && (got.record.kind === "comment" || got.record.kind === "edit")) {
+    const frozen = await db.prepare("SELECT before_until FROM items WHERE id = ? AND before_until > ?").bind(got.record.item, taken).first();
+    if (frozen) return { refused: frozenSaid(Number(frozen.before_until)) };
+  }
   const list = listOf(got.record, got.fp);
   return inTurn(list, () => take(db, got, { sent, host, taken, list, group, dateOwner: got.record.date ? owner : null }));
 }

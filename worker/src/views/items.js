@@ -4,6 +4,7 @@
 // is signed in the browser before it's sent (ui/sign.js, from the form's data-sign-* attributes): the comment box, Edit
 // and Delete on a comment, and Edit and Delete on the post itself.
 import { MAX_COMMENT } from "../archive/comments.js";
+import { frozenSaid } from "../hosted.js";
 import { MAX_POST_TEXT } from "../edits.js";
 import { fmtAgo, fmtDatetime, linkify } from "./format.js";
 import { initial } from "./nav.js";
@@ -84,11 +85,12 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
   </div>` : html`<p class="comment gone meta" id="c-${c.fp}">${c.state === "deleted" ? "A comment was deleted."
       : c.state === "removed" ? (c.removedBy === list.me ? "You removed a comment." : c.removedByName ? `A comment was removed by ${c.removedByName}.` : "A comment was removed.")
         : c.state === "failed" ? "A comment here didn't pass its check, so it isn't shown." : "A comment here was left out."}</p>`))}
-  <form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
+  ${list.frozenUntil ? html`<p class="meta frozen">${frozenSaid(list.frozenUntil)}</p>`
+    : html`<form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
     <input type="hidden" name="back" value="${back}">
     <textarea name="text" data-draft="comment:${item.id}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
     <button>Post</button>
-  </form>
+  </form>`}
 </section>`;
 }
 

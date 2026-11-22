@@ -452,14 +452,46 @@ check("…nor one signed by Ann's site but claiming to be from another", (await 
 check("the old routes between friends are gone", ![200, 202].includes((await fetch(`${B}/_peer/feed`, { redirect: "manual" })).status)
   && ![200, 202].includes((await fromAnn("/_peer/comments", { type: "Note", content: "x" })).status));
 // A post Bob wrote before posts were signed is his alone, until it's turned into a signed post (step 10).
-const oldKey = `post-${Math.floor(Date.now() / 1000) - 86400}-0badc0de`;
-sql(stateB, `INSERT INTO posts (key, source, created_at, text, audience) VALUES ('${oldKey}', 'afterwrd', ${Math.floor(Date.now() / 1000) - 86400}, 'Written before signing', 'friends')`);
+const oldAt = Math.floor(Date.now() / 1000) - 86400;
+const oldKey = `post-${oldAt}-0badc0de`;
+sql(stateB, `INSERT INTO posts (key, source, created_at, text, audience) VALUES ('${oldKey}', 'afterwrd', ${oldAt}, 'Written before signing', 'friends')`);
+// …with a poll that closed an hour after it was asked, and a comment of Ann's from then.
+sql(stateB, `INSERT INTO polls (post_id, options, multiple, closes_at) VALUES ((SELECT id FROM posts WHERE key = '${oldKey}'), '["Yes","No"]', 0, ${oldAt + 3600})`);
+sql(stateB, `INSERT INTO comments (target, author_name, text, created_at, origin) VALUES ('${oldKey}', 'Ann Example', 'Said before signing', ${oldAt + 60}, '${A}')`);
 check("friends can't see a post written before signing", (await fromAnn(`/_p/posts/${oldKey}`)).status === 404
   && !JSON.stringify(await (await fromAnn("/_p/posts")).json()).includes("Written before signing"));
 await bob.goto(`${B}/posts/${oldKey}`);
 check("…which Bob sees, read-only, saying only he can see it", (await bob.$eval("main", (m) => m.textContent)).includes("Only you can see this for now")
   && !(await bob.$(`article#p-${oldKey} form`)) && !(await bob.$(`article#p-${oldKey} details.more`)));
-sql(stateB, `DELETE FROM posts WHERE key = '${oldKey}'`);
+// Step 10b: Bob's Home brings it over, signed by his browser, saying when he first wrote it (before.js).
+await bob.goto(`${B}/`);
+check("Bob's Home brings his post from before over as a signed post", await waitFor(() => sql(stateB, `SELECT COUNT(*) AS n FROM posts WHERE key = '${oldKey}'`)[0].n === 0, 20_000));
+const broughtId = sql(stateB, `SELECT item FROM brought WHERE old = '${oldKey}'`)[0]?.item;
+check("…dated when he wrote it, its poll as he asked it, and Ann's old comment kept to come over too", Boolean(broughtId)
+  && sql(stateB, `SELECT created_at FROM items WHERE id = '${broughtId}'`)[0]?.created_at === oldAt
+  && JSON.parse(sql(stateB, `SELECT content FROM items WHERE id = '${broughtId}'`)[0].content).poll?.closes_at === oldAt + 3600
+  && sql(stateB, "SELECT COUNT(*) AS n FROM polls")[0].n === 0 && sql(stateB, `SELECT COUNT(*) AS n FROM comments WHERE target = '${oldKey}'`)[0].n === 1);
+await bob.goto(`${B}/posts/${oldKey}`);
+check("its old address leads to it", new URL(bob.url()).pathname === `/posts/${broughtId}`, bob.url());
+check("a friend's site gets it now, dated as written", await waitFor(async () => {
+  copiesOld(stateA);
+  await ann.goto(`${A}/`);
+  return sql(stateA, `SELECT created_at FROM copies WHERE id = '${broughtId}'`)[0]?.created_at === oldAt;
+}, 20_000), JSON.stringify(sql(stateA, `SELECT created_at, content FROM copies WHERE id = '${broughtId}'`)));
+check("…with its poll, closed when it said", JSON.parse(sql(stateA, `SELECT content FROM copies WHERE id = '${broughtId}'`)[0]?.content ?? "{}").poll?.closes_at === oldAt + 3600);
+await ann.goto(`${A}/friend/${sql(stateA, "SELECT id FROM connections")[0].id}/posts/${broughtId}`);
+check("…and no new comments on it until those from before are in", Boolean(await ann.$("main .thread .frozen")) && !(await ann.$("main .thread form.say")));
+// Signed in Ann's browser anyway (her page has no box for it) and sent straight to Bob's site.
+const oldList = sql(stateB, `SELECT n, head FROM lists WHERE id = '${broughtId}'`)[0];
+const bobPersonNow = sql(stateB, "SELECT person FROM own_identity")[0].person;
+const onOld = await ann.evaluate(async (host, item, seen) => {
+  const [{ makeRecord }, { savedKey }] = await Promise.all([import("/static/records.js"), import("/static/browserkey.js")]);
+  const key = await savedKey();
+  return makeRecord({ kind: "comment", author: key.person, host, item, seen, prev: null }, { text: "Too soon" }, key);
+}, bobPersonNow, broughtId, { n: oldList.n, h: oldList.head });
+const annKey = sql(stateA, "SELECT bytes, proof FROM delegations ORDER BY expires_at DESC LIMIT 1")[0];
+const tried = await fromAnn("/_p/records", { sent: onOld.sent, delegation: { bytes: annKey.bytes, proof: JSON.parse(annKey.proof) } });
+check("…which Bob's site refuses, however it's sent", tried.status >= 400 && /being brought over/.test(await tried.text()), String(tried.status));
 // With his Facebook photos not shared, a photo from them can't be seen, even by fingerprint.
 const sharedBefore = sql(stateB, "SELECT value FROM settings WHERE key = 'sections'")[0]?.value ?? "[]";
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '[]')`);

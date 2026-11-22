@@ -108,6 +108,8 @@ export async function itemForFriend(env, origin, r, connectionId, entries = null
   return { id: String(r.id), sent: first.sent, taken: first.taken, content: { ...content, photos },
     earlier: r.earlier ? JSON.parse(String(r.earlier)) : [], edited_at: r.edited_at, comments: Number(r.comments),
     changed_at: Number(r.changed_at), list: { n: Number(r.list_n), head: String(r.list_head) },
+    // Brought over from afterwrd 1 and waiting for its old comments: none new until then (before.js, hosted.js).
+    ...(Number(r.before_until) > now() && { before_until: Number(r.before_until) }),
     ...(tally && { tally: { ...tally, ...(invited !== null && { invited }) } }), ...(r.version && { version: String(r.version) }), records };
 }
 

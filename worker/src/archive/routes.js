@@ -4,6 +4,7 @@
 import { blockedAmong, blockedList } from "../blocks.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
+import { leftToBring } from "../before.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
@@ -606,7 +607,11 @@ async function person(ctx, params, id) {
 
 async function post(ctx, params, key) {
   const [row] = await all(ctx.db, `${POST_SQL} WHERE p.key = ?`, [key]);
-  if (!row) return null;
+  if (!row) {
+    // Brought over from afterwrd 1 (before.js): it's a signed post now, at its new address.
+    const brought = await first(ctx.db, "SELECT item FROM brought WHERE old = ?", [key]);
+    return brought ? Response.redirect(`${ctx.url.origin}/posts/${brought.item}${ctx.url.hash}`, 301) : null;
+  }
   const [p] = await loadPosts(ctx.db, [row]);
   return { post: p };
 }
@@ -637,6 +642,8 @@ async function friendItemPost(ctx, params, connectionId, id) {
   }
   // Read again: names learnt from the thread (friendcopies.js friendThread), and any count just kept.
   item = (await friendItem(ctx.db, connection.id, id)) ?? item;
+  // Brought over from afterwrd 1 and waiting for its old comments (its host says so: before.js): no comment box yet.
+  if (shown.list) shown.list.frozenUntil = item.list?.frozenUntil ?? null;
   return { item, ...shown };
 }
 
@@ -799,6 +806,8 @@ async function home(ctx, params) {
   ]);
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
+  // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
+  const bringOver = ownOld.length && !moved ? await leftToBring(db) : 0;
   const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
@@ -810,11 +819,11 @@ async function home(ctx, params) {
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver };
   }
   return {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or

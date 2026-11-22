@@ -21,6 +21,9 @@
 //   body                    SHA-256 of a 16-byte salt then the content: the content itself travels beside the
 //                           record, so it can be thrown away for good while the signature still checks
 //   at                      when the writer says they wrote it (shown nowhere: hosts' "taken at" times are)
+//   before                  for item and comment brought over from afterwrd 1 (step 10: src/before.js): when it was
+//                           first written, shown in place of the host's time. A host takes it only for its own old row
+//                           with that time, so the writer and the host both say so
 // A record's fingerprint (fingerprintOf("record", bytes)) is its id: the same bytes sent twice are the same record.
 import { b64url, concat, decode, encode, fingerprint, fingerprintOf, fromB64url, signAs, utf8 } from "./signed.js";
 
@@ -36,6 +39,8 @@ export const WITH_CONTENT = new Set(["item", "change", "comment", "edit", "vote"
 export const ABOUT = new Set(["edit", "delete", "remove", "approve", "role", "calloff"]);
 /** Kinds that answer a version of the item. */
 export const VERSIONED = new Set(["vote", "answer"]);
+/** Kinds that may be brought over from afterwrd 1, with when they were first written (`before`). */
+export const BROUGHT = new Set(["item", "comment"]);
 /** Kinds that may be about one date of a repeating event. */
 export const DATED = new Set(["answer", "calloff"]);
 export const DATE_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
@@ -69,6 +74,9 @@ export async function makeRecord(fields, content, key) {
 
 const point = (p) => p === null || (p && Number.isSafeInteger(p.n) && p.n >= 0 && ID_RE.test(p.h ?? ""));
 
+/** When a record says its item or comment was written: when first written, if brought over from afterwrd 1, else `taken`. */
+export const writtenAt = (record, taken) => (Number.isSafeInteger(record?.before) && record.before < taken ? record.before : taken);
+
 /**
  * The record in `bytes`, if it's well-formed for its kind; null if not. (Its signature, writer and content are checked
  * by src/records.js.)
@@ -88,6 +96,7 @@ export function parseRecord(bytes) {
   if (r.date !== undefined && (!DATED.has(r.kind) || typeof r.date !== "string" || !DATE_RE.test(r.date))) return null;
   if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
   if (r.audience !== undefined && (!["item", "change"].includes(r.kind) || r.audience?.kind !== "invited" || !ID_RE.test(r.audience.fp ?? ""))) return null;
+  if (r.before !== undefined && (!BROUGHT.has(r.kind) || !Number.isSafeInteger(r.before) || r.before <= 0 || r.before >= r.at)) return null;
   return r;
 }
 

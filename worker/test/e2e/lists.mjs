@@ -290,12 +290,27 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   }
   // The host's index of others' records (migration 0041: sentchecks.js), which taking a record writes to.
   raw.exec("CREATE TABLE authored (fp TEXT PRIMARY KEY, author TEXT, list TEXT NOT NULL, n INTEGER NOT NULL, taken INTEGER NOT NULL)");
+  // …and the part of `items` it reads: whether an item brought over from afterwrd 1 takes comments yet (step 10b).
+  raw.exec("CREATE TABLE items (id TEXT PRIMARY KEY, before_until INTEGER)");
   const db = local(storage);
   const host = { person: ann.id, privateKey: ann.hosting.privateKey };
   const itemRecord = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Big thread" }, ann.browser);
   const took = await takeRecord(db, { sent: itemRecord.sent, host, lookups, taken: NOW });
   check("the host takes a new post into its own storage", took.entry?.n === 1, took.refused);
   check("…once", (await takeRecord(db, { sent: itemRecord.sent, host, lookups, taken: NOW })).refused === "duplicate");
+  // Step 10b: only what's brought over from afterwrd 1 may say when it was first written, and an item brought over takes
+  // no new comments until those from before are in.
+  const backdated = await makeRecord({ kind: "item", author: ann.id, host: ann.id, before: 1_700_000_000 }, { text: "Old, says me" }, ann.browser);
+  check("a post saying it was written earlier is refused, unless it's being brought over",
+    /written earlier/.test((await takeRecord(db, { sent: backdated.sent, host, lookups, taken: NOW })).refused ?? "")
+    && Boolean((await takeRecord(db, { sent: backdated.sent, host, lookups, taken: NOW, bringing: true })).entry));
+  raw.prepare("INSERT INTO items (id, before_until) VALUES (?, ?)").run(backdated.fp, NOW + DAY);
+  const tooSoon = await makeRecord({ kind: "comment", author: ann.id, host: ann.id, item: backdated.fp, seen: { n: 1, h: raw.prepare("SELECT head FROM lists WHERE id = ?").get(backdated.fp).head }, prev: backdated.fp },
+    { text: "Too soon" }, ann.browser);
+  const waits = await takeRecord(db, { sent: tooSoon.sent, host, lookups, taken: NOW });
+  const later = await takeRecord(db, { sent: tooSoon.sent, host, lookups, taken: NOW + DAY + 1 });
+  check("…and a comment on it waits until its old comments are in", /being brought over/.test(waits.refused ?? "") && Boolean(later.entry),
+    `${waits.refused} / ${later.refused}`);
   // Sixty people comment at the same moment, all having seen only the post.
   const crowd = await Promise.all(Array.from({ length: 60 }, (_, i) => person(`https://p${i}.example`)));
   const seenPost = { n: 1, h: took.entry.head };
@@ -305,7 +320,7 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   const numbers = answers.map((a) => a.entry?.n).filter(Boolean).sort((x, y) => x - y);
   check("sixty comments at once each get their own number, none lost", numbers.length === 60 && numbers.every((n, i) => n === i + 2),
     answers.filter((a) => a.refused).map((a) => a.refused).join("; "));
-  check("…kept 50 to a row", raw.prepare("SELECT COUNT(*) AS n FROM list_pages").get().n === 2);
+  check("…kept 50 to a row", raw.prepare("SELECT COUNT(*) AS n FROM list_pages WHERE list = ?").get(itemRecord.fp).n === 2);
   // Someone on the first page deletes theirs once the list runs onto the second.
   const first = answers.find((a) => a.entry.n === 2);
   const writer = crowd[made.findIndex((m) => m.fp === first.entry.fp)];
