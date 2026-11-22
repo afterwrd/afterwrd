@@ -4,7 +4,7 @@
 import { blockedAmong, blockedList } from "../blocks.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
-import { leftToBring } from "../before.js";
+import { buildDue, commentsToBring, leftToBring } from "../before.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
@@ -623,6 +623,11 @@ async function friendItemPost(ctx, params, connectionId, id) {
   let item = await friendItem(ctx.db, connection.id, id);
   if (!item) { await pullItems(ctx.env, ctx.url.origin, connection); item = await friendItem(ctx.db, connection.id, id); }
   if (!item) return null;
+  // Waiting for its comments from before afterwrd 2, as last heard (before.js): asked again, since they may be in now.
+  if (item.list?.frozenUntil) {
+    await pullItems(ctx.env, ctx.url.origin, connection).catch(() => null);
+    item = (await friendItem(ctx.db, connection.id, id)) ?? item;
+  }
   // An event: who's coming, as its site says now (one signed call), not as last heard.
   if (item.event) {
     await pullItems(ctx.env, ctx.url.origin, connection).catch(() => null);
@@ -807,13 +812,15 @@ async function home(ctx, params) {
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
   // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
-  const bringOver = ownOld.length && !moved ? await leftToBring(db) : 0;
+  const bringOver = moved ? null : { posts: ownOld.length ? await leftToBring(db) : 0, comments: await commentsToBring(db) };
   const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // …and signed groups' (step 6c: groupcopies.js), likewise.
   ctx.work?.waitUntil?.(groups_.pullGroups(ctx.env, ctx.url.origin).catch(() => {}));
+  // …and posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in (before.js).
+  ctx.work?.waitUntil?.(buildDue(ctx.env).catch(() => {}));
   // …then what the owner sent elsewhere, checked with its hosts (sentchecks.js), once an hour at most.
   ctx.work?.waitUntil?.(checkSentRound(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.

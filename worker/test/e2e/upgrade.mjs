@@ -109,7 +109,8 @@ if (stage === "before") {
   check("…and once it's done, on to where the owner was going", new URL(page.url()).pathname === was.address, page.url());
 
   // Step 10b: Home brings the posts from before over as signed posts, signed by this browser with no prompt, each saying
-  // when it was first written. Their own old rows go; their comments wait to come over too (10c).
+  // when it was first written. Their own old rows go. Then (10c) the comments on them, all the owner's own here: signed
+  // by this browser too, dated as first written, and in their posts' lists in the order they were written.
   const sql = (q) => siteSql(STATE, q);
   const written = Object.fromEntries(sql("SELECT key, created_at FROM posts WHERE source = 'afterwrd'").map((r) => [r.key, r.created_at]));
   const oldKey = was.address.split("/").pop();
@@ -118,10 +119,12 @@ if (stage === "before") {
   check("Home says it's bringing the posts from before over", /Bringing your (\d+ )?posts from\s+before afterwrd 2 over/.test(await page.$eval("#bring-over", (p) => p.textContent).catch(() => ""))
     || sql("SELECT COUNT(*) AS n FROM brought")[0].n > 0, `${left} to bring`);
   const waited = Date.now();
-  while (sql("SELECT COUNT(*) AS n FROM posts WHERE source = 'afterwrd'")[0].n > 0 && Date.now() - waited < 30_000) await new Promise((r) => setTimeout(r, 300));
+  const brought = () => sql("SELECT COUNT(*) AS n FROM posts WHERE source = 'afterwrd'")[0].n === 0
+    && sql("SELECT COUNT(*) AS n FROM before_comments")[0].n === 0 && sql("SELECT COUNT(*) AS n FROM items WHERE before_until IS NOT NULL")[0].n === 0;
+  while (!brought() && Date.now() - waited < 30_000) await new Promise((r) => setTimeout(r, 300));
   await settled(page).catch(() => {});
   await page.goto(`${BASE}/`);
-  check("…and once they're signed posts, it says nothing more", sql("SELECT COUNT(*) AS n FROM posts WHERE source = 'afterwrd'")[0].n === 0 && !(await page.$("#bring-over")));
+  check("…and once they and their comments are signed, it says nothing more", brought() && !(await page.$("#bring-over")));
   const item = sql(`SELECT item FROM brought WHERE old = '${oldKey}'`)[0]?.item;
   const noted = new Set(sql("SELECT old FROM brought").map((r) => r.old));
   check("every post from before is noted as brought over, and each photo's address", Boolean(item) && Object.keys(written).every((k) => noted.has(k))
@@ -137,12 +140,15 @@ if (stage === "before") {
     whole: a.textContent }));
   check("…with its words and both photos, no longer only the owner's", card.text === "Before the upgrade" && card.photos === 2
     && !card.whole.includes("Only you can see this for now"), JSON.stringify(card));
-  check("…and no new comments until those from before are in", /Comments from before afterwrd 2 are being brought over here until/.test(
-    await page.$eval("main .thread .frozen", (p) => p.textContent).catch(() => "")) && !(await page.$("main .thread form.say")));
-  // Its photo, an item of its own now, at the same address: its comments wait too.
+  check("…with its comment from before, signed, and the box to add more", (await said("main .thread")).join() === "Still here?"
+    && Boolean(await page.$("main .thread form.say")) && !(await page.$("main .thread .frozen")));
+  const comment = JSON.parse(sql(`SELECT entries FROM list_pages WHERE list = '${item}' ORDER BY page LIMIT 1`)[0].entries)[1];
+  check("…dated as first written, in its signed record", JSON.parse(Buffer.from(comment.sent.record, "base64url").toString()).before > 0
+    && JSON.parse(Buffer.from(comment.sent.record, "base64url").toString()).before < comment.taken);
+  // Its photo, an item of its own now, at the same address, with its own comment from before.
   await page.goto(BASE + was.photo.split("?")[0]);
-  check("its photo is still at its address, a signed photo now, waiting for its comments", Boolean(await page.$(".stage img"))
-    && Boolean(await page.$(".info .thread .frozen")) && !(await page.$(".info .thread form.say")));
+  check("its photo is still at its address, a signed photo now, with its comment", Boolean(await page.$(".stage img"))
+    && (await said(".info .thread")).join() === "Nice photo" && Boolean(await page.$(".info .thread form.say")));
 
   await page.goto(`${BASE}/posts`);
   check("imported posts are still there, with no comments or comment box", (await page.$$("main article.card:not(.own)")).length === 2
@@ -150,9 +156,6 @@ if (stage === "before") {
   await page.goto(BASE + was.importedPhoto);
   check("…and imported photos too", Boolean(await page.$(".stage img")) && !(await page.$(".info .say"))
     && !(await page.content()).includes("On an imported photo"));
-  await page.goto(`${BASE}/activity`);
-  const notes = await page.$$eval(".activity .text", (l) => l.map((t) => t.textContent));
-  check("Notifications keep the comments that are still there", notes.length === 2 && notes.includes("Still here?") && notes.includes("Nice photo"), notes.join("|"));
 
   if (was.poll) {
     // Votes aren't brought over (only the host kept them): the poll comes over open, and anyone can vote again.
@@ -181,8 +184,7 @@ if (stage === "before") {
   await page.type("#composer textarea", "After the upgrade");
   await Promise.all([page.waitForNavigation(), page.click("#composer button.post")]);
   check("new posts work too", (await page.$eval(`${own}:first-of-type .text`, (t) => t.textContent)) === "After the upgrade");
-  // Comments made before the upgrade wait to come over (10c): kept here meanwhile, and in Notifications.
-  check("comments from before are kept, waiting to come over", sql("SELECT COUNT(*) AS n FROM comments")[0].n >= 2);
+  check("the old comments' rows are gone, now they're signed", sql("SELECT COUNT(*) AS n FROM comments")[0].n === 0);
 
   // The site moved into its own object (src/sitecopy.js): its old D1 database is kept, marked moved, so an older
   // version would say the site is being updated rather than carry on with it.

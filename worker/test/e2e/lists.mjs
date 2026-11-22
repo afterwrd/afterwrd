@@ -300,6 +300,7 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("…once", (await takeRecord(db, { sent: itemRecord.sent, host, lookups, taken: NOW })).refused === "duplicate");
   // Step 10b: only what's brought over from afterwrd 1 may say when it was first written, and an item brought over takes
   // no new comments until those from before are in.
+  const seenPost0 = () => ({ n: 1, h: took.entry.head });
   const backdated = await makeRecord({ kind: "item", author: ann.id, host: ann.id, before: 1_700_000_000 }, { text: "Old, says me" }, ann.browser);
   check("a post saying it was written earlier is refused, unless it's being brought over",
     /written earlier/.test((await takeRecord(db, { sent: backdated.sent, host, lookups, taken: NOW })).refused ?? "")
@@ -308,9 +309,17 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   const tooSoon = await makeRecord({ kind: "comment", author: ann.id, host: ann.id, item: backdated.fp, seen: { n: 1, h: raw.prepare("SELECT head FROM lists WHERE id = ?").get(backdated.fp).head }, prev: backdated.fp },
     { text: "Too soon" }, ann.browser);
   const waits = await takeRecord(db, { sent: tooSoon.sent, host, lookups, taken: NOW });
+  // Its 30 days up, but its old comments not in yet (before.js puts them in at the next chance): still not, so they
+  // go first; once they're in, it's taken.
+  const due = await takeRecord(db, { sent: tooSoon.sent, host, lookups, taken: NOW + DAY + 1 });
+  raw.prepare("UPDATE items SET before_until = NULL WHERE id = ?").run(backdated.fp);
   const later = await takeRecord(db, { sent: tooSoon.sent, host, lookups, taken: NOW + DAY + 1 });
-  check("…and a comment on it waits until its old comments are in", /being brought over/.test(waits.refused ?? "") && Boolean(later.entry),
-    `${waits.refused} / ${later.refused}`);
+  check("…and nothing new on it until its old comments are in", /being brought over/.test(waits.refused ?? "") && /nearly in/.test(due.refused ?? "")
+    && Boolean(later.entry), `${waits.refused} / ${due.refused} / ${later.refused}`);
+  const vote = await makeRecord({ kind: "vote", author: ann.id, host: ann.id, item: itemRecord.fp, seen: seenPost0(), prev: itemRecord.fp, version: itemRecord.fp }, { choices: [0] }, ann.browser);
+  raw.prepare("INSERT OR REPLACE INTO items (id, before_until) VALUES (?, ?)").run(itemRecord.fp, NOW + DAY);
+  check("…not even a vote", /being brought over/.test((await takeRecord(db, { sent: vote.sent, host, lookups, taken: NOW })).refused ?? ""));
+  raw.prepare("DELETE FROM items WHERE id = ?").run(itemRecord.fp);
   // Sixty people comment at the same moment, all having seen only the post.
   const crowd = await Promise.all(Array.from({ length: 60 }, (_, i) => person(`https://p${i}.example`)));
   const seenPost = { n: 1, h: took.entry.head };

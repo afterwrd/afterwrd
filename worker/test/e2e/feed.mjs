@@ -458,6 +458,10 @@ sql(stateB, `INSERT INTO posts (key, source, created_at, text, audience) VALUES 
 // …with a poll that closed an hour after it was asked, and a comment of Ann's from then.
 sql(stateB, `INSERT INTO polls (post_id, options, multiple, closes_at) VALUES ((SELECT id FROM posts WHERE key = '${oldKey}'), '["Yes","No"]', 0, ${oldAt + 3600})`);
 sql(stateB, `INSERT INTO comments (target, author_name, text, created_at, origin) VALUES ('${oldKey}', 'Ann Example', 'Said before signing', ${oldAt + 60}, '${A}')`);
+const annOldId = sql(stateB, "SELECT id FROM comments WHERE text = 'Said before signing'")[0].id;
+// …Bob's own reply then, and one his site says is Ann's that she never wrote (her site has no copy of it).
+sql(stateB, `INSERT INTO comments (target, author_id, author_name, text, created_at, origin) VALUES ('${oldKey}', (SELECT id FROM users LIMIT 1), 'Bob Example', 'Bob said before', ${oldAt + 120}, 'site')`);
+sql(stateB, `INSERT INTO comments (target, author_name, text, created_at, origin) VALUES ('${oldKey}', 'Ann Example', 'Made up for Ann', ${oldAt + 180}, '${A}')`);
 check("friends can't see a post written before signing", (await fromAnn(`/_p/posts/${oldKey}`)).status === 404
   && !JSON.stringify(await (await fromAnn("/_p/posts")).json()).includes("Written before signing"));
 await bob.goto(`${B}/posts/${oldKey}`);
@@ -470,7 +474,11 @@ const broughtId = sql(stateB, `SELECT item FROM brought WHERE old = '${oldKey}'`
 check("…dated when he wrote it, its poll as he asked it, and Ann's old comment kept to come over too", Boolean(broughtId)
   && sql(stateB, `SELECT created_at FROM items WHERE id = '${broughtId}'`)[0]?.created_at === oldAt
   && JSON.parse(sql(stateB, `SELECT content FROM items WHERE id = '${broughtId}'`)[0].content).poll?.closes_at === oldAt + 3600
-  && sql(stateB, "SELECT COUNT(*) AS n FROM polls")[0].n === 0 && sql(stateB, `SELECT COUNT(*) AS n FROM comments WHERE target = '${oldKey}'`)[0].n === 1);
+  && sql(stateB, "SELECT COUNT(*) AS n FROM polls")[0].n === 0 && sql(stateB, `SELECT COUNT(*) AS n FROM comments WHERE target = '${oldKey}'`)[0].n === 3);
+// Step 10c: Bob's own old reply is signed by his browser at the same go, and waits for Ann's.
+check("…and his own old reply, signed by his browser, waits with Ann's for hers", await waitFor(() =>
+  sql(stateB, `SELECT state FROM before_comments WHERE item = '${broughtId}' AND origin = 'site'`)[0]?.state === "signed")
+  && sql(stateB, `SELECT COUNT(*) AS n FROM before_comments WHERE item = '${broughtId}' AND origin = '${A}' AND state = 'waiting'`)[0].n === 2);
 await bob.goto(`${B}/posts/${oldKey}`);
 check("its old address leads to it", new URL(bob.url()).pathname === `/posts/${broughtId}`, bob.url());
 check("a friend's site gets it now, dated as written", await waitFor(async () => {
@@ -492,6 +500,30 @@ const onOld = await ann.evaluate(async (host, item, seen) => {
 const annKey = sql(stateA, "SELECT bytes, proof FROM delegations ORDER BY expires_at DESC LIMIT 1")[0];
 const tried = await fromAnn("/_p/records", { sent: onOld.sent, delegation: { bytes: annKey.bytes, proof: JSON.parse(annKey.proof) } });
 check("…which Bob's site refuses, however it's sent", tried.status >= 400 && /being brought over/.test(await tried.text()), String(tried.status));
+// Step 10c: Ann's site has its own copy of what she said there (comments_elsewhere). Her Home asks Bob's site where it is
+// now, with every old id in her copy, so the one Bob's site made up for her isn't hers; her browser signs the real one,
+// as her copy has it, and Bob's site, with nothing more to wait for, puts both comments in, in the order they were written.
+const bobConnection = sql(stateA, "SELECT id FROM connections")[0].id;
+sql(stateA, `INSERT INTO comments_elsewhere (connection_id, site, remote_id, target, text, created_at) VALUES (${bobConnection}, '${B}', ${annOldId}, '${oldKey}', 'Said before signing', ${oldAt + 61})`);
+await ann.goto(`${A}/`);
+check("Ann's Home brings her old comment over, and Bob's site puts the comments from before in", await waitFor(() =>
+  sql(stateB, `SELECT before_until FROM items WHERE id = '${broughtId}'`)[0]?.before_until === null, 20_000),
+  JSON.stringify(sql(stateB, `SELECT id, origin, state FROM before_comments`)));
+const oldThread = sql(stateB, `SELECT entries FROM list_pages WHERE list = '${broughtId}' ORDER BY page`).flatMap((p) => JSON.parse(p.entries))
+  .map((e) => ({ n: e.n, r: e.sent && JSON.parse(Buffer.from(e.sent.record, "base64url").toString()), text: e.sent?.content && JSON.parse(Buffer.from(e.sent.content, "base64url").toString()).text }));
+check("…Ann's first, then Bob's, each signed by its writer and dated as first written; the made-up one isn't there",
+  oldThread.length === 3 && oldThread[1].text === "Said before signing" && oldThread[1].r.author === sql(stateA, "SELECT person FROM own_identity")[0].person
+  && oldThread[1].r.before === oldAt + 60 && oldThread[2].text === "Bob said before" && oldThread[2].r.author === bobPersonNow && oldThread[2].r.before === oldAt + 120,
+  JSON.stringify(oldThread.map((e) => [e.n, e.text, e.r?.before])));
+check("…and the old rows are gone, both sides", sql(stateB, `SELECT COUNT(*) AS n FROM comments WHERE target = '${oldKey}'`)[0].n === 0
+  && sql(stateB, "SELECT COUNT(*) AS n FROM before_comments")[0].n === 0 && sql(stateA, "SELECT COUNT(*) AS n FROM comments_elsewhere")[0].n === 0);
+check("Ann's site keeps what she signed as sent, waiting to see it in Bob's list", ["held", null].includes(
+  sql(stateA, `SELECT state FROM sent WHERE item = '${broughtId}'`)[0]?.state));
+copiesOld(stateA);
+await ann.goto(`${A}/friend/${bobConnection}/posts/${broughtId}`);
+const shownOld = await ann.$$eval("main .thread .comment .said", (l) => l.map((c) => c.textContent));
+check("on her page, both comments from before, and the box to add one", shownOld.join("|") === "Said before signing|Bob said before"
+  && Boolean(await ann.$("main .thread form.say")) && !(await ann.$("main .thread .frozen")), shownOld.join("|"));
 // With his Facebook photos not shared, a photo from them can't be seen, even by fingerprint.
 const sharedBefore = sql(stateB, "SELECT value FROM settings WHERE key = 'sections'")[0]?.value ?? "[]";
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '[]')`);

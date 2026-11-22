@@ -12,6 +12,8 @@
 //                              edit, a delete) on one of the owner's posts, with the delegation behind it, and their signed
 //                              name (kept, to name them to others in the thread). Answers with the receipt.
 //                              A comment tells the owner here, and those it's news to (notes.js).
+//   POST /_p/before            the calling site's owner's comments from before afterwrd 2 on posts brought over: where
+//                              they are now, and then signed (before.js answerBefore).
 // (And POST /_p/notes, a friend's site telling this one about something new: notes.js.)
 import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
@@ -25,6 +27,7 @@ import { fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { noticeOwn } from "./notes.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
+import { answerBefore, buildDue, buildIfDue } from "./before.js";
 
 const PAGE = 50;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -132,6 +135,8 @@ export async function handleFriendItems(request, env, url, work) {
   const db = env.DB;
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
+    // Posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in first (before.js).
+    await buildDue(env);
     const { results } = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
       WHERE i.type = 'post' AND i.changed_at > ?2 AND ${SEES()} ORDER BY i.changed_at LIMIT ?3`).bind(caller.connection.id, since, PAGE + 1).all();
     const more = results.length > PAGE;
@@ -155,6 +160,7 @@ export async function handleFriendItems(request, env, url, work) {
   const one = /^\/_p\/items\/([A-Za-z0-9_-]{43})$/.exec(url.pathname);
   if (request.method === "GET" && one) {
     if (!(await mayCallerSee(db, one[1], caller.connection.id))) return json({ error: "Not found." }, 404);
+    await buildIfDue(env, one[1]);
     const host = await ownHost(env);
     // ?after=: a reader that checked up to there asks only for what's after (threads.js).
     const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
@@ -172,6 +178,11 @@ export async function handleFriendItems(request, env, url, work) {
     if (!host) return json({ error: "Not found." }, 404);
     const answer = await answerCheck(env, caller.person, asked, { host: host.person, mayRead: (id) => mayCallerSee(db, id, caller.connection.id) });
     return json(answer, answer.status ?? 200);
+  }
+  if (request.method === "POST" && url.pathname === "/_p/before") {
+    let asked = null;
+    try { asked = JSON.parse(new TextDecoder().decode(body)); } catch {}
+    return answerBefore(env, caller, asked);
   }
   if (request.method === "POST" && url.pathname === "/_p/records") {
     let sent = null, delegation = null, profile = null;

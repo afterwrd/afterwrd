@@ -1,7 +1,8 @@
-// Bringing the owner's posts from afterwrd 1 over as signed items (afterwrd 2, step 10: src/before.js), from Home, with
-// no prompt: this browser's key is already allowed to sign for them. The site prepares exactly what each post says;
-// this signs it, saying when it was first written (`before`), and sends it back, one post at a time until none are
-// left. Then Home is shown again, with them in place.
+// Bringing what the owner wrote on afterwrd 1 over, signed (afterwrd 2, step 10: src/before.js), from Home, with no
+// prompt: this browser's key is already allowed to sign for them. First their posts: the site prepares exactly what each
+// says; this signs it, saying when it was first written (`before`), and sends it back, a post at a time. Then the
+// comments they made before, on their own posts and friends', an item at a time, each following the last (prev). Then
+// Home is shown again, with them in place.
 import { audienceOf, makeRecord } from "../records.js";
 import { b64url } from "../signed.js";
 import { savedKey } from "../browserkey.js";
@@ -40,6 +41,22 @@ async function bringOne(key, p) {
     ...(p.guests && { guests: p.guests.map((/** @type {any} */ g) => g.id), salt }) });
 }
 
+/**
+ * One item's comments from before, as the site prepared them (in the order they were written): each signed in turn,
+ * following the one before (the first follows `prev`), all having seen the item as it is now.
+ * @param {{ privateKey: CryptoKey, publicKey: string, person: string }} key @param {any} c
+ */
+async function bringComments(key, c) {
+  let prev = c.prev;
+  const records = [];
+  for (const one of c.list) {
+    const made = await makeRecord({ kind: "comment", author: key.person, host: c.host, item: c.item, seen: c.seen, prev, before: one.before }, { text: one.text }, key);
+    records.push({ id: one.id, sent: made.sent });
+    prev = made.fp;
+  }
+  return call("POST", { to: c.to, item: c.item, records });
+}
+
 (async () => {
   const key = await savedKey();
   if (!key?.person || key.expires < Date.now() / 1000) {
@@ -49,11 +66,18 @@ async function bringOne(key, p) {
   let brought = 0;
   try {
     for (;;) {
-      const { next, left, waiting } = await call("GET");
+      const { next, comments, left, waiting } = await call("GET");
+      if (!next && comments) {
+        say("Bringing the comments you wrote before afterwrd 2 over, signed on this device…");
+        await bringComments(/** @type {any} */ (key), comments);
+        brought++;
+        continue;
+      }
       if (!next) {
         if (brought) location.reload();
         else if (waiting) say(waiting === 1 ? "An event from before afterwrd 2 comes over once everyone it's for has moved to afterwrd 2 too."
           : `${waiting} events from before afterwrd 2 come over once everyone they're for has moved to afterwrd 2 too.`);
+        else if (line) line.hidden = true; // nothing for this browser now (a friend's site that hasn't moved yet is asked again later)
         return;
       }
       say(`Bringing your posts from before afterwrd 2 over, signed on this device: ${left} to go…`);
@@ -61,6 +85,6 @@ async function bringOne(key, p) {
       brought++;
     }
   } catch (error) {
-    say(`Couldn't bring a post from before afterwrd 2 over (${/** @type {Error} */ (error).message}). It'll try again next time you're here.`);
+    say(`Couldn't bring something from before afterwrd 2 over (${/** @type {Error} */ (error).message}). It'll try again next time you're here.`);
   }
 })();

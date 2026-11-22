@@ -41,7 +41,7 @@ const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0,
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = 0 }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -180,8 +180,9 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       ? html`<p class="notice">Couldn't reach ${unreachable.length} friends' sites lately, so their newest posts may be missing.</p>`
       : unreachable.map((c) => html`<p class="notice">Couldn't reach ${c.name}'s site lately, so their newest posts may be missing.</p>`)}
     ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
-    ${bringOver > 0 && html`<p class="notice" id="bring-over" data-left="${bringOver}">Bringing your ${bringOver === 1 ? "post" : `${bringOver} posts`} from
-      before afterwrd 2 over, signed on this device…</p>
+    ${(bringOver?.posts > 0 || bringOver?.comments > 0) && html`<p class="notice" id="bring-over">${bringOver.posts > 0
+      ? `Bringing your ${bringOver.posts === 1 ? "post" : `${bringOver.posts} posts`} from before afterwrd 2 over, signed on this device…`
+      : "Bringing the comments you wrote before afterwrd 2 over, signed on this device…"}</p>
       <script type="module" src="${asset("/static/ui/bringover.js")}"></script>`}
     ${unmoved.length > 2
       ? html`<p class="notice unmoved">${unmoved.length} friends' sites haven't moved to afterwrd 2 yet. You'll see their posts once they have.</p>`

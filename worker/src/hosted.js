@@ -72,9 +72,15 @@ export async function overDailyRecords(db, author, kind, members = "") {
   return Number(row?.n ?? 0) >= LIMITS.records;
 }
 export const DAILY_RECORDS_SAID = "That's a lot for one day here. Try again tomorrow.";
-/** Why a comment on an item brought over from afterwrd 1 is refused for now (`until`: when it opens at the latest). */
-export const frozenSaid = (until) => `Comments from before afterwrd 2 are being brought over here until ${new Date(until * 1000)
-  .toLocaleDateString("en-GB", { day: "numeric", month: "long", timeZone: "UTC" })}. You can comment once they're in.`;
+const OPEN_WHILE_FROZEN = new Set(["delete", "remove", "close"]);
+/**
+ * Why something on an item brought over from afterwrd 1 is refused for now: what was said on it before is still coming
+ * (`until`: when it's in at the latest), or due in now (`at` past it: before.js puts it in at the next chance).
+ */
+export const frozenSaid = (until, at = Math.floor(Date.now() / 1000)) => (until > at
+  ? `What was said here before afterwrd 2 is being brought over, until ${new Date(until * 1000)
+    .toLocaleDateString("en-GB", { day: "numeric", month: "long", timeZone: "UTC" })} at the latest. You can add to it once that's in.`
+  : "What was said here before afterwrd 2 is nearly in. Try again in a few minutes.");
 /**
  * Takes a record (`sent`: {record, sig, content?, salt?}) onto the list it belongs to, as host `host` ({person, privateKey}:
  * the site's identity and hosting key), at `taken` (now). `lookups` find writers' identities and browser keys
@@ -88,10 +94,12 @@ export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(D
   if (!got) return { refused: "That didn't check." };
   if (got.record.host !== host.person) return { refused: "That belongs somewhere else." };
   if (got.record.before !== undefined && !bringing) return { refused: "Only what's brought over from before afterwrd 2 can say it was written earlier." };
-  // An item brought over from afterwrd 1 takes no new comments until those made on it before have come (step 10).
-  if (!bringing && (got.record.kind === "comment" || got.record.kind === "edit")) {
-    const frozen = await db.prepare("SELECT before_until FROM items WHERE id = ? AND before_until > ?").bind(got.record.item, taken).first();
-    if (frozen) return { refused: frozenSaid(Number(frozen.before_until)) };
+  // An item brought over from afterwrd 1 takes nothing new until the comments made on it before are in (step 10), so
+  // they go in first, in the order they were written, and each writer's chain (prev) runs on from there. Deleting,
+  // removing and closing still go through.
+  if (!bringing && got.record.kind !== "item" && !OPEN_WHILE_FROZEN.has(got.record.kind)) {
+    const frozen = await db.prepare("SELECT before_until FROM items WHERE id = ? AND before_until IS NOT NULL").bind(got.record.item).first();
+    if (frozen) return { refused: frozenSaid(Number(frozen.before_until), taken) };
   }
   const list = listOf(got.record, got.fp);
   return inTurn(list, () => take(db, got, { sent, host, taken, list, group, dateOwner: got.record.date ? owner : null }));

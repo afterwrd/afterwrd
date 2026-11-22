@@ -58,6 +58,7 @@ import m0043 from "../migrations/0043_scale_indexes.sql";
 import m0044 from "../migrations/0044_learnt.js";
 import m0045 from "../migrations/0045_crossover.sql";
 import m0046 from "../migrations/0046_bringing_over.sql";
+import m0047 from "../migrations/0047_bringing_comments.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -108,6 +109,7 @@ const MIGRATIONS = [
   ["0044_learnt", m0044],
   ["0045_crossover.sql", m0045],
   ["0046_bringing_over.sql", m0046],
+  ["0047_bringing_comments.sql", m0047],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

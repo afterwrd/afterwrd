@@ -21,7 +21,7 @@ import { CHANGE_SECONDS, dateTally, eventShown, eventTrouble, pollShown, pollTro
 import { dateList } from "./lists.js";
 import { ANSWERS, cleanEvent, eventChanged, finishedAt, hasDate, onDate, ruleDates } from "./calendar.js";
 import { choicesMask } from "./polls.js";
-import { audienceOf } from "../public/static/records.js";
+import { audienceOf, writtenAt } from "../public/static/records.js";
 
 export const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 /** Until when an item brought over from afterwrd 1 takes no new comments (before.js), if that's still to come; else null. */
@@ -565,7 +565,8 @@ export function thread(entries, { owner, item }) {
     }
     const { record, content } = r;
     if (record.kind === "comment") {
-      const c = { fp: e.fp, n: e.n, author: record.author, text: content?.text ?? "", taken: e.taken, state: "ok", earlier: [], edited_at: null, mentions: shownMentions(record, content) };
+      // Its time: when first written, for one brought over from afterwrd 1 (records.js `before`), else when taken.
+      const c = { fp: e.fp, n: e.n, author: record.author, text: content?.text ?? "", taken: writtenAt(record, e.taken), state: "ok", earlier: [], edited_at: null, mentions: shownMentions(record, content) };
       byFp.set(e.fp, c);
       comments.push(c);
     } else if (record.kind === "edit" && record.about !== item) {

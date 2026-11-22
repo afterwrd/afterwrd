@@ -368,7 +368,7 @@ export async function compareThread(env, { where, host, list, entries, me, names
       if (e.state === "removed") await settle(env, row, where, { state: "removed", removedBy: e.removedBy ?? null }, names);
       else if (e.state === "left-out") await settle(env, row, where, { state: "missing" }, names);
       else if (e.state === "deleted" && row.state !== "deleted") await settle(env, row, where, { state: "deleted" }, names);
-      else if (e.state === "ok" && row.state === "unsure") await settle(env, row, where, { state: "there" }, names);
+      else if (e.state === "ok" && (row.state === "unsure" || row.state === "held")) await settle(env, row, where, { state: "there" }, names);
     } else if (e.record?.author === me && e.state === "ok") {
       await forged(env, where, list, e.fp);
     }
