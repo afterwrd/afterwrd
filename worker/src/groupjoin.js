@@ -11,6 +11,7 @@ import { callFriend } from "./calls.js";
 import { checkCall } from "./signedcalls.js";
 import { checkProfile, fetchIdentity, hostingKeyFor, identityState, learnIdentity, parseChain } from "./identities.js";
 import { checkList } from "./lists.js";
+import { fitToKeep, keepThread, keptList } from "./threads.js";
 import { MemberRules } from "./members.js";
 import { ID_RE, ownHost } from "./items.js";
 import { ownOrigin } from "./keys.js";
@@ -70,7 +71,7 @@ export async function joinSigned(env, info, sent) {
  * A group's members list as this site has checked it (`data`: what GET /_group/members gave as `afterwrd:list`): its
  * rules as they stand, and where it's up to. Throws a Refusal if it doesn't check.
  */
-export async function checkMembers(env, group, data) {
+export async function checkMembers(env, group, data, { rules = null } = {}) {
   const person = String(group.identity);
   if (!data || data.group !== person) throw new Refusal("The group didn't send its members list.");
   let state = await identityState(env, person);
@@ -83,20 +84,55 @@ export async function checkMembers(env, group, data) {
   }
   // A group with nobody in it yet but its owner has nothing on its list, and nothing for the group to sign.
   const entries = Array.isArray(data.entries) ? data.entries : [];
-  if (!entries.length) {
+  if (!entries.length && !rules) {
     if (data.owner !== state.current.owner) throw new Refusal("The group's members list doesn't check.");
     return { entries: [], upTo: 0, head: "", problem: null, rules: new MemberRules({ host: person, list: person, owner: String(data.owner) }) };
   }
   const checked = await checkList({ host: person, hostingKey: state.current.hosting, list: person, owner: String(data.owner ?? ""), Kind: MemberRules,
-    entries: Array.isArray(data.entries) ? data.entries : [], signedHead: data.signedHead,
+    entries, signedHead: data.signedHead, rules,
     lookups: { identityOf: (p) => identityState(env, p), delegationOf: async (key) => data.delegations?.[key] ?? null } });
   if (checked.problem || data.owner !== state.current.owner) throw new Refusal("The group's members list doesn't check.");
   return checked;
 }
 
-/** POST /_groups/<id>/point: what a record about `group`'s members says it saw. */
-export async function membersPoint(env, group, data) {
+/**
+ * The group's members list as this site has checked it, through `fetch` (a path on the group's site: its answer).
+ * Kept as checked (threads.js), so after the first time only what's after the point it got to is asked for and checked,
+ * carrying on from who's in as it stood (step 9, option 4A: fetching and checking it whole for every decision made
+ * letting 1,000 people in quadratic, and the list 4.6 MB). If what's new doesn't follow on, it's read whole, as before.
+ */
+export async function checkedMembers(env, group, fetch) {
+  const db = env.DB;
+  const person = String(group.identity);
+  const kept = await keptList(db, person);
+  const state = kept && (await identityState(env, person));
+  if (kept && state?.current.owner) {
+    try {
+      const data = (await fetch(`/_group/members/list?after=${kept.at(-1).n}`))?.["afterwrd:list"];
+      const rules = new MemberRules({ host: person, list: person, owner: String(state.current.owner) });
+      for (const e of kept) await rules.add({ fp: e.fp, taken: e.taken, record: e.record ?? null, byHost: Boolean(e.byHost), head: e.head, content: e.content });
+      const checked = await checkMembers(env, group, data, { rules });
+      const heads = new Map((Array.isArray(data.entries) ? data.entries : []).map((e) => [e.n, e.head]));
+      const fresh = checked.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));
+      if (fresh.length && fitToKeep(fresh)) await keepThread(db, person, [...kept, ...fresh], fresh[0].n);
+      return checked;
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      // Doesn't follow on from what's kept: read whole, below.
+    }
+  }
+  const data = (await fetch("/_group/members/list"))?.["afterwrd:list"];
   const checked = await checkMembers(env, group, data);
+  const heads = new Map((Array.isArray(data?.entries) ? data.entries : []).map((e) => [e.n, e.head]));
+  const all = checked.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));
+  if (all.length && all[0].n === 1 && fitToKeep(all)) await keepThread(db, person, all);
+  else await db.prepare("DELETE FROM thread_cache WHERE list = ?").bind(person).run();
+  return checked;
+}
+
+/** POST /_groups/<id>/point: what a record about `group`'s members says it saw (`fetch`: as checkedMembers takes). */
+export async function membersPoint(env, group, fetch) {
+  const checked = await checkedMembers(env, group, fetch);
   const me = await ownHost(env);
   const at = checked.upTo ? { n: checked.upTo, h: checked.head } : null;
   return { host: group.identity, item: group.identity, seen: at, prev: checked.rules.lastOf.get(me.person) ?? null, role_at: at };

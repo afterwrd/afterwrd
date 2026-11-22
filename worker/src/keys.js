@@ -233,7 +233,7 @@ async function finish(request, env, url, owner, { identity: identityText, delega
  * before, and so does a site the owner moves to. It never lets the key sign here again (items.js lookupsFor).
  */
 function rememberOwn(env, person, key, bytes, proof, expires) {
-  return env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at) VALUES (?, ?, ?, ?, ?)")
+  return env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))")
     .bind(key, person, bytes, JSON.stringify(proof), expires);
 }
 

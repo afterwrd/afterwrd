@@ -21,6 +21,7 @@ import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.j
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
 import { ID_RE, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
+import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
@@ -95,6 +96,7 @@ export async function pullGroup(env, from, group) {
     if (page === 0 && data.usage) await keepGroupUsage(db, Number(group.id), data.usage).catch(() => null);
     // Anything signed as the owner here that this site never sent (sentchecks.js).
     if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
+    await fillGaps(env, from, group, data);
     await learnPeople(env, data.people);
     const rules = await copyRules(env, group, data);
     const statements = [];
@@ -116,6 +118,57 @@ export async function pullGroup(env, from, group) {
   await checkGroupReceipts(env, from, group).catch(() => null);
   if (info) await refresh(db, group, info);
   return info;
+}
+
+/**
+ * After a pull (`data`), which sends only the people and delegations new to the group since this site last asked
+ * (friendhost.js learntSince): the delegations this site already keeps are added in, anyone or any delegation still
+ * missing is asked for (POST /_p/people), and the delegations it was sent are kept for next time. Each delegation is
+ * checked against its passkey wherever it's used, so keeping one takes nothing on the group's word.
+ */
+async function fillGaps(env, from, group, data) {
+  const db = env.DB;
+  const sents = [];
+  for (const item of Array.isArray(data.items) ? data.items.slice(0, 60) : []) {
+    sents.push(item?.sent, ...(Array.isArray(item?.records) ? item.records.slice(0, 60).map((x) => x?.sent) : []));
+  }
+  for (const proof of Object.values(data.roles ?? {}).slice(0, 50)) sents.push(proof?.join, proof?.role);
+  const records = sents.map((x) => (typeof x?.record === "string" ? parseRecord(fromB64url(x.record)) : null)).filter(Boolean);
+  if (!records.length) return;
+  const sent = data.delegations && typeof data.delegations === "object" ? data.delegations : {};
+  data.delegations = { ...sent };
+  const keys = [...new Set(records.map((r) => String(r.key)))];
+  const authors = [...new Set(records.map((r) => String(r.author)))];
+  const [kept, knownPeople] = /** @type {D1Result<any>[]} */ (await db.batch([
+    db.prepare("SELECT key, bytes, proof FROM known_delegations WHERE key IN (SELECT value FROM json_each(?))")
+      .bind(JSON.stringify(keys.filter((k) => !sent[k]))),
+    db.prepare("SELECT person FROM identities WHERE person IN (SELECT value FROM json_each(?)) AND frozen_at IS NULL")
+      .bind(JSON.stringify(authors.filter((p) => !data.people?.[p]))),
+  ]));
+  for (const r of kept.results) data.delegations[String(r.key)] ??= { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) };
+  const have = new Set([...knownPeople.results.map((r) => String(r.person)), ...Object.keys(data.people ?? {})]);
+  const missingPeople = authors.filter((p) => !have.has(p));
+  const missingKeys = keys.filter((k) => !data.delegations[k]);
+  let asked = {};
+  if (missingPeople.length || missingKeys.length) {
+    const more = await ask(env, from, group, "/_p/people", { people: missingPeople.slice(0, 200), keys: missingKeys.slice(0, 200) }).catch(() => null);
+    if (more) {
+      data.people = { ...(data.people ?? {}), ...(more.people && typeof more.people === "object" ? more.people : {}) };
+      asked = more.delegations && typeof more.delegations === "object" ? more.delegations : {};
+      for (const [k, d] of Object.entries(asked)) if (keys.includes(k)) data.delegations[k] ??= d;
+    }
+  }
+  // Those it was sent (not those it had), kept: one row each, as people's devices sign in.
+  const statements = [];
+  for (const [key, d] of Object.entries({ ...sent, ...asked })) {
+    if (!keys.includes(key) || typeof d?.bytes !== "string") continue;
+    let delegation = null;
+    try { delegation = decode(fromB64url(d.bytes)); } catch {}
+    if (!delegation || typeof delegation.person !== "string" || !Number.isSafeInteger(delegation.expires)) continue;
+    statements.push(db.prepare(`INSERT OR IGNORE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).bind(key, delegation.person, d.bytes, JSON.stringify(d.proof ?? null), delegation.expires, now()));
+  }
+  if (statements.length) await db.batch(statements);
 }
 
 /**
@@ -267,40 +320,68 @@ async function copyRules(env, group, data) {
  * with each writer's name), problem, changed, seen, mine, host, owner} or {error}.
  */
 export async function groupThread(env, from, group, id, people = []) {
-  let data;
+  const db = env.DB;
+  const copy = await db.prepare("SELECT author, checked_n, checked_head FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
+  // What this site checked before, kept (threads.js): then only what's after it is asked for, and checked from there.
+  const kept = copy?.checked_n ? await keptThread(db, id, Number(copy.checked_n), String(copy.checked_head)) : null;
   const askedAt = now();
-  try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
-  const signed = await learnPeople(env, data.people);
+  let data;
+  try { data = await ask(env, from, group, kept ? `/_p/items/${id}?after=${Number(copy.checked_n)}` : `/_p/items/${id}`); } catch (error) {
+    return { error: busyMessage(group, error), status: error.status };
+  }
   const state = await identityState(env, String(group.identity));
   if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
   const owner = String(state.current.owner);
-  const admins = await checkRoles(env, group, owner, data.roles, data.delegations);
-  const me = await ownHost(env);
-  const copy = await env.DB.prepare("SELECT author, checked_n, checked_head FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
-  const entries = Array.isArray(data.entries) ? data.entries : [];
   const host = String(group.identity);
-  const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: state.current.hosting, host, list: id }));
-  const result = await checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
-    entries, signedHead: data.signedHead, from: from0 ? { n: from0.n, head: from0.head } : null, lookups: lookupsWith(env, data.delegations),
-    group: { owner, admin: (p) => admins.has(p) } });
-  const before = copy?.checked_n ? entries.find((e) => e.n === Number(copy.checked_n)) : null;
-  const changed = Boolean(copy?.checked_n && (!before || before.head !== copy.checked_head));
-  const last = entries.at(-1);
-  if (copy && !result.problem && !changed && last) {
-    await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ? AND group_id = ?").bind(last.n, last.head, id, group.id).run();
+  const me = await ownHost(env);
+  let signed = await learnPeople(env, data.people);
+  let admins = await checkRoles(env, group, owner, data.roles, data.delegations);
+  const check = (entries, from) => checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
+    entries, signedHead: data.signedHead, from, lookups: lookupsWith(env, data.delegations), group: { owner, admin: (p) => admins.has(p) } });
+  // A removal by an admin says so, worked out from the owner's signed roles while they're at hand (and kept so).
+  const flagged = (list) => list.map((e) => (e.removedBy ? { ...e, removedByAdmin: Boolean(e.removedByAdmin || (e.removedBy !== owner && admins.has(e.removedBy))) } : e));
+  let result = null;
+  let changed = false;
+  if (kept) {
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const next = await check(entries, { n: Number(copy.checked_n), head: String(copy.checked_head) });
+    if (!next.problem) {
+      const heads = new Map(entries.map((e) => [e.n, e.head]));
+      const fresh = next.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));
+      result = { entries: flagged(withNew(kept, fresh)), problem: null };
+      if (fresh.length && fitToKeep(fresh)) await keepThread(db, id, result.entries, firstChanged(result.entries, fresh));
+      else if (fresh.length) await db.prepare("DELETE FROM thread_cache WHERE list = ?").bind(id).run(); // read whole next time
+    } else {
+      // Doesn't follow on from where this site got to: the whole conversation, as before, to show what it is now.
+      try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
+      signed = new Map([...signed, ...(await learnPeople(env, data.people))]);
+      admins = await checkRoles(env, group, owner, data.roles, data.delegations);
+    }
   }
-  const known = await namesFor(env.DB, [...new Set(result.entries.map((e) => e.by).filter(Boolean))]);
+  if (!result) {
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: state.current.hosting, host, list: id }));
+    const whole = await check(entries, from0 ? { n: from0.n, head: from0.head } : null);
+    const before = copy?.checked_n ? entries.find((e) => e.n === Number(copy.checked_n)) : null;
+    changed = Boolean(copy?.checked_n && (!before || before.head !== copy.checked_head));
+    const heads = new Map(entries.map((e) => [e.n, e.head]));
+    result = { entries: flagged(whole.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }))), problem: whole.problem };
+    if (copy && !whole.problem && !changed && result.entries.length && fitToKeep(result.entries)) await keepThread(db, id, result.entries);
+  }
+  const last = result.entries.at(-1);
+  if (copy && !result.problem && !changed && last && last.n !== Number(copy.checked_n ?? 0)) {
+    await db.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ? AND group_id = ?").bind(last.n, last.head, id, group.id).run();
+  }
+  const known = await namesFor(db, [...new Set(result.entries.map((e) => e.by).filter(Boolean))]);
   const names = new Map([...memberNames(people), ...signed, ...known]);
   // Named as the owner here knows them (names.js): their friends marked, and look-alikes of friends, the owner or admins.
-  const shown = await peopleShown(env.DB, result.entries.map((e) => e.by), { signed: new Map([...memberNames(people), ...signed]),
+  const shown = await peopleShown(db, result.entries.map((e) => e.by), { signed: new Map([...memberNames(people), ...signed]),
     group: { owner, names, admins }, me: me?.person ?? null });
   // What the owner here sent to it, compared with what the group shows (sentchecks.js).
   if (me && !result.problem) await compareThread(env, { where: { group }, host, list: id, entries: result.entries, me: me.person, names, askedAt }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
-  const heads = new Map(entries.map((e) => [e.n, e.head]));
-  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
-    ...(e.by && shown.tags.get(e.by)),
-    removedByAdmin: e.removedBy && e.removedBy !== owner && admins.has(e.removedBy) })),
+  return { entries: result.entries.map((e) => ({ ...e, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
+    ...(e.by && shown.tags.get(e.by)) })),
   problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names: new Map([...names, ...shown.names]), tags: shown.tags };
 }
 

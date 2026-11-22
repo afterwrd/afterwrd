@@ -253,7 +253,8 @@ async function routeGroup(request, env, url) {
   if (url.pathname.startsWith("/_join/")) return handleJoinLink(request, env, url);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
   // afterwrd 2 (step 6c): its posts, as signed items, to members' signed calls (groupposts.js).
-  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check") return handleGroupItems(request, env, url);
+  if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check"
+    || url.pathname === "/_p/people") return handleGroupItems(request, env, url);
   const signed = await signedFile(request, env, url);
   if (signed) return signed;
   if (request.method === "GET" && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);

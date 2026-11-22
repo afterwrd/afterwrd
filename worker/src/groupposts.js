@@ -16,6 +16,8 @@
 //   GET  /_p/items/<id>/dates/<date>   one date's list of a repeating event (step 6d: its answers and calling off),
 //                            with what /_p/items/<id> sends with it
 //   POST /_p/records/check   what became of the member's records here (sentchecks.js answerCheck)
+//   POST /_p/people          {people, keys}: identities and delegations a member's site is missing (a pull with
+//                            `since` sends only those new to this site since: friendhost.js learntSince)
 //   POST /_p/records         {sent, delegation, profile?}: the member's own comment, edit, delete, vote, answer, end or
 //                            change, or (an admin, or the group's owner) a remove or calloff; an answer or calloff with
 //                            `date` goes on that date's list, which starts with it
@@ -25,7 +27,7 @@
 // those going or who might.
 import { MAX_COMMENT } from "./archive/comments.js";
 import { finishedAt } from "./calendar.js";
-import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js";
+import { delegationsFor, itemForFriend, keyOf, learntSince, peopleFor } from "./friendhost.js";
 import { signedLink } from "./friends.js";
 import { closedGroup, copyPhotos, GROUP_BYTES, groupGone, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
 import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
@@ -46,6 +48,7 @@ import { selfHosted } from "./hosting.js";
 import { ownUsage } from "./allowances.js";
 
 const SINCE_PAGE = 50;
+const PEOPLE_AT_ONCE = 200; // people, and delegations, asked for in one POST /_p/people
 const BEFORE_PAGE = 20;
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
 const KINDS = new Set(["comment", "edit", "delete", "vote", "answer", "end", "change", "remove", "calloff"]);
@@ -101,6 +104,12 @@ export async function handleGroupItems(request, env, url) {
   if (request.method === "POST" && url.pathname === "/_p/items") return shut ? json({ error: "This group has closed." }, 409) : newPost(env, url, self, group, member, body);
   if (request.method === "POST" && url.pathname === "/_p/records") return memberRecord(env, url, self, member, body, { shut });
   // What became of the member's records here (sentchecks.js): while closing, too.
+  // People and delegations a member's site is missing, after a pull that sent only those new since it last asked.
+  if (request.method === "POST" && url.pathname === "/_p/people") {
+    const ids = (Array.isArray(body?.people) ? body.people : []).filter((p) => typeof p === "string" && ID_RE.test(p)).slice(0, PEOPLE_AT_ONCE);
+    const keys = (Array.isArray(body?.keys) ? body.keys : []).filter((k) => typeof k === "string" && ID_RE.test(k)).slice(0, PEOPLE_AT_ONCE);
+    return json({ v: 2, people: ids.length ? await peopleFor(db, ids) : {}, delegations: keys.length ? await delegationsFor(db, keys) : {} });
+  }
   if (request.method === "POST" && url.pathname === "/_p/records/check") {
     const answer = await answerCheck(env, String(member.identity), body, { host: self.person, rolesOf: (people) => roleProofs(env, self, people) });
     return json(answer, answer.status ?? 200);
@@ -132,8 +141,13 @@ export async function handleGroupItems(request, env, url) {
     const until = before || only ? null : more ? Number(rows.at(-1).changed_at) : Math.min(Number(rows.at(-1)?.changed_at ?? since), Math.max(since, now() - 1));
     const keys = [...items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]), ...Object.values(roles).flatMap((p) => [p.join, p.role])].map(keyOf);
     const authors = items.flatMap((i) => [i.sent, ...i.records.map((x) => x.sent)]).map((x) => parseRecord(fromB64url(x.record))?.author).filter(Boolean);
+    const people = [...new Set([...authors, self.owner])];
+    // A member who has asked before (`since`) is sent only who's new to this site since; one that's missing someone
+    // older asks for them (POST /_p/people). Otherwise, everyone in what's sent.
+    const known = since && !before && !only ? await learntSince(db, keys, people, since)
+      : { delegations: await delegationsFor(db, keys), people: await peopleFor(db, people) };
     return json({ v: 2, items, gone, until, more, roles, context: await groupObject(db, url.origin, group, member),
-      delegations: await delegationsFor(db, keys), people: await peopleFor(db, [...new Set([...authors, self.owner])]),
+      delegations: known.delegations, people: known.people,
       ...(!before && !only && { mine: await mineSince(db, String(member.identity), since) }),
       // To its owner, on Cloudflare: how busy this group's site has been this week, for their busy-account warning
       // (allowances.js), since it shares their account.
@@ -147,7 +161,9 @@ export async function handleGroupItems(request, env, url) {
       const event = await db.prepare("SELECT 1 FROM lists WHERE id = ? AND deleted_at IS NULL").bind(one[1]).first();
       return event ? json({ v: 2, empty: true }) : json({ error: "Not found." }, 404);
     }
-    const list = await readList(db, one[2] ? dateList(one[1], one[2]) : one[1], { host: self });
+    // ?after=: a member's site that checked up to there asks only for what's after (threads.js).
+    const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
+    const list = await readList(db, one[2] ? dateList(one[1], one[2]) : one[1], { host: self, after });
     if (!list || list.owner === self.person) return json({ error: "Not found." }, 404); // not the members list: that's /_group/members
     if (list.deleted) return json({ error: "Deleted.", deleted: true }, 410);
     const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);

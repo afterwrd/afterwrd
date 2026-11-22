@@ -260,15 +260,19 @@ export class GroupRules extends Rules {
 
 /**
  * Checks a list as a host shows it. `entries` run from just after `from` (a checked point: {n, head}, a checkpoint or
- * this reader's last checked point; none for the start) to the end; `signedHead` is the host's signature on the end.
+ * this reader's last checked point; none for the start), or after `rules` already worked out from what this reader
+ * checked before, to the end; `signedHead` is the host's signature on the end.
  * Returns {entries: [{n, fp, taken, state, record, content}], upTo, head, problem}: everything up to `upTo` checked; a
  * `problem` says why the rest isn't shown ("broken": the running fingerprint doesn't add up, or the head isn't signed;
  * "unexpected": an entry no honest host would have taken). Each entry's state is "ok", "deleted", "removed",
  * "left-out" (gone, with nothing signed saying why) or "failed" (its signature doesn't check: hidden).
  */
-export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules, group = null }) {
-  const rules = group ? new GroupRules({ host, list, owner, group }) : new Kind({ host, list, owner });
-  if (from) rules.startAt(from.n, from.head);
+export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules, group = null, rules: built = null }) {
+  // `built`: rules already worked out from entries this reader checked before and kept (as a members list is:
+  // groupjoin.js), carried on from where they got to.
+  const rules = built ?? (group ? new GroupRules({ host, list, owner, group }) : new Kind({ host, list, owner }));
+  if (built) from = { n: built.n, head: built.heads.get(built.n) };
+  else if (from) rules.startAt(from.n, from.head);
   const shown = [];
   const checked = [];
   let problem = null;
@@ -285,7 +289,8 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
     const head = await rules.add({ fp: e.fp, taken: e.taken, record: got?.record ?? null, byHost: got?.byHost ?? false, content: got?.content });
     if (e.head !== head) { problem = "broken"; break; }
     checked.push(e);
-    shown.push({ n: e.n, fp: e.fp, taken: e.taken, state: got ? "ok" : e.sent ? "failed" : "gone", record: got?.record ?? null, content: got?.content, by: got?.record.author ?? null });
+    shown.push({ n: e.n, fp: e.fp, taken: e.taken, state: got ? "ok" : e.sent ? "failed" : "gone", record: got?.record ?? null, content: got?.content, by: got?.record.author ?? null,
+      ...(got?.byHost && { byHost: true }) });
   }
   // The end must be what the host signed.
   const end = shown.length ? { n: shown.at(-1).n, head: rules.heads.get(shown.at(-1).n) } : from;

@@ -16,6 +16,7 @@
 //   POST /_join/<token>/accept    (signed) the joiner's own signed `join`
 // Members' sites (signed calls; someone not yet let in may only take their request back):
 //   GET  /_group/members          who's in it, with the members list as signed
+//   GET  /_group/members/list     the members list as signed, alone; ?after=: only what's after that point
 //   POST /_group/records          a signed approve, remove, role, leave, or (the owner) close
 // Admins (the owner, and members the owner makes admins):
 //   GET  /_group/admin/members    everyone, with requests to join
@@ -332,6 +333,10 @@ export async function handleGroupApi(request, env, url) {
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
   const site = url.origin;
   if (route === "GET /_group/members") return json(await groupMembers(env, site, group, member));
+  // The members list as signed, alone: from the start, or after the point a member's site checked and kept (?after=).
+  if (route === "GET /_group/members/list") {
+    return json({ "afterwrd:list": await signedMembers(env, { after: Math.max(0, Math.floor(Number(url.searchParams.get("after") ?? 0)) || 0) }) });
+  }
   // A member's signed decision about someone, their leaving, or the owner closing the group (groupmembers.js).
   if (route === "POST /_group/records") return record(await request.json().catch(() => ({})));
 

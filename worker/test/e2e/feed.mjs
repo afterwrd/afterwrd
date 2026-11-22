@@ -310,16 +310,26 @@ const annsEntry = tampered.find((e) => e.fp === annsFp);
 const wasContent = annsEntry.sent.content;
 annsEntry.sent.content = Buffer.from(JSON.stringify({ text: "Ann never said this" })).toString("base64url");
 sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(tampered).replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+// Ann's site keeps the conversation as it checked it (threads.js), and asks only for what's after: what Bob's site
+// changes in what it's checked already doesn't reach her page.
+await ann.goto(bobsPostPage);
+check("Ann's site keeps the conversation as it checked it: words Bob's site changes later aren't shown",
+  !(await ann.$eval("article.from-friend", (a) => a.textContent)).includes("Ann never said this") && !(await ann.$("article.from-friend .notice.alert")));
+// Read afresh (as a site that hasn't kept it would), they're caught.
+const freshRead = () => sql(stateA, `DELETE FROM thread_cache WHERE list = '${bobPostId}'`);
+freshRead();
 await ann.goto(bobsPostPage);
 check("words changed by Bob's site fail their check on Ann's, and aren't shown", (await ann.$$eval("article.from-friend .comment.gone", (l) => l.map((c) => c.textContent)))
   .some((t) => t.includes("didn't pass its check")) && !(await ann.$eval("article.from-friend", (a) => a.textContent)).includes("Ann never said this"));
 annsEntry.sent.content = wasContent;
 const dropped = tampered.filter((e) => e.fp !== annsFp);
 sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(dropped).replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+freshRead();
 await ann.goto(bobsPostPage);
 check("a comment dropped by Bob's site: Ann's says the conversation doesn't add up", (await ann.$eval("article.from-friend .notice.alert", (n) => n.textContent).catch(() => ""))
   .includes("doesn't add up"));
 sql(stateB, `UPDATE list_pages SET entries = '${bobPages[0].entries.replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);
+freshRead();
 await ann.goto(bobsPostPage);
 check("…and with it put back, all's well again", !(await ann.$("article.from-friend .notice.alert")) && (await feedCards(ann))[0].comments.length === 2);
 

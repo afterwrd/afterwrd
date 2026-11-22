@@ -377,14 +377,19 @@ const bobsEntry = tampered.find((e) => e.fp === bobsComment);
 const wasContent = bobsEntry.sent.content;
 bobsEntry.sent.content = Buffer.from(JSON.stringify({ text: "forged words" })).toString("base64url");
 sql(stateG, `UPDATE list_pages SET entries = '${JSON.stringify(tampered).replace(/'/g, "''")}' WHERE list = '${bobPost}' AND page = 0`);
+// Read afresh each time (as a site that hasn't kept the conversation would: threads.js), so each change is caught.
+const freshRead = () => sql(stateA, `DELETE FROM thread_cache WHERE list = '${bobPost}'`);
+freshRead();
 await ann.goto(`${A}/groups/${annGroup}/posts/${bobPost}`);
 check("words the group changed fail their check, and aren't shown", (await ann.$$eval("article.in-group .comment.gone", (l) => l.map((c) => c.textContent)))
   .some((t) => t.includes("didn't pass its check")) && !(await text(ann)).includes("forged words"));
 bobsEntry.sent.content = wasContent;
 sql(stateG, `UPDATE list_pages SET entries = '${JSON.stringify(tampered.filter((e) => e.fp !== bobsComment)).replace(/'/g, "''")}' WHERE list = '${bobPost}' AND page = 0`);
+freshRead();
 await ann.goto(`${A}/groups/${annGroup}/posts/${bobPost}`);
 check("a comment the group dropped: the conversation doesn't add up", (await text(ann, "article.in-group .notice.alert")).includes("doesn't add up"));
 sql(stateG, `UPDATE list_pages SET entries = '${pages[0].entries.replace(/'/g, "''")}' WHERE list = '${bobPost}' AND page = 0`);
+freshRead();
 await ann.goto(`${A}/groups/${annGroup}/posts/${bobPost}`);
 check("…and with it put back, all's well again", !(await ann.$("article.in-group .notice.alert")) && (await cards(ann))[0].comments.length === 4);
 // A post's words as the group says them, changed: members' sites work them out from what Bob signed.

@@ -7,6 +7,7 @@
 //   receipt (relayRecord):
 //     POST /_admin/friend/<connection>/items/<id>/records   form: sent (JSON), back
 import { rateWindow } from "./limits.js";
+import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
 import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
@@ -366,51 +367,82 @@ export function copyFromRow(r, { names = new Map(), me = null, known = null } = 
  * them, with each comment's writer's name), problem, changed, seen, mine}, or {error}.
  */
 export async function friendThread(env, from, connection, id) {
+  const db = env.DB;
   const person = await friendPerson(env, connection);
   if (!person) return { error: "Their site doesn't take signed comments yet." };
-  let data;
+  const copy = await db.prepare("SELECT author, checked_n, checked_head FROM copies WHERE id = ?").bind(id).first();
+  // What this site checked before, kept (threads.js): then only what's after it is asked for, and checked from there.
+  const kept = copy?.checked_n ? await keptThread(db, id, Number(copy.checked_n), String(copy.checked_head)) : null;
   const askedAt = now();
-  try { data = await callFriend(env, from, String(connection.origin), `/_p/items/${id}`); } catch (error) {
-    return { error: busyUntil(error) ? `${connection.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message };
-  }
+  const fetchList = async (after) => {
+    try { return await callFriend(env, from, String(connection.origin), after ? `/_p/items/${id}?after=${after}` : `/_p/items/${id}`); } catch (error) {
+      return { error: busyUntil(error) ? `${connection.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message };
+    }
+  };
+  let data = await fetchList(kept ? Number(copy.checked_n) : 0);
+  if (data.error && typeof data.error === "string" && !Array.isArray(data.entries)) return { error: data.error };
   // Everyone in it: their identities as their site passed them on (each checked as it's learnt), and their names.
   const names = new Map();
   const me = await ownHost(env);
-  for (const [p, info] of Object.entries(data.people ?? {})) {
-    if (!ID_RE.test(p)) continue;
-    const chain = parseChain(info?.chain);
-    const state = chain && (await learnIdentity(env, chain));
-    if (!state || state.id !== p) continue;
-    const profile = info.profile && (await checkProfile(info.profile, state));
-    if (profile) {
-      names.set(p, profile.name);
-      // Kept, so pages elsewhere (a poll's voters, an event's guests) can name them too.
-      await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(info.profile), p).run();
+  const learn = async (people) => {
+    for (const [p, info] of Object.entries(people ?? {})) {
+      if (!ID_RE.test(p)) continue;
+      const chain = parseChain(info?.chain);
+      const state = chain && (await learnIdentity(env, chain));
+      if (!state || state.id !== p) continue;
+      const profile = info.profile && (await checkProfile(info.profile, state));
+      if (profile) {
+        names.set(p, profile.name);
+        // Kept, so pages elsewhere (a poll's voters, an event's guests) can name them too.
+        await db.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(info.profile), p).run();
+      }
     }
-  }
-  names.set(person, String(connection.name));
+  };
+  await learn(data.people);
   const hostState = await identityState(env, person);
   if (!hostState) return { error: "Their site's identity couldn't be checked." };
-  const copy = await env.DB.prepare("SELECT author, checked_n, checked_head FROM copies WHERE id = ?").bind(id).first();
-  const entries = Array.isArray(data.entries) ? data.entries : [];
-  const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: hostState.current.hosting, host: person, list: id }));
-  const result = await checkList({ host: person, hostingKey: hostState.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? person),
-    entries, signedHead: data.signedHead, from: from0 ? { n: from0.n, head: from0.head } : null, lookups: lookupsWith(env, data.delegations) });
-  // What this site checked before must still be there.
-  const before = copy?.checked_n ? entries.find((e) => e.n === Number(copy.checked_n)) : null;
-  const changed = Boolean(copy?.checked_n && (!before || before.head !== copy.checked_head));
-  const last = entries.at(-1);
-  if (!result.problem && !changed && last) {
-    await env.DB.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ?").bind(last.n, last.head, id).run();
+  const check = (entries, from) => checkList({ host: person, hostingKey: hostState.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? person),
+    entries, signedHead: data.signedHead, from, lookups: lookupsWith(env, data.delegations) });
+  let result = null;
+  let changed = false;
+  if (kept) {
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const next = await check(entries, { n: Number(copy.checked_n), head: String(copy.checked_head) });
+    if (!next.problem) {
+      const heads = new Map(entries.map((e) => [e.n, e.head]));
+      const fresh = next.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));
+      result = { entries: withNew(kept, fresh), problem: null };
+      if (fresh.length && fitToKeep(fresh)) await keepThread(db, id, result.entries, firstChanged(result.entries, fresh));
+      else if (fresh.length) await db.prepare("DELETE FROM thread_cache WHERE list = ?").bind(id).run(); // read whole next time
+    } else {
+      // Doesn't follow on from where this site got to: the whole conversation, as before, to show what it is now.
+      data = await fetchList(0);
+      if (data.error && !Array.isArray(data.entries)) return { error: data.error };
+      await learn(data.people);
+    }
+  }
+  if (!result) {
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    const from0 = data.checkpoint && (await checkHead(data.checkpoint, { hostingKey: hostState.current.hosting, host: person, list: id }));
+    const whole = await check(entries, from0 ? { n: from0.n, head: from0.head } : null);
+    // What this site checked before must still be there.
+    const before = copy?.checked_n ? entries.find((e) => e.n === Number(copy.checked_n)) : null;
+    changed = Boolean(copy?.checked_n && (!before || before.head !== copy.checked_head));
+    const heads = new Map(entries.map((e) => [e.n, e.head]));
+    result = { entries: whole.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null })), problem: whole.problem };
+    if (copy && !whole.problem && !changed && result.entries.length && fitToKeep(result.entries)) await keepThread(db, id, result.entries);
+  }
+  names.set(person, String(connection.name));
+  const last = result.entries.at(-1);
+  if (copy && !result.problem && !changed && last && last.n !== Number(copy.checked_n ?? 0)) {
+    await db.prepare("UPDATE copies SET checked_n = ?, checked_head = ? WHERE id = ?").bind(last.n, last.head, id).run();
   }
   // What the owner here sent to it, compared with what their site shows (sentchecks.js).
   if (me && !result.problem) await compareThread(env, { where: { connection }, host: person, list: id, entries: result.entries, me: me.person, names, askedAt }).catch(() => null);
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
-  // Each with its running fingerprint as checked (a mention receipt names one: receipts.js).
-  const heads = new Map(entries.map((e) => [e.n, e.head]));
   // Named as the owner here knows them (names.js): friends by the name they approved, others as "friend of Ann".
-  const shown = await peopleShown(env.DB, result.entries.map((e) => e.by), { signed: names, friendHost: { person, name: String(connection.name) }, me: me?.person ?? null });
-  return { entries: result.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
+  const shown = await peopleShown(db, result.entries.map((e) => e.by), { signed: names, friendHost: { person, name: String(connection.name) }, me: me?.person ?? null });
+  return { entries: result.entries.map((e) => ({ ...e, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
     ...(e.by && shown.tags.get(e.by)) })), problem: result.problem, changed,
     seen: last ? { n: last.n, h: last.head } : null, mine, host: person };
 }

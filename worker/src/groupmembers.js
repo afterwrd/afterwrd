@@ -63,7 +63,7 @@ export async function theirs(env, person, { sent, delegation }) {
   const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
   if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return { error: "That isn't signed by you." };
   const { expires } = JSON.parse(new TextDecoder().decode(dBytes));
-  await env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at) VALUES (?, ?, ?, ?, ?)")
+  await env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))")
     .bind(record.key, person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
   return { record, state };
 }
@@ -146,12 +146,13 @@ export async function membersNow(env, self) {
 }
 
 /** The members list as signed, for members' sites to check: its entries, the group's signature on its end, and who's in it. */
-export async function signedMembers(env) {
+export async function signedMembers(env, { after = 0 } = {}) {
   const self = await groupSelf(env);
   if (!self) return null;
   // Whole, from its first entry: who's in follows from every join and approval since (the scale run found a group
-  // past about 250 members sent from a checkpoint, which no member's site could check).
-  const list = await readList(env.DB, self.list, { host: self, whole: true });
+  // past about 250 members sent from a checkpoint, which no member's site could check). Or, for a site that checked
+  // and kept it up to `after` (groupjoin.js), only what's after.
+  const list = await readList(env.DB, self.list, { host: self, whole: true, after });
   if (!list) return null;
   const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
   const people = [...new Set([list.owner, ...records.map((r) => r.author)])];

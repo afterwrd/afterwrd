@@ -41,6 +41,32 @@ export async function delegationsFor(db, keys) {
   return Object.fromEntries([...own.results, ...known.results].map((r) => [String(r.key), { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) }]));
 }
 
+/**
+ * Those of `keys` (delegations) and `people` (identities and profiles) that this site learnt, or saw change, after
+ * `since` (its own clock): all a reader who asked before can be missing, found by when, not by listing every one (a
+ * list of keys is read row by row: the scale run's group of 1,000 read about 2 million rows a day so). A little before
+ * `since` too, as times are to the second. A reader missing an older one asks for it (POST /_p/people).
+ * @param {D1Database} db @param {string[]} keys @param {string[]} people @param {number} since
+ */
+export async function learntSince(db, keys, people, since) {
+  const [wantKeys, wantPeople] = [new Set(keys), new Set(people)];
+  const from = since - 60;
+  const [own, known, identities, self] = /** @type {D1Result<any>[]} */ (await db.batch([
+    db.prepare("SELECT key, bytes, proof FROM delegations WHERE created_at > ?").bind(from),
+    db.prepare("SELECT key, bytes, proof FROM known_delegations WHERE learnt_at > ?").bind(from),
+    db.prepare("SELECT person, chain, profile FROM identities WHERE updated_at > ? AND frozen_at IS NULL").bind(from),
+    db.prepare("SELECT person, chain, profile FROM own_identity WHERE id = 1"),
+  ]));
+  const delegations = Object.fromEntries([...own.results, ...known.results].filter((r) => wantKeys.has(String(r.key)))
+    .map((r) => [String(r.key), { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) }]));
+  const out = {};
+  for (const r of [...identities.results, ...self.results.filter((o) => wantPeople.has(String(o.person)))]) {
+    if (!wantPeople.has(String(r.person))) continue;
+    out[String(r.person)] = { chain: JSON.parse(String(r.chain)), ...(r.profile ? { profile: JSON.parse(String(r.profile)) } : {}) };
+  }
+  return { delegations, people: out };
+}
+
 /** Identity chains and signed profiles of `people`: the owner's own, and those this site knows. */
 export async function peopleFor(db, people) {
   const out = {};
@@ -128,7 +154,9 @@ export async function handleFriendItems(request, env, url, work) {
   if (request.method === "GET" && one) {
     if (!(await mayCallerSee(db, one[1], caller.connection.id))) return json({ error: "Not found." }, 404);
     const host = await ownHost(env);
-    const list = host && (await readList(db, one[1], { host }));
+    // ?after=: a reader that checked up to there asks only for what's after (threads.js).
+    const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
+    const list = host && (await readList(db, one[1], { host, after }));
     if (!list) return json({ error: "Not found." }, 404);
     if (list.deleted) return json({ error: "Deleted.", deleted: true }, 410);
     const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
@@ -159,7 +187,7 @@ export async function handleFriendItems(request, env, url, work) {
     const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
     if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return json({ error: "That isn't signed by them." }, 400);
     const { expires } = JSON.parse(new TextDecoder().decode(dBytes));
-    await db.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at) VALUES (?, ?, ?, ?, ?)`)
+    await db.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))`)
       .bind(record.key, caller.person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
     // Their signed name, kept to pass on with the thread (peopleFor), so others in it can name them.
     const named = profile && (await checkProfile(profile, state));

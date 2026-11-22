@@ -425,6 +425,21 @@ check("…Cat's site counts them, but says how many she knows", !(await alertOn(
 const who = await cat.$eval(`#poll-${poll} .poll-who`, (d) => d.textContent).catch(() => "");
 check("…and doesn't pass them off as friends", who.includes("Bob Example") && !/Pat Madeup[^,]*your friend/.test(who), who.slice(0, 200));
 
+// --- a pull sends only who's new to the group since (step 9, option 1A) -------------------------------------------------------
+
+// Cat's site has pulled before. With every delegation it keeps gone, and Bob posting with the key the group learnt
+// long ago (so a pull since then doesn't send it), her site asks the group for it (POST /_p/people).
+const bobKey = sql(stateB, "SELECT key FROM delegations ORDER BY expires_at DESC LIMIT 1")[0].key;
+sql(stateC, "DELETE FROM known_delegations");
+await compose(bob, B, "A walk on the coast next?", `/groups/${bobGroup}`);
+const coast = sql(stateG, "SELECT id FROM items WHERE type = 'post' ORDER BY created_at DESC, rowid DESC LIMIT 1")[0].id;
+check("Cat's site had pulled from the group before", sql(stateC, `SELECT items_since FROM groups WHERE id = ${catGroup}`)[0].items_since > 0);
+sql(stateC, `UPDATE groups SET items_checked_at = 0 WHERE id = ${catGroup}`);
+await cat.goto(`${C}/groups/${catGroup}`);
+check("…a pull sends only who's new, and her site asks for the delegation it's missing: Bob's post is kept",
+  await waitFor(() => n(stateC, `copies WHERE id = ${q(coast)}`) === 1), "");
+check("…and her site keeps it again", n(stateC, `known_delegations WHERE key = ${q(bobKey)}`) === 1);
+
 // --- the end -----------------------------------------------------------------------------------------------------------------
 
 for (const s of standIns) s.close();

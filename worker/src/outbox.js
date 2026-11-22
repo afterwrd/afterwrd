@@ -13,14 +13,15 @@ import { DurableObject } from "cloudflare:workers";
 import { handle, HEADERS } from "./app.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
-import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
+import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, siteObject, ZONE_HEADER } from "./sqlite.js";
 import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
-import { callFriend } from "./calls.js";
 import { noteFor } from "./notes.js";
 import { sendReceipt } from "./receipts.js";
-import { callMember } from "./groupmembers.js";
 import { groupNoteFor } from "./groupposts.js";
+import { ownHost } from "./items.js";
+import { ownOrigin } from "./keys.js";
+import { signCall } from "./signedcalls.js";
 
 const BATCH = 40;
 const TIMEOUT_MS = 5000;
@@ -45,6 +46,42 @@ function moving(request) {
       status: 503, headers: { ...headers, "Content-Type": "text/html; charset=utf-8" } });
   }
   return new Response(JSON.stringify({ error: message }), { status: 503, headers: { ...headers, "Content-Type": "application/json" } });
+}
+
+/**
+ * Each fat note's body for its recipient (a friend's connection, or in a group's site a member), and the signed call
+ * that sends it: [{known, call?: {url, headers, body}, error?}], in order. `known`: the friend or member is still here
+ * (approved); without `call`, there's nothing to send them (what it's about has gone, or they may not see it). What's
+ * the same for every recipient of a note is worked out once (notes.js noteFor, groupposts.js groupNoteFor).
+ * @param {Env} env @param {{ note: any, connection: number }[]} calls @param {boolean} group
+ */
+export async function prepareNotes(env, calls, group) {
+  const db = env.DB;
+  const ids = [...new Set(calls.map((c) => c.connection))];
+  const { results } = await db.prepare(group ? `SELECT * FROM group_members WHERE approved_at IS NOT NULL AND identity IS NOT NULL
+    AND id IN (SELECT value FROM json_each(?))` : `SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
+    AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
+  const rows = new Map(results.map((r) => [Number(r.id), r]));
+  const me = await ownHost(env);
+  // A group calls its members as its own address; a person's site calls friends as the address the note was made at.
+  const groupOrigin = group ? await ownOrigin(db) : null;
+  const shared = new Map();
+  return Promise.all(calls.map(async ({ note, connection }) => {
+    const friend = rows.get(connection);
+    if (!friend) return { known: false };
+    if (!me) return { known: true, error: "Set up signing first." };
+    try {
+      const body = group ? await groupNoteFor(env, note, friend, shared) : await noteFor(env, note, friend, shared);
+      if (!body) return { known: true };
+      const url = `${friend.origin}/_p/notes`;
+      const text = JSON.stringify(body);
+      const headers = await signCall({ method: "POST", url, body: text, person: me.person, from: group ? groupOrigin : String(note.origin),
+        privateKey: me.privateKey });
+      return { known: true, call: { url, headers, body: text } };
+    } catch (error) {
+      return { known: true, error: String(/** @type {any} */ (error)?.message ?? error) };
+    }
+  }));
 }
 
 export class Outbox extends DurableObject {
@@ -121,6 +158,16 @@ export class Outbox extends DurableObject {
     if (!this.isSite()) throw new Error("Only the site's own object has its database.");
     if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
     return runBatches(this.ctx.storage, batches);
+  }
+
+  /**
+   * In the "site" object: fat notes' bodies for their recipients ([{note, connection}]), and the signed calls that send
+   * them, for the Outbox's run (sendNotes): worked out here, next to the database, in one call (prepareNotes).
+   */
+  async prepareNotes(calls, group) {
+    if (!this.isSite()) throw new Error("Only the site's own object has its database.");
+    if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
+    return prepareNotes(this.env, calls, group);
   }
 
   /** Whether this is the site's own object (the others are the outbox and the vault). */
@@ -246,21 +293,21 @@ export class Outbox extends DurableObject {
       for (const connection of next) calls.push({ note, connection, retry: null });
     }
     if (!calls.length) return 0;
-    const ids = [...new Set(calls.filter((c) => c.note.kind !== "receipt").map((c) => c.connection))];
-    // On a group's site, notes go to members (groupposts.js); on a person's, to friends.
+    // Each note's body for each recipient, and the signed call that sends it, are worked out in the site's object, next
+    // to the database, in one call (prepareNotes): every statement run from here is a call into that object, billed as a
+    // request, and the scale run's group of 1,000 spent 54,737 a day so. Then they're sent from here.
     const group = Boolean(this.env.GROUP_KEY);
-    const { results } = await this.env.DB.prepare(group ? `SELECT * FROM group_members WHERE approved_at IS NOT NULL AND identity IS NOT NULL
-      AND id IN (SELECT value FROM json_each(?))` : `SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
-      AND id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(ids)).all();
-    const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
+    const toSites = calls.filter((c) => c.note.kind !== "receipt");
+    const prepared = toSites.length
+      ? await siteObject(this.env).prepareNotes(toSites.map((c) => ({ note: c.note, connection: c.connection })), group) : [];
+    const ready = new Map(toSites.map((c, i) => [c, prepared[i]]));
     // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
     const deliveries = [];
-    // What each note says that's the same for everyone it goes to, worked out once this run (notes.js noteFor).
-    const shared = new Map();
-    await Promise.all(calls.map(async ({ note, connection, retry }) => {
-      const friend = note.kind === "receipt" ? null : friends.get(connection);
+    await Promise.all(calls.map(async (call) => {
+      const { note, connection, retry } = call;
       let again = false;
       let delivered = false;
+      let known = false; // a friend or member still here to send it to
       if (note.kind === "receipt") {
         try {
           delivered = await sendReceipt(this.env, note, JSON.parse(String(note.recipients))[connection]);
@@ -268,32 +315,26 @@ export class Outbox extends DurableObject {
           const status = /** @type {any} */ (error).status;
           again = status === 0 || status >= 500 || status === 429 || status === undefined;
         }
-      } else if (friend && group) {
-        try {
-          const body = await groupNoteFor(this.env, note, friend, shared);
-          if (body) {
-            const response = await callMember(this.env, friend, "/_p/notes", body);
+      } else {
+        const p = ready.get(call);
+        known = Boolean(p?.known);
+        if (p?.error) again = true; // couldn't be worked out this time (a moment's trouble): tried again later
+        else if (p?.call) {
+          try {
+            const response = await fetch(p.call.url, { method: "POST", redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
+              headers: { ...p.call.headers, "Content-Type": "application/json" }, body: p.call.body });
             await response.body?.cancel();
             if (!response.ok) throw Object.assign(new Error(`answered ${response.status}`), { status: response.status });
+            delivered = true;
+          } catch (error) {
+            // Not reached, or busy: tried again later. Anything else won't change by asking again.
+            const status = /** @type {any} */ (error).status;
+            again = status === 0 || status >= 500 || status === 429 || status === undefined;
           }
-          delivered = Boolean(body);
-        } catch (error) {
-          const status = /** @type {any} */ (error).status;
-          again = status === 0 || status >= 500 || status === 429 || status === undefined;
-        }
-      } else if (friend) {
-        try {
-          const body = await noteFor(this.env, note, friend, shared);
-          if (body) await callFriend(this.env, String(note.origin), String(friend.origin), "/_p/notes", { body, timeout: TIMEOUT_MS });
-          delivered = Boolean(body);
-        } catch (error) {
-          // Not reached, or busy: tried again later. Anything else won't change by asking again.
-          const status = /** @type {any} */ (error).status;
-          again = status === 0 || status >= 500 || status === 429 || status === undefined;
         }
       }
       const tries = retry ? Number(retry.tries) + 1 : 0;
-      if (!group && note.kind === "item" && note.recipients && friend && (delivered || !again || tries >= NOTE_RETRY_SECONDS.length)) {
+      if (!group && note.kind === "item" && note.recipients && known && (delivered || !again || tries >= NOTE_RETRY_SECONDS.length)) {
         deliveries.push(this.env.DB.prepare("UPDATE item_guests SET delivery = ? WHERE item = ? AND connection_id = ?")
           .bind(delivered ? "delivered" : again ? "unreachable" : "refused", note.item, connection));
       }

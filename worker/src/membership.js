@@ -98,13 +98,13 @@ export function parseGroupMembers(data, site, n, env) {
 
 /** A call to a group's site, signed by this site (calls.js). Only groups with an identity are called. */
 // A group's whole members list (groupmembers.js signedMembers): every join and approval, with each member's identity
-// and delegation, about 4.6 MB at 1,000 members (the scale run found 509 members past the usual 2 MB). Fetched whole
-// by an admin for every decision; fetching only what's new since is for later (docs/signed-conversations.md, 9b).
+// and delegation, about 4.6 MB at 1,000 members (the scale run found 509 members past the usual 2 MB). Fetched
+// whole the first time a member's site checks it; after that, only what's new (groupjoin.js checkedMembers).
 const MEMBERS_REPLY = 8_000_000;
 const call = async (env, group, path, body) => {
   if (!group.identity) throw new Refusal("This group is from before signing: it can't be asked anything now.");
   return callFriend(env, await ownOrigin(env.DB), String(group.origin), path, { ...(body !== undefined && { body }), timeout: 25_000,
-    ...(path.endsWith("/members") && { maxReply: MEMBERS_REPLY }) });
+    ...(/^\/_group\/(admin\/)?members(\/list)?(\?|$)/.test(path) && { maxReply: MEMBERS_REPLY }) });
 };
 
 /** Keeps a group's name, owner, our role and whether it's closed up to date, from what it just said. */
@@ -262,15 +262,13 @@ export async function handleGroupActions(request, env, url) {
   if (action === "/point" || action === "/records") {
     try {
       if (action === "/point") {
-        let data;
         try {
-          data = await call(env, group, isAdmin(group) ? "/_group/admin/members" : "/_group/members");
+          return json(await membersPoint(env, group, (path) => call(env, group, path)));
         } catch (error) {
           // Still waiting to be let in: from their own request's receipt.
           if (/** @type {any} */ (error).status === 403) return json(await waitingPoint(env, group));
           throw error;
         }
-        return json(await membersPoint(env, group, data?.["afterwrd:list"]));
       }
       const body = await request.json().catch(() => ({}));
       const { record, fp } = await relayGroupRecord(env, group, body.sent, (p, b) => call(env, group, p, b));
