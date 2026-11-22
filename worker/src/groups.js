@@ -29,6 +29,8 @@
 // deletes its Worker:
 //   POST /_group/admin/end        the owner, once the 30 days are up: empties it, if it hasn't already
 // Groups made on afterwrd 1 kept their posts in group_* tables, read-only now, until migration (step 10).
+import { rejoin, rejoinPoint } from "./beforegroups.js";
+import { windowOf } from "./before.js";
 import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.js";
 import pkg from "../package.json";
 import { mediaStore } from "./media.js";
@@ -133,13 +135,16 @@ export async function groupObject(db, site, group, member) {
  */
 async function groupMembers(env, site, group, member, { all = false } = {}) {
   const db = env.DB;
-  const { results } = await db.prepare(`SELECT id, origin, name, role, created_at, approved_at, identity, join_fp FROM group_members
-    WHERE group_id = ? ${all ? "" : "AND approved_at IS NOT NULL"} ORDER BY role = 'member', name COLLATE NOCASE`).bind(group.id).all();
+  const { results } = await db.prepare(`SELECT m.id, m.origin, m.name, m.role, m.created_at, m.approved_at, m.identity, m.join_fp,
+    b.rejoined_at AS rejoined FROM group_members m LEFT JOIN group_members_before b ON b.origin = m.origin
+    WHERE m.group_id = ? ${all ? "" : "AND m.approved_at IS NOT NULL"} ORDER BY m.role = 'member', m.name COLLATE NOCASE`).bind(group.id).all();
   return tidy({
     "@context": CONTEXT, type: "Collection", context: await groupObject(db, site, group, member), totalItems: results.length,
     items: results.map((m) => ({
       type: "Person", id: actorId(m.origin), name: m.name, "afterwrd:role": m.role,
       "afterwrd:joinedAt": iso(m.approved_at), ...(all && { "afterwrd:member": m.id, "afterwrd:waiting": !m.approved_at }),
+      // Waiting, and in the group before afterwrd 2: re-joining (beforegroups.js), for the owner's browser to let in.
+      ...(all && !m.approved_at && m.rejoined && { "afterwrd:before": true }),
       ...(m.identity && { "afterwrd:person": m.identity, "afterwrd:join": m.join_fp ?? undefined }),
     })),
     "afterwrd:list": await signedMembers(env),
@@ -318,6 +323,9 @@ export async function handleGroupApi(request, env, url) {
   if (route === "POST /_group/claim") return claim(request, env, url);
   // Its identity, once, from the site that claimed it (its owner's: the only member until it has one).
   if (route === "POST /_group/identity") return setGroupIdentity(request, env, url);
+  // A group from afterwrd 1, come over: its members from before re-joining, by their sites' addresses (beforegroups.js).
+  if (route === "POST /_group/rejoin/point") return rejoinPoint(request, env, url, windowOf(env));
+  if (route === "POST /_group/rejoin") return rejoin(request, env, url, windowOf(env));
   const gone = await groupGone(env);
   const member = await signedMember(request, env, url);
   const group = member && !gone ? await theGroup(db) : null;

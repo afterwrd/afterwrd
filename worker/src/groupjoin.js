@@ -49,6 +49,18 @@ async function ready(env, sent, kinds, list) {
 /** Keeps the owner's own copy of what they sent a group, with its receipt; returns its fingerprint. */
 const keepSent = (env, record, sent, receipt, error = null) => keepSentAs(env, { record, sent, list: record.item, receipt, error });
 
+/**
+ * The owner's signed record about a group's members (`list`, of the kinds given), passed on by `send(body)` and kept
+ * with the group's receipt; returns what the group answered. Throws a Refusal if it can't be sent, or isn't taken.
+ */
+export async function relaySent(env, sent, kinds, list, send) {
+  const { record, body } = await ready(env, sent, kinds, list);
+  let reply;
+  try { reply = await send(body); } catch (error) { throw new Refusal(error.message); }
+  await keepSent(env, record, sent, reply.receipt ?? null);
+  return reply;
+}
+
 /** Asks to join a group with an identity (`info`: linkInfo's answer), with the owner's signed `join`. Returns its id here. */
 export async function joinSigned(env, info, sent) {
   const { record, body } = await ready(env, sent, ["join"], String(info.person));

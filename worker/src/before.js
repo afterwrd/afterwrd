@@ -29,6 +29,9 @@
 //                                     host, seen, prev, list: [{id, before, text}]} | null, left, waiting}
 //   POST /_admin/before            {old, sent, photos, guests, salt} -> {item, left}
 //                                  {to: "own" | connection id, item, records: [{id, sent}]} -> {ok}
+//                                  {rejoin: group id, sent}: a `join` for a group from before (10d: beforegroups.js)
+//   …GET also gives, once posts and comments are over, `rejoin` ({group, host, item, seen, prev, name}: an old group
+//   come over, for a join) and `approve` ({group, joins}: old members of a group the owner here brought over, waiting).
 //   POST /_p/before (friendhost)   {ask: [old ids], all} -> {answers: [{id, item, at, seen, until} | {id, state}]}
 //                                  {records: [{id, sent}], delegation, profile} -> {ok}
 import { guestsFor, lookupsFor, ownHost, refreshItem, sentRecord, takePost } from "./items.js";
@@ -39,6 +42,7 @@ import { identityState } from "./identities.js";
 import { checkDelegation } from "./identity.js";
 import { isBlocked } from "./blocks.js";
 import { decode, fromB64url } from "../public/static/signed.js";
+import { nextApprovals, nextRejoin, sendRejoin } from "./beforegroups.js";
 import { queueItemNote } from "./notes.js";
 import { pollTrouble } from "./itemkinds.js";
 import { cleanEvent, EVENT_FIELDS, finishedAt } from "./calendar.js";
@@ -50,7 +54,7 @@ const WINDOW_SECONDS = 30 * 86400;
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
 
 /** How long everything has to come over in: 30 days, or less on a local test site (TEST_BEFORE_SECONDS). */
-const windowOf = (env) => (env.ALLOW_LOCAL_SITES && Number(env.TEST_BEFORE_SECONDS) > 0 ? Number(env.TEST_BEFORE_SECONDS) : WINDOW_SECONDS);
+export const windowOf = (env) => (env.ALLOW_LOCAL_SITES && Number(env.TEST_BEFORE_SECONDS) > 0 ? Number(env.TEST_BEFORE_SECONDS) : WINDOW_SECONDS);
 
 /** When the 30 days after the update to afterwrd 2 end (migration 0046 noted when it came). */
 export async function broughtUntil(env) {
@@ -148,12 +152,17 @@ export async function handleBefore(request, env, url) {
     const { prepared, left, waiting } = await next(env);
     const shown = prepared && { old: prepared.old, before: prepared.before, photos: prepared.photos, post: prepared.post,
       mentions: prepared.mentions, guests: prepared.guests };
-    // Once the posts are over: comments made before, the owner's own here first, then those on friends' posts.
-    return json({ next: shown, comments: shown ? null : await nextComments(env, host, url.origin), left, waiting });
+    // Once the posts are over: comments made before, the owner's own here first, then those on friends' posts; then
+    // groups from before (10d): one come over to re-join, and old members to let in to one the owner here brought over.
+    const comments = shown ? null : await nextComments(env, host, url.origin);
+    const rejoin = shown || comments ? null : await nextRejoin(env, url.origin);
+    const approve = shown || comments || rejoin ? null : await nextApprovals(env, windowOf(env));
+    return json({ next: shown, comments, rejoin, approve, left, waiting });
   }
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   const body = await request.json().catch(() => ({}));
   if (body.to !== undefined) return takeComments(env, host, url.origin, body);
+  if (body.rejoin !== undefined) return sendRejoin(env, url.origin, Number(body.rejoin), body.sent);
   const row = typeof body.old === "string"
     ? await env.DB.prepare("SELECT id, key, created_at, text, title, mentions FROM posts WHERE key = ? AND source = 'afterwrd'").bind(body.old).first() : null;
   if (!row) return json({ error: "That post has come over already, or isn't here." }, 404);

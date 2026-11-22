@@ -54,7 +54,11 @@ export async function handleGroupIdentity(request, env, url, group, action) {
     } catch (error) { return json({ error: `The group's site didn't take it: ${error.message}` }, 400); }
     // Known here as any identity is (identities.js), and the group tied to it.
     await learnIdentity(env, chain, { owner: own.chain });
-    await env.DB.prepare("UPDATE groups SET identity = ? WHERE id = ?").bind(state.id, group.id).run();
+    // A group made before the update to afterwrd 2 has come over (step 10d): for its 30 days, the owner's browser lets in
+    // the members it had as they re-join (beforegroups.js).
+    const crossover = await env.DB.prepare("SELECT value FROM settings WHERE key = 'crossover_at'").first();
+    const old = crossover && Number(group.created_at) < Number(crossover.value);
+    await env.DB.prepare("UPDATE groups SET identity = ?, brought_at = ? WHERE id = ?").bind(state.id, old ? now() : null, group.id).run();
     return json({ ok: true, person: state.id });
   }
   return json({ error: "Not found." }, 404);
@@ -95,6 +99,11 @@ export async function setGroupIdentity(request, env, url) {
     db.prepare("INSERT OR IGNORE INTO lists (id, owner, n, head, created_at) VALUES (?, ?, 0, '', ?)").bind(state.id, owner.id, now()),
     // The owner is a member by the group's identity, and recognised by theirs.
     db.prepare("UPDATE group_members SET identity = ? WHERE id = ?").bind(owner.id, member.id),
+    // A group from afterwrd 1 (step 10d: beforegroups.js): the members it had aren't members of the signed group until
+    // they re-join with their own signed `join`, which they may by their site's address for 30 days from now.
+    db.prepare(`INSERT OR IGNORE INTO group_members_before (origin, name, role, since)
+      SELECT origin, name, role, ? FROM group_members WHERE identity IS NULL AND id != ? AND approved_at IS NOT NULL`).bind(now(), member.id),
+    db.prepare("DELETE FROM group_members WHERE identity IS NULL AND id != ?").bind(member.id),
   ]);
   if (!made.meta.changes) return json({ error: "This group's identity is already set up." }, 409);
   return json({ ok: true, person: state.id });

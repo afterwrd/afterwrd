@@ -84,6 +84,7 @@ export function objectFile(dir) {
     for (const name of readdirSync(join(dir, folder)).filter((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite")) {
       const db = new DatabaseSync(join(dir, folder, name), { readOnly: true });
       try {
+        db.exec("PRAGMA busy_timeout = 5000"); // a site writing just then: wait for it, as siteSql does
         if (db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'users'").get()) return join(dir, folder, name);
       } finally {
         db.close();

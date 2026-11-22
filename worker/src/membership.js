@@ -90,6 +90,8 @@ export function parseGroupMembers(data, site, n, env) {
       // Who they are, and their join: what a signed decision about them names.
       person: /^[A-Za-z0-9_-]{43}$/.test(m?.["afterwrd:person"] ?? "") ? m["afterwrd:person"] : null,
       join: /^[A-Za-z0-9_-]{43}$/.test(m?.["afterwrd:join"] ?? "") ? m["afterwrd:join"] : null,
+      // Waiting, and in the group before afterwrd 2 (step 10d: beforegroups.js): the owner's browser lets them in.
+      before: m?.["afterwrd:before"] === true,
     })).filter((m) => m.name),
   };
 }

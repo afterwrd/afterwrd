@@ -2,7 +2,9 @@
 // prompt: this browser's key is already allowed to sign for them. First their posts: the site prepares exactly what each
 // says; this signs it, saying when it was first written (`before`), and sends it back, a post at a time. Then the
 // comments they made before, on their own posts and friends', an item at a time, each following the last (prev). Then
-// Home is shown again, with them in place.
+// groups from before (step 10d): a `join` for one that has come over, and, for one the owner brought over, an
+// `approve` for each of its old members waiting to be let in, as the owner's own approve button signs one
+// (ui/groupsign.js). Then Home is shown again, with them in place.
 import { audienceOf, makeRecord } from "../records.js";
 import { b64url } from "../signed.js";
 import { savedKey } from "../browserkey.js";
@@ -57,6 +59,30 @@ async function bringComments(key, c) {
   return call("POST", { to: c.to, item: c.item, records });
 }
 
+/** @param {string} path @param {object} body */
+async function postJson(path, body) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const got = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(got.error ?? "That didn't work.");
+  return got;
+}
+
+/** A `join` for a group from before that has come over, as the site prepared it. @param {any} key @param {any} r */
+async function rejoinGroup(key, r) {
+  const made = await makeRecord({ kind: "join", author: key.person, host: r.host, item: r.item, seen: r.seen, prev: r.prev }, { name: r.name }, key);
+  return call("POST", { rejoin: r.group, sent: made.sent });
+}
+
+/** Lets in old members of a group the owner brought over: an `approve` each, from where the list is up to then. @param {any} key @param {any} a */
+async function approveOld(key, a) {
+  for (const join of a.joins) {
+    const at = await postJson(`/_groups/${a.group}/point`, {});
+    const made = await makeRecord({ kind: "approve", author: key.person, host: at.host, item: at.item, seen: at.seen ?? null, prev: at.prev ?? null,
+      about: join, ...(at.role_at && { role_at: at.role_at }) }, undefined, key);
+    await postJson(`/_groups/${a.group}/records`, { sent: made.sent });
+  }
+}
+
 (async () => {
   const key = await savedKey();
   if (!key?.person || key.expires < Date.now() / 1000) {
@@ -66,10 +92,22 @@ async function bringComments(key, c) {
   let brought = 0;
   try {
     for (;;) {
-      const { next, comments, left, waiting } = await call("GET");
+      const { next, comments, rejoin, approve, left, waiting } = await call("GET");
       if (!next && comments) {
         say("Bringing the comments you wrote before afterwrd 2 over, signed on this device…");
         await bringComments(/** @type {any} */ (key), comments);
+        brought++;
+        continue;
+      }
+      if (!next && rejoin) {
+        say("Joining your groups from before afterwrd 2 again, signed on this device…");
+        await rejoinGroup(key, rejoin);
+        brought++;
+        continue;
+      }
+      if (!next && approve) {
+        say("Letting the people who were in your group before afterwrd 2 back in…");
+        await approveOld(key, approve);
         brought++;
         continue;
       }

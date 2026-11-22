@@ -4,7 +4,8 @@
 import { blockedAmong, blockedList } from "../blocks.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
-import { buildDue, commentsToBring, leftToBring } from "../before.js";
+import { buildDue, commentsToBring, leftToBring, windowOf } from "../before.js";
+import { groupsToBring, groupsToBringOver } from "../beforegroups.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
@@ -812,7 +813,8 @@ async function home(ctx, params) {
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
   // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
-  const bringOver = moved ? null : { posts: ownOld.length ? await leftToBring(db) : 0, comments: await commentsToBring(db) };
+  const bringOver = moved ? null : { posts: ownOld.length ? await leftToBring(db) : 0, comments: await commentsToBring(db),
+    groups: await groupsToBring(db, windowOf(ctx.env)), owned: await groupsToBringOver(db) };
   const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).

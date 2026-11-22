@@ -4,6 +4,7 @@
 #   npm run test:e2e                     everything except upgrade
 #   npm run test:e2e -- <suite>…         some: core fresh albums update feed move groups selfhosted checks recover central forged
 #   npm run test:e2e -- upgrade v0.17.0  an older release's site (0.17.0 or later), upgraded in place to this code
+#   npm run test:e2e -- crossover v0.58.2  three sites and a group on afterwrd 1, all brought over to this code
 set -uo pipefail
 
 # Kept awake while it runs (macOS): a laptop going to sleep part-way through stops the sites and loses Chrome's tabs.
@@ -201,6 +202,31 @@ run_forged() {
   (cd "$HERE" && node keys.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node lists.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
 }
+# Groups from afterwrd 1 carried over (step 10d): three people's sites and a group's own Worker on an older release, then
+# all four on this code, with the same databases.
+crossover_sites() { # $1: the code's folder; then any more wrangler settings for every site
+  local dir="$1"; shift
+  for site in 8787:A 8788:B 8789:C 8790:G; do
+    local port="${site%%:*}" name="${site##*:}" mode="--var SETUP_CODE:local-test-setup-code"
+    if [ "$name" = G ]; then mode="--var GROUP_KEY:local-test-group-key"; fi
+    (cd "$dir" && "$WRANGLER" dev --name "afterwrd-$port" --port "$port" --ip 127.0.0.1 --inspector-port $((port + 500)) \
+      --persist-to "$OUT/stateX$name" $mode "$@" --var ALLOW_LOCAL_SITES:1 --var TEST_VERSION_AT:2026-01-01T00:00:00Z > "$OUT/dev$port.log" 2>&1 &)
+  done
+  wait_for 8787 && wait_for 8788 && wait_for 8789 && wait_for 8790
+}
+run_crossover() { # $1: an older release tag
+  local tag="$1"
+  rm -rf "$OUT/old" "$OUT/stateXA" "$OUT/stateXB" "$OUT/stateXC" "$OUT/stateXG"
+  git -C "$WORKER" worktree add -q --detach "$OUT/old" "$tag" || { FAILED=1; return; }
+  ln -s "$WORKER/node_modules" "$OUT/old/worker/node_modules"
+  local states="$OUT/stateXA $OUT/stateXB $OUT/stateXC $OUT/stateXG"
+  crossover_sites "$OUT/old/worker" && suite crossover.mjs before $states
+  pkill -f "wrangler dev --name afterwrd-87" 2>/dev/null; sleep 2
+  crossover_sites "$WORKER" $CHECKS && suite crossover.mjs after $states
+  pkill -f "wrangler dev --name afterwrd-87" 2>/dev/null; sleep 2
+  git -C "$WORKER" worktree remove --force "$OUT/old"
+}
+
 run_upgrade() { # $1: an older release tag
   local tag="$1"
   rm -rf "$OUT/old" "$OUT/stateU"
@@ -219,6 +245,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|limits|events|hosts|selfhosted) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
+    crossover) shift; run_crossover "${1:?give an older release tag, e.g. v0.58.2}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;
   esac
   shift

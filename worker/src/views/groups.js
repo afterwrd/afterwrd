@@ -321,6 +321,28 @@ function oldGroupPage(ctx, { membership: g, words }) {
   const kinds = { post: "You posted", comment: "You commented" };
   return page(ctx, g.name, html`
 ${groupHead(ctx, g, null, "")}
+${g.role === "owner" && g.origin && html`<section class="card stack" id="bring-group">
+  <p><strong>Bring ${g.name} over to afterwrd 2.</strong> It stays at the same address, with the same name. One face,
+  fingerprint or PIN signs it as yours, and then the people who were in it join again from their own sites, and you let
+  them back in, without anyone having to do anything else.</p>
+  <div class="actions-row"><button class="chip primary" id="bring">Bring it over</button></div>
+  <ol id="log"></ol>
+  <p id="error" role="alert"></p>
+</section>
+<script>${raw(STEP_SCRIPT)}
+  document.getElementById("bring").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    error.textContent = "";
+    try {
+      await signGroup(${Number(g.id)});
+      log("Done.");
+      location.reload();
+    } catch (err) {
+      error.textContent = err.message;
+      e.target.disabled = false;
+    }
+  });
+</script>`}
 <p class="notice">This group is from before signing. Its posts stay on its site, and these are your own posts and comments
 there, as you wrote them. Only you can see them here, and they can't be changed.</p>
 ${words.length ? html`<ul class="old-words">${words.map((w) => html`<li class="card">
