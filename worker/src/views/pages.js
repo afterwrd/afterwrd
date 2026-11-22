@@ -206,7 +206,8 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
 /**
  * Setting up signing (afterwrd 2, keys.js): the recovery code, made here in the browser and shown once, then one passkey
  * prompt that signs the owner's first identity document and this browser's key together. Straight after a new site's
- * first passkey ("#setup": then on to its permissions, as afterPasskey), or at an older site's next sign-in.
+ * first passkey ("#setup": then on to its permissions, as afterPasskey), or at an older site's next sign-in. There's no
+ * "Not now": without it the site can't reach anyone (app.js sends every page here until it's done).
  */
 export function keysPage(next) {
   return page("Your recovery code", `
@@ -225,12 +226,10 @@ what it was later.</p>
 <label class="tick"><input type="checkbox" id="kept"> <span>I've kept my recovery code somewhere safe</span></label>
 <button id="go" disabled>Continue</button>
 <p id="error" role="alert"></p>
-<p class="small" id="later"><a href="${escape(next)}">Not now</a></p>
 <p class="small" id="moving">Moving here from another afterwrd site? <a href="/_admin/import/move">Bring yourself over</a>
 instead, and keep your recovery code, friends and posts.</p>`, `
   const next = ${JSON.stringify(next).replace(/</g, "\\u003c")};
   const fromSetup = location.hash === "#setup";
-  if (fromSetup) document.getElementById("later").hidden = true;
   (async () => {
     const [S, keys] = await signing();
     const code = S.newRecoveryCode();

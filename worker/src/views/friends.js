@@ -151,7 +151,7 @@ ${friends.length ? html`<ul class="friend-list">
     </a>
     <nav class="friend-tabs"><a href="${friendBase(c)}/posts">Posts</a><a href="${friendBase(c)}/photos">Photos</a>${friends.length > 1
       && html`<a href="/_admin/connections/${c.id}/introduce">Introduce</a>`}</nav>
-    ${friendSilence(c) && html`<div class="meta silent">${friendSilence(c)} ${removeFriend(c, "chip")}</div>`}
+    ${friendSilence(c) && html`<div class="meta silent">${friendSilence(c)} ${!c.unmoved_since && removeFriend(c, "chip")}</div>`}
     ${c.person ? linkForm(c, html`<span class="meta">On Facebook as ${fbLink(c.person)}</span>
         <input type="hidden" name="unlink" value="1"><button class="link">Unlink</button>`)
       : c.suggestion ? linkForm(c, html`<span>Is this <strong>${c.suggestion.name}</strong> from your Facebook download?</span>
@@ -310,6 +310,7 @@ function removeFriend(c, look) {
 /** Why a friend's site isn't being heard from, once it's gone quiet (feed.js), or null. */
 function friendSilence(c) {
   if (c.said_no) return html`Their site says you're no longer connected, so ${c.name} may have removed you as a friend.`;
+  if (c.unmoved_since) return html`Their site hasn't moved to afterwrd 2 yet. You'll see ${c.name}'s posts once it has.`;
   if (!gone(c)) return null;
   return html`Their site hasn't answered since ${fmtDate(c.reached_at ?? c.connected_at)}. It may be offline, or gone for good.`;
 }

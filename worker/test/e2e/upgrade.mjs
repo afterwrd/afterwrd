@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled } from "./helpers.mjs";
+import { settled, setUpSigning } from "./helpers.mjs";
 import { MOVED } from "../../src/sitecopy.js";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -29,11 +29,12 @@ const say = async (scope, text) => {
 };
 const said = (scope) => page.$$eval(`${scope} .comment .said`, (l) => l.map((c) => c.textContent));
 const own = "main article.card.own";
+const AUTHENTICATOR = { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true };
 
 if (stage === "before") {
   const cdp = await page.createCDPSession();
   await cdp.send("WebAuthn.enable");
-  await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: AUTHENTICATOR });
   await page.goto(`${BASE}/_auth/setup?code=local-test-setup-code`);
   await page.type("#name", "Upgrader");
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
@@ -82,11 +83,29 @@ if (stage === "before") {
   await (await page.$("#add input[type=file]")).uploadFile(`${fixtures}/big.jpg`);
   await Promise.all([page.waitForNavigation({ timeout: 60_000 }), page.click("#add button.post")]);
 
+  // The passkey too (this browser's virtual one), so after the update the same owner can set up signing with it.
+  const { credentials } = await cdp.send("WebAuthn.getCredentials", { authenticatorId });
   writeFileSync(SAVED, JSON.stringify({ cookie: (await page.cookies()).find((c) => c.name === "__Host-session").value,
-    address, photo, poll, album, importedPhoto }));
+    address, photo, poll, album, importedPhoto, credentials }));
 } else {
   const was = JSON.parse(readFileSync(SAVED, "utf8"));
   await page.setCookie({ name: "__Host-session", value: was.cookie, domain: "localhost", path: "/", secure: true, httpOnly: true });
+  const cdp = await page.createCDPSession();
+  await cdp.send("WebAuthn.enable");
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: AUTHENTICATOR });
+  for (const credential of was.credentials) await cdp.send("WebAuthn.addCredential", { authenticatorId, credential });
+
+  // afterwrd 2 (step 10a): nothing works until signing is set up, so the first page after the update is the recovery
+  // code, with no "Not now", and then the page the owner was going to. Download everything still opens first.
+  await page.goto(BASE + was.address);
+  const keys = new URL(page.url());
+  check("after the update, the first page is setting up signing", keys.pathname === "/_admin/keys" && keys.searchParams.get("next") === was.address, page.url());
+  check("…with no way to put it off", !(await page.$("#later")) && !(await page.content()).includes("Not now"));
+  await page.goto(`${BASE}/_admin/export`);
+  check("Download everything still opens before it's done", new URL(page.url()).pathname === "/_admin/export");
+  await page.goto(BASE + was.address);
+  await setUpSigning(page);
+  check("…and once it's done, on to where the owner was going", new URL(page.url()).pathname === was.address, page.url());
 
   await page.goto(BASE + was.address);
   const card = await page.$eval("main article.card", (a) => ({ text: a.querySelector(".text")?.textContent, photos: a.querySelectorAll(".collage .tile").length,

@@ -9,7 +9,7 @@
 import { rateWindow } from "./limits.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
-import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { answersAsAfterwrd, fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
 import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
@@ -26,6 +26,7 @@ import { messagePage } from "./views/pages.js";
 import { html, now } from "./util.js";
 
 export const PULL_SECONDS = 3600; // how often a friend's site is asked (docs/signed-conversations.md decision 12)
+const UNMOVED_SECONDS = 86400; // how often a friend's site that hasn't moved to afterwrd 2 yet is asked (step 10a)
 // A friend's site that hasn't answered for a day (or says this site isn't connected) stops being mentioned on Home,
 // and Friends says so instead, with a way to remove them (views/friends.js). It's still asked, once an hour.
 export const QUIET_SECONDS = 86_400;
@@ -64,7 +65,7 @@ export function rememberPicture(db, connection, avatar) {
  * Whether the owner here asked to be friends and is still waiting for them to approve: their site has been asked, is
  * there, and has never shared anything (noteAnswer). Home says so, and asks their site each time it opens (pullNew).
  */
-export const waitingFor = (c) => Boolean(c.items_checked_at && !c.reached_at && !c.missing_since && !c.said_no);
+export const waitingFor = (c) => Boolean(c.items_checked_at && !c.reached_at && !c.missing_since && !c.said_no && !c.unmoved_since);
 
 /** Whether a friend's site has gone quiet, or says this site isn't connected any more: shown on Friends, not Home. */
 export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && c.missing_since <= at - QUIET_SECONDS));
@@ -73,7 +74,8 @@ export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && 
  * Notes how a friend's site just answered (`error`: what callFriend threw, if anything) on `connection` itself, and
  * returns the statement that keeps it. 401 means their site doesn't know this one (calls.js friendCalling): they
  * removed the owner here. 403 means their owner hasn't approved the owner here yet: their site is there, so it isn't
- * missing (waitingFor). Any other error (or none reaching it: status 0) is their site not answering.
+ * missing (waitingFor). Any other error (or none reaching it: status 0) is their site not answering. Either way their
+ * site isn't one that hasn't moved to afterwrd 2 yet (unmoved_since: pullItems), so that's cleared.
  * @param {D1Database} db
  * @param {Row<"connections">} connection
  * @param {any} [error]
@@ -82,10 +84,10 @@ export const gone = (c, at = now()) => Boolean(c.said_no || (c.missing_since && 
 export function noteAnswer(db, connection, error = null, at = now()) {
   // 409 and 410 are a site that's there, mid-move: they've moved (410), or this site isn't recognised at its new address
   // yet (409). 429 is a site that's there, saying this one has had its allowance there today (allowances.js). Not missing.
-  Object.assign(connection, !error ? { reached_at: at, missing_since: null, said_no: 0 }
+  Object.assign(connection, { unmoved_since: null }, !error ? { reached_at: at, missing_since: null, said_no: 0 }
     : [403, 409, 410, 429].includes(error.status) ? { missing_since: null, said_no: 0 }
     : { missing_since: connection.missing_since ?? at, said_no: error.status === 401 ? 1 : 0 });
-  return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ? WHERE id = ?")
+  return db.prepare("UPDATE connections SET reached_at = ?, missing_since = ?, said_no = ?, unmoved_since = NULL WHERE id = ?")
     .bind(connection.reached_at ?? null, connection.missing_since, connection.said_no, connection.id);
 }
 
@@ -113,8 +115,18 @@ export async function pullItems(env, from, connection) {
     ]);
     return null;
   };
+  // Their site answers as afterwrd does, but without an afterwrd 2 identity: still on afterwrd 1, or updated and not
+  // set up since (step 10a). It's there, so not missing: Home says it hasn't moved yet, and it's asked again in a day.
+  const notMovedYet = async () => {
+    const at = now();
+    connection.unmoved_since ??= at;
+    Object.assign(connection, { missing_since: null, said_no: 0 });
+    await env.DB.prepare("UPDATE connections SET unmoved_since = COALESCE(unmoved_since, ?), missing_since = NULL, said_no = 0, items_checked_at = ? WHERE id = ?")
+      .bind(at, at + rateWindow(UNMOVED_SECONDS) - rateWindow(PULL_SECONDS), connection.id).run();
+    return null;
+  };
   const person = await friendPerson(env, connection);
-  if (!person) return failed({ status: 0 });
+  if (!person) return (await answersAsAfterwrd(env, String(connection.origin))) ? notMovedYet() : failed({ status: 0 });
   // A friend who has moved (their identity says so, in effect here): asked at their new address from now on.
   const known = await env.DB.prepare("SELECT json_array_length(chain) AS n, moving_to, moving_at FROM identities WHERE person = ?").bind(person).first();
   if (known?.moving_to && known.moving_to !== connection.origin && Number(known.moving_at) <= now()) await followMove(env, connection, person);
@@ -305,7 +317,7 @@ export async function pullFriends(env, from) {
 export async function pullNew(env, from, ms = 4000) {
   if ((await ownMove(env.DB, from))?.done) return;
   const { results } = await env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
-    AND (items_checked_at IS NULL OR (reached_at IS NULL AND missing_since IS NULL AND said_no = 0)) LIMIT 10`).all();
+    AND (items_checked_at IS NULL OR (reached_at IS NULL AND missing_since IS NULL AND said_no = 0 AND unmoved_since IS NULL)) LIMIT 10`).all();
   if (!results.length) return;
   await Promise.race([Promise.all(results.map((c) => pullItems(env, from, c).catch(() => null))), new Promise((r) => setTimeout(r, ms))]);
 }

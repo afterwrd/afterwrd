@@ -113,6 +113,27 @@ export async function fetchIdentity(env, origin) {
   return state;
 }
 
+/**
+ * Whether the site at `origin` answers as an afterwrd site does (its public /_version, which every release since
+ * 0.17 has: {id}), for a site with no identity at /.well-known/afterwrd: one still on afterwrd 1, or updated and not
+ * set up since (step 10a). A site that's gone answers nothing, or something else (Cloudflare's own 404 page).
+ * @param {Env} env @param {string} origin
+ */
+export async function answersAsAfterwrd(env, origin) {
+  const site = siteOrigin(origin, env);
+  if (!site) return false;
+  const response = await fetch(`${site}/_version`, { redirect: "manual", signal: AbortSignal.timeout(FETCH_MS) }).catch(() => null);
+  if (!response?.ok) return false;
+  const text = await response.text().catch(() => "");
+  if (text.length > 1000) return false;
+  try {
+    const data = JSON.parse(text);
+    return Boolean(data) && typeof data === "object" && !Array.isArray(data) && "id" in data;
+  } catch {
+    return false;
+  }
+}
+
 /** How `person`'s identity reads now, from what this site knows (null if it knows nothing of them), with `frozen`. */
 export async function identityState(env, person) {
   return stateIn(env.DB, person);

@@ -52,7 +52,8 @@ function autoPart(auto) {
   const lastCheck = auto.lastCheck && !auto.running ? `<p id="auto-last"><b>Last looked ${escape(ago(auto.lastCheck.at))}:</b> ${escape(auto.lastCheck.words)}</p>` : "";
   const groupLines = Object.values(auto.groups ?? {}).filter((g) => g.result !== "done");
   const groupsDone = groupLines.length ? `<ul class="meta">${groupLines.map((g) => `<li>${escape(g.name)}: ${escape(
-    g.result === "needs-hand" ? "has to be updated by hand (below)" : g.result.startsWith("error") ? `couldn't be updated: ${g.result.slice(7)}` : `didn't take ${g.version}, so it was put back`)}
+    g.result === "needs-hand" ? "has to be updated by hand (below)" : g.result.startsWith("error") ? `couldn't be updated: ${g.result.slice(7)}`
+      : g.result === "kept" ? `failed its checks on ${g.version} after updating its database, so it was kept` : `didn't take ${g.version}, so it was put back`)}
     (${escape(day(g.at))})</li>`).join("")}</ul>` : "";
   if (auto.on) {
     return `

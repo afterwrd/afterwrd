@@ -4,6 +4,7 @@
 //   node feed.mjs <zip> <fixtures dir> <A state dir> <B state dir> <C state dir>   (C, on 8789, plays a third site)
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
@@ -925,6 +926,35 @@ await Promise.all([ann.waitForNavigation(), ann.$$eval(".friend-list li", (l) =>
 check("Remove friend forgets Gail, back on Friends", new URL(ann.url()).pathname === "/friend"
   && sql(stateA, "SELECT COUNT(*) AS n FROM connections WHERE id = 9001")[0].n === 0);
 sql(stateA, "DELETE FROM connections WHERE id >= 9000");
+
+// A friend whose site is still on afterwrd 1 (step 10a): it answers as afterwrd does (/_version), but has no afterwrd 2
+// identity (/.well-known/afterwrd sends you to sign in, as 0.58 does). Not missing, and not gone: it hasn't moved yet.
+const oldSite = createServer((req, res) => {
+  if (req.url.startsWith("/_version")) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ id: null })); return; }
+  res.writeHead(302, { Location: "/_auth/login" }); res.end();
+});
+await new Promise((resolve) => oldSite.listen(8795, "127.0.0.1", resolve));
+sql(stateA, `INSERT INTO connections (id, origin, name, created_at, connected_at, approved_at, reached_at)
+  VALUES (9003, 'http://localhost:8795', 'Old Olive', 1700000000, 1700000000, 1700000000, 1760000000)`);
+await ann.goto(`${A}/`);
+const olive = () => sql(stateA, "SELECT unmoved_since, missing_since, said_no, items_checked_at FROM connections WHERE id = 9003")[0];
+check("a friend still on afterwrd 1 is noted as not moved yet, not as missing", await waitFor(() => olive().unmoved_since > 0)
+  && olive().missing_since === null && olive().said_no === 0, JSON.stringify(olive()));
+check("…and asked again in a day, not an hour", olive().items_checked_at > Math.floor(Date.now() / 1000) + 20 * 3600);
+await ann.goto(`${A}/`);
+const oliveNotices = (await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent))).join(" | ");
+check("Home says Olive's site hasn't moved to afterwrd 2 yet", oliveNotices.includes("Old Olive's site hasn't moved to afterwrd 2 yet"), oliveNotices);
+check("…not that it couldn't be reached, or that she hasn't approved you", !/Couldn't reach Old Olive|Waiting for Old Olive/.test(oliveNotices), oliveNotices);
+await ann.goto(`${A}/friend`);
+const oliveCard = await ann.$$eval(".friend-list li", (l) => l.find((li) => li.textContent.includes("Old Olive"))?.querySelector(".silent")?.outerHTML ?? "");
+check("Friends says so too, with no Remove friend beside it", oliveCard.includes("hasn't moved to afterwrd 2 yet") && !oliveCard.includes("<button"), oliveCard);
+// Her site goes: now it's missing, as any other.
+await new Promise((resolve) => oldSite.close(resolve));
+sql(stateA, "UPDATE connections SET items_checked_at = NULL WHERE id = 9003");
+await ann.goto(`${A}/`);
+check("a site that stops answering altogether is missing, not \"not moved yet\"", await waitFor(() => olive().missing_since > 0 && olive().unmoved_since === null),
+  JSON.stringify(olive()));
+sql(stateA, "DELETE FROM connections WHERE id = 9003");
 
 // Cara removed Ann while Ann's site couldn't be told: Cara's site now says Ann's isn't connected.
 const caraId = sql(stateA, `SELECT id FROM connections WHERE origin = '${C}'`)[0].id;

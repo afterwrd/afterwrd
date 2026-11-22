@@ -53,6 +53,9 @@ export const HEADERS = {
 // checks both ways (/_check, /_admin/checks, and the protocol's check calls), and getting back in through Cloudflare
 // (/_auth/recover). Updating (update.js) and starting groups (groupsites.js) say what to do instead.
 const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_p\/(check-request|check-token|check-soon|check-failed|checked)$/;
+// What the owner can still open before signing is set up (ownerRoute): setting it up, moving in (which brings an
+// identity with it), Download everything and Update; and files, live updates and the rest that aren't pages.
+const SIGNING_NOT_NEEDED = /^\/(_admin\/(keys|import\/move|export|update)|_cloudflare|_live|_push|_groups|files|static)(\/|$)/;
 
 /**
  * One request, start to finish, wherever the site's database is: in this Worker (D1), or inside the site's object
@@ -219,6 +222,12 @@ function fromElsewhere(request) {
 async function ownerRoute(request, env, url, user, work) {
   const reading = request.method === "GET" || request.method === "HEAD";
   const [, top, rest] = url.pathname.split("/");
+  // afterwrd 2 (step 10a): until signing is set up the site has no identity, so it can't reach anyone. After the update
+  // to afterwrd 2, every page sends the owner to set it up first (keys.js), then on to where they were going. Setting
+  // up, moving in, Download everything and Update still open.
+  if (reading && !SIGNING_NOT_NEEDED.test(url.pathname) && !(await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1").first())) {
+    return Response.redirect(`${url.origin}/_admin/keys?next=${encodeURIComponent(url.pathname + url.search)}`, 302);
+  }
   if (url.pathname === "/_admin" || url.pathname.startsWith("/_admin/")) return handleAdmin(request, env, url, user);
   // Connecting to Cloudflare, for updating and groups (an hour's token in a cookie; cloudflare.js).
   // Background access for automatic updates is a Connect of its own (auto.js).

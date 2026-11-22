@@ -51,6 +51,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
   const friends = all.filter((c) => !gone(c));
   const unreachable = friends.filter((c) => c.missing_since);
   const waiting = friends.filter(waitingFor);
+  const unmoved = friends.filter((c) => c.unmoved_since); // still on afterwrd 1, or not set up since (friendcopies.js)
   return page(ctx, "Home", html`
 <div class="home">
   <section class="stream" aria-label="Posts">
@@ -179,6 +180,9 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       ? html`<p class="notice">Couldn't reach ${unreachable.length} friends' sites lately, so their newest posts may be missing.</p>`
       : unreachable.map((c) => html`<p class="notice">Couldn't reach ${c.name}'s site lately, so their newest posts may be missing.</p>`)}
     ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
+    ${unmoved.length > 2
+      ? html`<p class="notice unmoved">${unmoved.length} friends' sites haven't moved to afterwrd 2 yet. You'll see their posts once they have.</p>`
+      : unmoved.map((c) => html`<p class="notice unmoved">${c.name}'s site hasn't moved to afterwrd 2 yet. You'll see their posts once it has.</p>`)}
     ${stream.length ? stream.map((s) => s.card) : html`<div class="empty"><p>Nothing here yet. Write your first post above.</p></div>`}
   </section>
   <aside class="side">

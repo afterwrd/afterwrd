@@ -384,6 +384,7 @@ async function runGroups(env, origin, list, limit) {
     const words = result === "done" ? `brought ${group.name} up to ${VERSION}`
       : result === "needs-hand" ? `${group.name} has to be updated by hand`
       : result.startsWith("error") ? `couldn't update ${group.name} (${result.slice(7)})`
+      : result === "kept" ? `${group.name} had already updated its database to ${VERSION} when it failed its checks, so it was kept: the older version can't run on it`
       : `${group.name} didn't take ${VERSION}, so it was put back`;
     told.push(words);
     await progress(env, `${words.replace(/^./, (c) => c.toUpperCase())}.`);
@@ -599,15 +600,19 @@ async function groupStep(env, origin, body) {
     // group's object, which may keep running the old code for minutes after a switch while it's kept busy (the checks
     // themselves keep it busy), as 0.58.1's own groups found (docs/speed-and-scale-plan.md, "Scale test").
     const ask = (path) => fetch(`${group.origin}${path}`, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(10_000) });
+    // Once the new version has answered at all, it has run its migrations (every request runs them first), so the group's
+    // database may be one the old version can't run on: it's kept rather than put back (a breaking release: step 10a).
+    let answered = false;
     const check = async (versionId) => {
       const v = await ask(`/_version?t=${Date.now()}`);
       const live = v.ok ? (await v.json().catch(() => null))?.id : (await v.body?.cancel(), null);
       if (live !== versionId) return { answered: v.status, healthy: false };
+      answered = true;
       const r = await ask("/_group/ping");
       const ping = r.ok ? await r.json().catch(() => null) : (await r.body?.cancel(), null);
       return { answered: r.status, healthy: ping?.afterwrd === "group" };
     };
-    return switchCarefully(env, origin, body.token, group.account, group.script, body.versionId, check);
+    return switchCarefully(env, origin, body.token, group.account, group.script, body.versionId, check, null, { migrated: async () => answered });
   }
   throw new Error("Unknown step.");
 }
