@@ -168,8 +168,8 @@ export async function handleGroupItems(request, env, url) {
  * writer's edits and changes, and an admin calling it off), each with when it was taken, so a member's site works its
  * words and details out from what's signed, not from this site's say-so (friendcopies.js keepCopy).
  */
-async function memberItem(env, origin, row, member) {
-  const entries = await listEntries(env.DB, String(row.id));
+async function memberItem(env, origin, row, member, entries = null) {
+  entries ??= await listEntries(env.DB, String(row.id));
   const item = await itemForFriend(env, origin, row, Number(member.id), entries);
   const records = [...item.records];
   for (const e of entries.slice(1)) {
@@ -500,9 +500,36 @@ async function memberNames(env, people) {
  * "item" and "here": a new post (with this member's photo links); "comment", "change", "calloff": a record on one, with
  * its place in the list and the group's receipt; "gone", "gone-off": a post deleted or removed.
  */
-export async function groupNoteFor(env, note, member) {
+export async function groupNoteFor(env, note, member, shared = new Map()) {
   const db = env.DB;
   if (note.kind === "gone" || note.kind === "gone-off") return { v: 2, kind: "gone", item: note.item, cancelled: note.kind === "gone-off" };
+  // What's the same for every member, worked out once a run (shared: the Outbox's, as notes.js noteFor's).
+  const once = (part, work) => {
+    const key = `${note.id ?? note.item}\n${part}`;
+    if (!shared.has(key)) shared.set(key, work());
+    return shared.get(key);
+  };
+  if (note.kind === "item" || note.kind === "here") {
+    const base = await once("item", async () => {
+      const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
+        WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
+      if (!row) return null;
+      const entries = await listEntries(db, note.item);
+      const sample = await memberItem(env, String(note.origin), row, member, entries);
+      return { row, entries, records: sample.records, delegations: await delegationsFor(db, [keyOf(sample.sent)]),
+        people: await peopleFor(db, [String(row.author)]), names: await memberNames(env, [String(row.author)]) };
+    });
+    if (!base) return null;
+    // Only the photo links are each member's.
+    const item = { ...(await itemForFriend(env, String(note.origin), base.row, Number(member.id), base.entries)), records: base.records };
+    return { v: 2, kind: "item", item, here: note.kind === "here", delegations: base.delegations, people: base.people, names: base.names };
+  }
+  return once("body", () => sameForMembers(env, note));
+}
+
+/** A note's body that's the same for every member it goes to: a comment, a change, an answer, the group closing. */
+async function sameForMembers(env, note) {
+  const db = env.DB;
   // The owner closed the group (step 6e): their `close` on the members list, with the group's receipt for it.
   if (note.kind === "closed") {
     const self = await groupSelf(env);
@@ -515,14 +542,6 @@ export async function groupNoteFor(env, note, member) {
       entry: { n: entry.n, fp: entry.fp, taken: entry.taken, prev: at > 0 ? entries[at - 1].head : "", sent: entry.sent },
       receipt: await signHead(self.privateKey, { host: self.person, list: self.list, n: entry.n, head: entry.head }),
       delegations: await delegationsFor(db, [record.key]), people: await peopleFor(db, [record.author]) };
-  }
-  if (note.kind === "item" || note.kind === "here") {
-    const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
-      WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
-    if (!row) return null;
-    const item = await memberItem(env, String(note.origin), row, member);
-    return { v: 2, kind: "item", item, here: note.kind === "here", delegations: await delegationsFor(db, [keyOf(item.sent)]),
-      people: await peopleFor(db, [String(row.author)]), names: await memberNames(env, [String(row.author)]) };
   }
   const self = await groupSelf(env);
   // The record's list: the post's (or photo's), or one date's of a repeating event (step 6d).

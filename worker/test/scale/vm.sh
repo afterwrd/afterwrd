@@ -1,18 +1,17 @@
 #!/bin/sh
 # The whole scale test on a rented Linux server with Docker (test/scale/README.md, "On a rented server"), from worker/,
-# as root:
-#   test/scale/vm.sh smoke   a small network end to end, a few minutes: proves this box runs everything
-#   test/scale/vm.sh mid     1,000 sites (about 26 GB): hubs of 150, 500 and 1,000 friends, groups of 150 and 300
-#   test/scale/vm.sh full    2,000 sites (about 55 GB): hubs of 150, 500, 1,000 and 2,000 friends, groups of 150 and 300
-#   test/scale/vm.sh social  the social model (net.mjs --model social): a network shaped like Facebook's, a realistic
-#                            day (social_day), then Home for the outliers, one post to all of an outlier's friends, the
-#                            groups' runs and closing them; SCALE_NET sets its size (the default is 3,000 people)
+# as root (docs/signed-conversations.md, step 9b: section 8's two cases):
+#   test/scale/vm.sh rehearse   about 60 sites, a day squeezed into 20 minutes: proves everything runs, and measures
+#                               memory per site (on a Mac too)
+#   test/scale/vm.sh section8   about 1,000 sites: a person with 1,000 friends, a group of 1,000 owned by someone with
+#                               10, and 1,000 others; a day squeezed 24 times (an hour), then the one-offs. On four
+#                               32 GB servers (MACHINES): a site took up to about 95 MB in the rehearsal, so 64
+#                               processes of about 16 sites
 #   test/scale/vm.sh halt <mode>  the end of a stuck run (watchdog.sh): the last upload, then the servers power off
-#   test/scale/vm.sh local   300 sites (about 8 GB, fits Docker on a Mac): a day in groups of 150 and 300, Home, the
-#                            groups' runs and a day; for comparing two versions of the code (run each in its own copy)
 # Each step is marked done in test/scale/out/<mode>/, so running it again carries on after the last step that worked.
 # Everything is logged to test/scale/out/<mode>/run.log; the report and data end up in test/scale/out/<mode>.tgz.
-# SCALE_NET gives the network's net.mjs options instead of the mode's.
+# SCALE_NET gives the network's net.mjs options instead of the mode's, and SCALE_DAY the day's minutes; SCALE_FRESH=1
+# runs every step again.
 #
 # On several servers (README.md, "On several machines"; exo.sh sets them up): MACHINES="<address> <address> …",
 # the servers' addresses, this one first (only the test's servers may reach them on the test's ports). Each has its own copy of worker/; this one runs the hubs, the groups and
@@ -39,7 +38,7 @@ part() {
     image) docker build -q -f selfhost/Dockerfile -t "$IMAGE" . ;;
     build) rm -rf "$OUT/build"; docker run --rm -u 0 -v "$OUT:/out" --entrypoint cp "$IMAGE" -r /app/build /out/build ;;
     fresh) test/scale/scale.sh down 2>/dev/null || true; test/scale/scale.sh reset 2>/dev/null || true
-           rm -rf "$OUT/results" "$OUT"/stats.log "$OUT"/resources.log "$OUT"/census-*.json "$OUT"/workerd-*.log "$OUT/machines" ;;
+           rm -rf "$OUT/results" "$OUT"/results-day.jsonl "$OUT"/stats.log "$OUT"/resources.log "$OUT"/census-*.json "$OUT"/workerd-*.log "$OUT/machines" ;;
     # Each site's data: sizes and row counts, with the sites stopped (census.mjs).
     census) docker run --rm -u 0 -v "${SCALE_VOLUME:-afterwrd-scale-data}:/data" -v "$OUT:/out" -v "$PWD/test/scale:/scale:ro" \
               --entrypoint node "$IMAGE" /scale/census.mjs "${SCALE_MACHINE:-127.0.0.1}" ;;
@@ -57,18 +56,29 @@ if [ "${1:-}" = halt ]; then HALT=1; shift; fi
 
 MODE="${1:-}"
 case "$MODE" in
-  smoke) NET="--leaves 12 --processes 2 --hubs 5,12 --groups 4,12"; DAY=3 ;;
-  mid) NET="--leaves 1000 --processes 10 --hubs 150,500,1000 --groups 150,300"; DAY=60 ;;
-  full) NET="--leaves 2000 --processes 16 --hubs 150,500,1000,2000 --groups 150,300"; DAY=60 ;;
-  local) NET="--leaves 300 --processes 3 --hubs 300 --groups 150,300"; DAY=30; SCENARIOS="group_day home groups_run day" ;;
-  social) NET="--model social --people 3000 --processes 24 --squeeze 8"; DAY=120; SCENARIOS="${SCENARIOS:-social_day home fanout groups_run close}"; WARM=warm ;;
-  *) echo "Usage: test/scale/vm.sh smoke|mid|full|local|social" >&2; exit 1 ;;
+  rehearse) NET="--leaves 60 --processes 2 --squeeze 72"; DAY=20 ;;
+  section8) NET="--leaves 1000 --processes 64 --squeeze 24"; DAY=60 ;;
+  *) echo "Usage: test/scale/vm.sh rehearse|section8" >&2; exit 1 ;;
 esac
 NET="${SCALE_NET:-$NET}"
-WARM="${WARM:-}"
-SCENARIOS="${SCENARIOS:-group_day home fanout groups_run day close}"
+DAY="${SCALE_DAY:-$DAY}"
+WARM=warm
+SCENARIOS="${SCENARIOS:-day oneoffs}"
 DONE="$OUT/$MODE"
 mkdir -p "$DONE"
+# SCALE_FRESH=1: every step again, from building the image (after a fix to the code under test).
+if [ -n "${SCALE_FRESH:-}" ] && [ -z "$HALT" ]; then rm -f "$DONE"/*.done "$DONE/run-name"; fi # and a new name for its results
+# SCALE_REBUILD=1: the image and build again (a fix to the code under test), and on from the step it stopped in, on
+# the network as it was.
+if [ -n "${SCALE_REBUILD:-}" ] && [ -z "$HALT" ]; then rm -f "$DONE/image.done" "$DONE/build.done"; fi
+# SCALE_FROM=<step>: that step and every one after it again (owners posts friends groups warm, then the scenarios).
+if [ -n "${SCALE_FROM:-}" ] && [ -z "$HALT" ]; then
+  from=""
+  for s in owners posts friends groups warm day oneoffs census collect report pack; do
+    if [ "$s" = "$SCALE_FROM" ]; then from=1; fi
+    if [ -n "$from" ]; then rm -f "$DONE/$s.done"; fi
+  done
+fi
 exec >>"$DONE/run.log" 2>&1
 say() { echo "== $* $(date -u +%H:%M:%S)"; }
 # The watchdog asks a stuck run to stop by leaving this (watchdog.sh): checked before and after every step, as a
@@ -208,8 +218,6 @@ start delays
 for s in $SCENARIOS; do
   case "$s" in
     day) step day test/scale/scale.sh drive day "$DAY" || say "carrying on without day" ;;
-    group_day) step group_day test/scale/scale.sh drive group_day 20 || say "carrying on without group_day" ;;
-    close) step close test/scale/scale.sh drive groups_run close || say "carrying on without close" ;;
     *) step "$s" test/scale/scale.sh drive "$s" || say "carrying on without $s" ;;
   esac
   memory
@@ -237,7 +245,7 @@ pack() {
   lines="stats.log"
   if [ -n "$UPLOADING" ]; then lines=""; fi
   # shellcheck disable=SC2046
-  tar czf "$OUT/$MODE.tgz" -C "$OUT" $(cd "$OUT" && ls -d report.md results net.json "$MODE/run.log" $lines workerd-*.log resources.log census-*.json machines 2>/dev/null)
+  tar czf "$OUT/$MODE.tgz" -C "$OUT" $(cd "$OUT" && ls -d report.md results results-day.jsonl net.json "$MODE/run.log" $lines workerd-*.log resources.log census-*.json machines 2>/dev/null)
 }
 step pack pack || say "carrying on without packing"
 FINISHED=1

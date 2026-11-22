@@ -24,7 +24,7 @@
       link.append(count);
     }
     count.innerHTML = "";
-    count.append(String(n));
+    count.append(n >= 100 ? "99+" : String(n)); // the site counts no further (archive/comments.js NEW_COUNT_MAX)
     const hidden = document.createElement("span");
     hidden.className = "hidden";
     hidden.textContent = " new";

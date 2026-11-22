@@ -12,6 +12,7 @@
 //     POST /_groups/<id>/items/<item>/records   form: sent (JSON), back: a comment, edit, delete, vote, answer, end,
 //                                               change, or (an admin) remove or calloff
 // - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
+import { rateWindow } from "./limits.js";
 import { blockedAmong, isBlocked } from "./blocks.js";
 import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
@@ -85,7 +86,7 @@ export async function pullGroup(env, from, group) {
     } catch (error) {
       // Asked again in an hour; or, if the group's site says this one has had its allowance there today, once the day's over.
       const busy = busyUntil(error);
-      await db.prepare("UPDATE groups SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - PULL_SECONDS) : now(), group.id).run();
+      await db.prepare("UPDATE groups SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - rateWindow(PULL_SECONDS)) : now(), group.id).run();
       if (page === 0) throw error;
       break;
     }
@@ -142,7 +143,7 @@ export async function pullGroups(env, from) {
   await env.DB.prepare("DELETE FROM copies WHERE group_id IN (SELECT id FROM groups WHERE closed_at < ?)").bind(now() - CLOSE_SECONDS).run();
   const { results } = await env.DB.prepare(`SELECT * FROM groups WHERE identity IS NOT NULL AND joined_at IS NOT NULL AND origin IS NOT NULL
     AND COALESCE(closed_at, ?2) >= ?2 AND COALESCE(items_checked_at, 0) < ?1 ORDER BY COALESCE(items_checked_at, 0) LIMIT 20`)
-    .bind(now() - PULL_SECONDS, now() - CLOSE_SECONDS).all();
+    .bind(now() - rateWindow(PULL_SECONDS), now() - CLOSE_SECONDS).all();
   await Promise.all(results.map((g) => pullGroup(env, from, g).catch(() => null)));
 }
 

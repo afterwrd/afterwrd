@@ -87,6 +87,11 @@ export async function checkPasskeyProof(proof, passkey, statement) {
     if (![r.authenticatorData, r.clientDataJSON, r.signature].every((x) => typeof x === "string" && B64URL_RE.test(x))) return false;
     const key = fromB64url(passkey.key);
     if (!key) return false;
+    // The same proof of the same passkey always checks the same way, so each is checked once (a thread page by five
+    // people carries five delegations fifty times: step 9c measured the WebAuthn check as most of its CPU).
+    const memo = [passkey.id, passkey.key, passkey.origin, proof.nonce, proof.statements.join(","), r.authenticatorData, r.clientDataJSON, r.signature].join("\n");
+    const known = proven.get(memo);
+    if (known !== undefined) return known;
     const { verified } = await verifyAuthenticationResponse({
       response: { id: passkey.id, rawId: passkey.id, type: "public-key", clientExtensionResults: {},
         response: { authenticatorData: r.authenticatorData, clientDataJSON: r.clientDataJSON, signature: r.signature, userHandle: r.userHandle } },
@@ -96,9 +101,14 @@ export async function checkPasskeyProof(proof, passkey, statement) {
       requireUserVerification: true,
       credential: { id: passkey.id, publicKey: key, counter: 0 },
     });
+    if (proven.size >= PROVEN_MAX) proven.delete(proven.keys().next().value);
+    proven.set(memo, verified);
     return verified;
   } catch { return false; }
 }
+// Passkey proofs already checked in this isolate, and their answers (oldest forgotten first).
+const proven = new Map();
+const PROVEN_MAX = 5000;
 
 /** The passkey in `doc` that signed `statement` with `proof`, or null. */
 async function signedByPasskeyOf(doc, proof, statement) {

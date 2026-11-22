@@ -339,6 +339,10 @@ check("a comment slipped in after closing is spotted, though the host signed it"
     entries: fresh.entries, signedHead: fresh.signedHead, from: fromCp, lookups });
   check("a new reader of it starts from the signed checkpoint at 500, and checks the rest", fromCp?.n === 500 && fresh.entries.length === 21
     && !longRead?.problem && longRead.upTo === 521, longRead?.problem);
+  // A group's members list is read whole (groupmembers.js signedMembers): who's in follows from every join and approval.
+  const whole = await readList(db, longItem.fp, { host, whole: true });
+  check("…but read whole, as a group's members list is, it starts from the first entry", !whole.checkpoint && whole.entries.length === 521
+    && whole.entries[0].n === 1, `${whole.entries.length}`);
   // Ann deletes the whole post: everything on it goes, and it can't be put back.
   const gone = await makeRecord({ kind: "delete", author: ann.id, host: ann.id, item: itemRecord.fp, seen: { n: 62, h: back.entries.at(-1).head },
     prev: itemRecord.fp, about: itemRecord.fp }, undefined, ann.browser);

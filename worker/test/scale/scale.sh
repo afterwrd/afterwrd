@@ -27,7 +27,7 @@ case "${1:-}" in
   up)
     # shellcheck disable=SC2086
     docker run -d --name "$NAME" --init $NETWORK -v "$VOLUME:/data" -v "$OUT/build:/build" -v "$PWD/selfhost:/selfhost:ro" \
-      -v "$PWD/test/scale:/scale:ro" -v "$OUT:/out" --entrypoint node "$IMAGE" /scale/start.mjs ;;
+      -v "$PWD/test/scale:/scale:ro" -v "$PWD/public/static:/static:ro" -v "$OUT:/out" --entrypoint node "$IMAGE" /scale/start.mjs ;;
   drive)
     shift
     docker exec "$NAME" node /scale/drive.mjs "$@" ;;

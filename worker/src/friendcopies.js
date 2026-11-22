@@ -6,6 +6,7 @@
 // - commenting on it: signed in the browser, passed on by this site in a signed call, and kept in `sent` with the host's
 //   receipt (relayRecord):
 //     POST /_admin/friend/<connection>/items/<id>/records   form: sent (JSON), back
+import { rateWindow } from "./limits.js";
 import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
 import { fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
@@ -106,7 +107,7 @@ export async function pullItems(env, from, connection) {
     const busy = busyUntil(error);
     await env.DB.batch([
       noteAnswer(env.DB, connection, error),
-      env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - PULL_SECONDS) : now(), connection.id),
+      env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(busy ? Math.max(now(), busy - rateWindow(PULL_SECONDS)) : now(), connection.id),
       ...(error.status === 401 ? [env.DB.prepare("DELETE FROM copies WHERE connection_id = ?").bind(connection.id)] : []),
     ]);
     return null;
@@ -291,7 +292,7 @@ async function followMove(env, connection, person) {
 export async function pullFriends(env, from) {
   if ((await ownMove(env.DB, from))?.done) return; // moved away: this site only says where (calls.js)
   const { results } = await env.DB.prepare(`SELECT * FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL
-    AND COALESCE(items_checked_at, 0) < ? ORDER BY COALESCE(items_checked_at, 0) LIMIT 40`).bind(now() - PULL_SECONDS).all();
+    AND COALESCE(items_checked_at, 0) < ? ORDER BY COALESCE(items_checked_at, 0) LIMIT 40`).bind(now() - rateWindow(PULL_SECONDS)).all();
   await Promise.all(results.map((c) => pullItems(env, from, c).catch(() => null)));
 }
 

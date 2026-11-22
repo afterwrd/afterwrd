@@ -32,10 +32,10 @@ export async function friendPerson(env, connection) {
  * @param {string} from
  * @param {string} origin
  * @param {string} path
- * @param {{ body?: object | null, timeout?: number }} [options]
+ * @param {{ body?: object | null, timeout?: number, maxReply?: number }} [options]
  * @returns {Promise<Record<string, any>>}
  */
-export async function callFriend(env, from, origin, path, { body = null, timeout = TIMEOUT_MS } = {}) {
+export async function callFriend(env, from, origin, path, { body = null, timeout = TIMEOUT_MS, maxReply = MAX_REPLY } = {}) {
   const me = await ownHost(env);
   if (!me) throw Object.assign(new Error("Set up signing first, in Your devices."), { status: 0 });
   const text = body === null ? null : JSON.stringify(body);
@@ -49,7 +49,7 @@ export async function callFriend(env, from, origin, path, { body = null, timeout
     throw Object.assign(new Error(`Couldn't reach ${host(origin)}.`), { status: 0 });
   }
   let data = {};
-  try { data = JSON.parse(await readLimited(response, MAX_REPLY)); } catch {}
+  try { data = JSON.parse(await readLimited(response, maxReply)); } catch {}
   if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
   if (!response.ok) {
     // retry: a site saying this one has had its allowance there today, and when to try again (allowances.js).

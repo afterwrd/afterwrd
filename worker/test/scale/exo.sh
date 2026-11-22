@@ -157,6 +157,10 @@ case "${1:-}" in
     if running "$mode"; then echo "vm.sh $mode is already running on $(first): not starting another." >&2; exit 1; fi
     net=""
     if [ -n "${SCALE_NET:-}" ]; then net="SCALE_NET='$SCALE_NET'"; fi
+    if [ -n "${SCALE_DAY:-}" ]; then net="$net SCALE_DAY='$SCALE_DAY'"; fi
+    if [ -n "${SCALE_FRESH:-}" ]; then net="$net SCALE_FRESH=1"; fi
+    if [ -n "${SCALE_REBUILD:-}" ]; then net="$net SCALE_REBUILD=1"; fi
+    if [ -n "${SCALE_FROM:-}" ]; then net="$net SCALE_FROM='$SCALE_FROM'"; fi
     # SCALE_POWER_OFF: when the run ends, however it ends, every server powers off (vm.sh finish).
     on "$(first)" "cd worker && sudo MACHINES='$(addresses)' SCALE_POWER_OFF=1 $net sh -c 'nohup test/scale/vm.sh $mode >/dev/null 2>&1 </dev/null &'"
     sleep 3

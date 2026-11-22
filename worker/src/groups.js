@@ -91,16 +91,26 @@ const byName = (a, b) => {
   return x < y ? -1 : x > y ? 1 : 0;
 };
 
+/** The group's members as groupObject last read them, and where the members list was then (this object's memory). */
+let membersKept = null;
+
 /** The group as a Group: its owner, how many members it has, and (for the member asking) their role. */
 export async function groupObject(db, site, group, member) {
-  // Every member's every page reads this, so what grows with the group is read once: the members in any order (sorted
-  // here, not by SQLite), and those waiting counted only for an admin, who's the only one told.
+  // Every member's every pull reads this, so what grows with the group is read only when it's changed: the members
+  // are kept in memory until the signed members list moves on (its `lists` row, one row to read), sorted here, not by
+  // SQLite; those waiting are counted only for an admin, who's the only one told.
+  const point = await db.prepare("SELECT l.n FROM lists l JOIN own_identity o ON l.id = o.person WHERE o.id = 1").first();
+  const known = point && membersKept?.n === Number(point.n) ? membersKept.results : null;
   const [owner, members, waiting] = await db.batch([
     db.prepare("SELECT origin, name FROM group_members WHERE role = 'owner' LIMIT 1"),
-    db.prepare("SELECT origin, name, identity FROM group_members WHERE approved_at IS NOT NULL"),
+    known ? db.prepare("SELECT 1 WHERE 0") : db.prepare("SELECT origin, name, identity FROM group_members WHERE approved_at IS NOT NULL"),
     ...(isAdmin(member) ? [db.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL")] : []),
   ]);
-  members.results.sort((a, b) => byName(a.name, b.name));
+  if (known) members.results = known;
+  else {
+    members.results.sort((a, b) => byName(a.name, b.name));
+    if (point) membersKept = { n: Number(point.n), results: members.results };
+  }
   const o = owner.results[0];
   const closed = closedGroup(group);
   return {

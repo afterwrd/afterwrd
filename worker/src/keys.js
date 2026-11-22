@@ -71,6 +71,16 @@ export async function hostingKey(env) {
 }
 
 /**
+ * When this site first saw each of `chain`'s documents, by fingerprint: only theirs (identity_seen holds every identity
+ * this site has met, which on a site with 1,000 friends is thousands of rows, read on every request otherwise).
+ */
+async function seenOf(db, chain) {
+  const fps = await Promise.all(chain.map((d) => fingerprintOf("identity", d.bytes)));
+  const { results } = await db.prepare("SELECT fp, first_seen FROM identity_seen WHERE fp IN (SELECT value FROM json_each(?))").bind(JSON.stringify(fps)).all();
+  return new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
+}
+
+/**
  * The owner's identity as this site reads it now: {person, chain, state}, or null before they've set up signing.
  * @param {D1Database} db
  */
@@ -78,8 +88,7 @@ export async function ownIdentity(db) {
   const row = await db.prepare("SELECT person, chain FROM own_identity WHERE id = 1").first();
   if (!row) return null;
   const chain = JSON.parse(String(row.chain)).map(({ bytes, sig }) => ({ bytes: fromB64url(bytes), sig }));
-  const { results } = await db.prepare("SELECT fp, first_seen FROM identity_seen").all();
-  const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
+  const seen = await seenOf(db, chain);
   // A group's site (step 6) reads its own with its owner's identity beside it (identities.js readChain).
   const state = await readChain(db, chain, (fp) => seen.get(fp) ?? now(), now());
   return state ? { person: String(row.person), chain, state } : null;
@@ -256,8 +265,7 @@ async function nextDocument(own, fields) {
 async function appendDocument(env, own, entry) {
   const fp = await fingerprintOf("identity", entry.bytes);
   const chain = [...own.chain, entry];
-  const { results } = await env.DB.prepare("SELECT fp, first_seen FROM identity_seen").all();
-  const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
+  const seen = await seenOf(env.DB, chain);
   const at = now();
   const state = await readIdentity(chain, (f) => seen.get(f) ?? at, at);
   if (!state || state.problem) return null;

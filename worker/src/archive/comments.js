@@ -69,14 +69,21 @@ export async function latestComments(db, page, size) {
   return { rows: rows.results, paging: { page, total, hasNext: page * size < total } };
 }
 
-/** How many notifications arrived since this person last opened Notifications (their own comments aren't news). */
+/** Counted no further: the header shows "99+" past it. */
+export const NEW_COUNT_MAX = 100;
+
+/**
+ * How many notifications arrived since this person last opened Notifications (their own comments aren't news), up to
+ * NEW_COUNT_MAX. Every page asks, so it stops counting there: someone who hasn't looked for a while would otherwise
+ * have every unread one read again on every page (the scale run's sites read hundreds a page).
+ */
 export async function newCount(db, user) {
   const row = await db.prepare(`SELECT
-    (SELECT COUNT(*) FROM comments WHERE created_at > ?1 AND (author_id IS NULL OR author_id != ?2))
-    + (SELECT COUNT(*) ${NOTICES} AND n.created_at > ?1)
-    + (SELECT COUNT(*) ${GROUP_NOTICES} AND n.created_at > ?1) AS n`)
-    .bind(user.activity_seen_at ?? 0, user.id).first();
-  return row.n;
+    (SELECT COUNT(*) FROM (SELECT 1 FROM comments WHERE created_at > ?1 AND (author_id IS NULL OR author_id != ?2) LIMIT ?3))
+    + (SELECT COUNT(*) FROM (SELECT 1 ${NOTICES} AND n.created_at > ?1 LIMIT ?3))
+    + (SELECT COUNT(*) FROM (SELECT 1 ${GROUP_NOTICES} AND n.created_at > ?1 LIMIT ?3)) AS n`)
+    .bind(user.activity_seen_at ?? 0, user.id, NEW_COUNT_MAX).first();
+  return Math.min(Number(row.n), NEW_COUNT_MAX);
 }
 
 /**

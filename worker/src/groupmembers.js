@@ -149,7 +149,9 @@ export async function membersNow(env, self) {
 export async function signedMembers(env) {
   const self = await groupSelf(env);
   if (!self) return null;
-  const list = await readList(env.DB, self.list, { host: self });
+  // Whole, from its first entry: who's in follows from every join and approval since (the scale run found a group
+  // past about 250 members sent from a checkpoint, which no member's site could check).
+  const list = await readList(env.DB, self.list, { host: self, whole: true });
   if (!list) return null;
   const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
   const people = [...new Set([list.owner, ...records.map((r) => r.author)])];

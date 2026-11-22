@@ -1,6 +1,6 @@
 // What drive.mjs uses to act as each site's owner, without a browser (docs/scale-test-plan.md): HTTP to the site
 // through its workerd's router, with its cookies; the server's tools (owner links); and a passkey made in software.
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { Agent, request } from "node:http";
 
 const agent = new Agent({ keepAlive: true, maxSockets: 256 });
@@ -36,14 +36,19 @@ function cbor(value) {
   throw new Error(`cbor: can't encode ${typeof value}`);
 }
 
-/** A passkey for `rpId`, made here: what a phone would do when the site asks for one (attestation "none"). */
-export function makePasskey(rpId) {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+/**
+ * A passkey for `rpId`, made here: what a phone would do when the site asks for one (attestation "none"). `saved`
+ * (from its `saved()`) brings back one made earlier, so a later step can sign with it (afterwrd 2: groups' identities).
+ */
+export function makePasskey(rpId, saved = null) {
+  const privateKey = saved ? createPrivateKey(saved.key) : generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey;
+  const publicKey = createPublicKey(privateKey);
   const jwk = publicKey.export({ format: "jwk" });
-  const id = randomBytes(16);
+  const id = saved ? Buffer.from(saved.id, "base64url") : randomBytes(16);
   return {
     id,
     privateKey,
+    saved: () => ({ id: b64url(id), key: privateKey.export({ format: "pem", type: "pkcs8" }) }),
     /** The browser's answer to navigator.credentials.create(options). */
     register(options, origin) {
       const clientData = Buffer.from(JSON.stringify({ type: "webauthn.create", challenge: options.challenge, origin, crossOrigin: false }));

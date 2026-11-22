@@ -14,6 +14,7 @@
 //                            group's `roles` prove its admins who removed something (their join and the owner's role).
 // and each `GET /_p/items?since` also gives `mine`: the caller's records taken there since (mineSince).
 // (`/_p/check-*` and `/_p/checked` are the checks of a site's code: checks.js, friendchecks.js.)
+import { rateWindow } from "./limits.js";
 import { callFriend } from "./calls.js";
 import { delegationsFor, peopleFor } from "./friendhost.js";
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
@@ -35,8 +36,13 @@ const MINE_OVERLAP = 600; // `mine` reaches this far back before `since`, so a r
 /** SQL: a `sent` row the host has taken, as far as this site knows (what an owner's next record there may follow). */
 export const TAKEN_SQL = "(state IS NULL OR state NOT IN ('unsure', 'waiting', 'stopped'))";
 
-/** A "day" of the schedule: shorter only on local test sites (TEST_SENT_SECONDS), so a test can see rounds go by. */
-const dayOf = (env) => (env.ALLOW_LOCAL_SITES && Number(env.TEST_SENT_SECONDS) > 0 ? Number(env.TEST_SENT_SECONDS) : 86400);
+/**
+ * A "day" of the schedule: shorter only on local test sites (TEST_SENT_SECONDS), so a test can see rounds go by, and
+ * in a squeezed scale test (limits.js rateWindow), so its day has a day's checks.
+ */
+const dayOf = (env) => (env.ALLOW_LOCAL_SITES && Number(env.TEST_SENT_SECONDS) > 0 ? Number(env.TEST_SENT_SECONDS) : rateWindow(86400));
+/** How often a round of checks may run: hourly, or as often as a day lets. */
+const roundOf = (env) => Math.min(rateWindow(3600), dayOf(env));
 
 /** When to ask about a record sent at `created` again, asked at `at`: daily for a week, weekly to 3 months, then monthly. */
 export function nextAt(env, created, at) {
@@ -288,7 +294,7 @@ async function resend(env, from, where, row) {
 export async function checkSentRound(env, from) {
   const db = env.DB;
   const at = now();
-  const every = Math.min(3600, dayOf(env));
+  const every = roundOf(env);
   const last = await db.prepare("SELECT value FROM settings WHERE key = 'sent_round_at'").first();
   if (last && at - Number(last.value) < every) return;
   await db.prepare("INSERT INTO settings (key, value) VALUES ('sent_round_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(String(at)).run();
@@ -318,7 +324,7 @@ async function checkHost(env, from, me, host, where, rows) {
   for (const row of rows.filter((r) => r.state === "waiting").slice(0, RESENDS_A_SITE)) {
     if (await resend(env, from, where, row)) continue;
     const late = at - Number(row.created_at) > RETRY_DAYS * dayOf(env);
-    await db.prepare("UPDATE sent SET checked_at = ?, next_at = ? WHERE fp = ?").bind(at, late ? null : at + Math.min(3600, dayOf(env)), String(row.fp)).run();
+    await db.prepare("UPDATE sent SET checked_at = ?, next_at = ? WHERE fp = ?").bind(at, late ? null : at + roundOf(env), String(row.fp)).run();
   }
   const asking = rows.filter((r) => r.state !== "waiting").slice(0, MAX_POINTS);
   if (!asking.length) return;

@@ -1,10 +1,19 @@
-// Drives the scale test's network from inside its container (docs/scale-test-plan.md):
+// Drives the scale test's network from inside its container (README.md; docs/signed-conversations.md, step 9b):
 //   test/scale/scale.sh drive <step> [options]
-// Steps run in order the first time (setup), and each scenario can be run again on its own afterwards.
+// Setting up, in order: owners, posts, friends, groups, warm. Then the scenarios: day [minutes], oneoffs. Then report
+// (analyse.mjs) reads what they recorded.
+//
+// Everything a person does is signed here as their browser would sign it (afterwrd 2): each owner signs in with a
+// passkey made here, sets up signing with a recovery code (one passkey prompt signs their identity and this "browser's"
+// key), and every post, comment, vote, join and approval is a record made with public/static/records.js (mounted at
+// /static) and sent to the routes the pages use.
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
-import { machineOf, pool, Site, sleep, tools, toolsAddress, withCpu } from "./lib.mjs";
-import { seeded } from "./social.mjs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { makePasskey, machineOf, pool, Site, sleep, tools, toolsAddress } from "./lib.mjs";
+
+const STATIC = process.env.SCALE_STATIC ?? "/static";
+const { makeRecord } = await import(`${STATIC}/records.js`);
+const S = await import(`${STATIC}/signed.js`);
 
 // A network error that isn't any request's (a connection reset between requests, say) is noted, not the end of a run
 // that may have hours to go: each request's own failures still reach whoever made it. Anything else still stops it.
@@ -23,18 +32,19 @@ const save = () => writeFileSync(STATE_FILE, JSON.stringify(state));
 
 // Every site, with its workerd process, machine and port.
 const all = NET.processes.flatMap((p, i) => p.sites.map((s) => ({ ...s, proc: i, machine: machineOf(p), port: p.port, tools: toolsAddress(p, i) })));
-// drive.mjs runs on the first machine (net.mjs --machines): it measures CPU through workerd's inspector, which only
-// listens there, so the sites it measures (hubs and groups) are there too.
 const HERE = machineOf(NET.processes[0]);
 if ((process.env.SCALE_MACHINE ?? "127.0.0.1") !== HERE) throw new Error(`Run drive.mjs on the first machine, ${HERE}.`);
-if (all.some((s) => s.role !== "leaf" && s.machine !== HERE)) throw new Error(`The hubs and groups must be on the first machine, ${HERE}.`);
 const byHost = new Map(all.map((s) => [s.host, s]));
 const people = all.filter((s) => !s.group);
+const leaves = all.filter((s) => s.role === "leaf");
+const hubs = all.filter((s) => s.role === "hub").sort((a, b) => b.friends - a.friends);
+const groupSites = all.filter((s) => s.role === "group");
 const number = (s) => s.host.slice(1, s.host.indexOf("."));
-const ownerName = (s) => s.role === "hub" ? `Sam Taylor ${Number(number(s))}` : `Ann Example ${number(s)}`;
+const ownerName = (s) => (s.role === "hub" ? `Sam Taylor ${Number(number(s))}` : `Ann Example ${number(s)}`);
+const SQUEEZE = Number(NET.squeeze) || 1;
 
 /** The site as its signed-in owner. */
-export function owner(host) {
+function owner(host) {
   const info = byHost.get(host);
   const site = new Site(host, info.machine, info.port);
   for (const [k, v] of Object.entries(state.sites[host]?.cookies ?? {})) site.cookies.set(k, v);
@@ -43,17 +53,16 @@ export function owner(host) {
 
 async function waitUp() {
   for (let i = 0; ; i++) {
-    const answers = await Promise.all(NET.processes.map((p) => new Site(p.sites[0].host, machineOf(p), p.port).fetch("/_version").then((r) => r.status, () => 0)));
+    const answers = await Promise.all(NET.processes.filter((p) => p.sites.length)
+      .map((p) => new Site(p.sites[0].host, machineOf(p), p.port).fetch("/_version").then((r) => r.status, () => 0)));
     if (answers.every((s) => s === 200)) return;
     if (i > 600) throw new Error("The sites didn't start.");
-    await new Promise((r) => setTimeout(r, 500));
+    await sleep(500);
   }
 }
 
-const POSTS = 30; // each site's own posts (a friend's feed sends their newest 30)
-// How many at once while setting up. Each friendship waits on a chain of calls between sites, so this, not the
-// servers, set the pace (a dress rehearsal on 2 servers made 86 a second with 48 at once, the servers at a load of 1).
-const AT_ONCE = Number(process.env.SCALE_AT_ONCE ?? (NET.model === "social" ? 256 : 48));
+// How many at once while setting up: each friendship waits on a chain of calls between sites, so this sets the pace.
+const AT_ONCE = Number(process.env.SCALE_AT_ONCE ?? 64);
 
 /** `work`, tried up to `times` times, a little longer apart each time: what fails now often works a moment later. */
 async function retry(times, work) {
@@ -67,81 +76,117 @@ async function retry(times, work) {
   }
 }
 
-/**
- * Setting up carries on past a few failures (each noted), and only gives up if more than `share` of `what` failed:
- * then something's broken, and the run is better stopped (and the servers powered off) than run on half a network.
- */
+/** Setting up carries on past a few failures, and gives up if more than `share` of `what` failed. */
 function tooMany(failed, total, what, share = 0.02) {
   if (failed > total * share) throw new Error(`${failed} of ${total} ${what} failed: more than ${share * 100}%, so stopping`);
 }
-const PHOTO_EVERY = 4; // 1 post in 4 has a photo
-// A made-up photo and its thumbnail, in KB: smaller in the social model, whose 3,000 sites would otherwise hold 4 GB of
-// them (what's stored, and how, is the same whatever the size).
-const PHOTO_KB = NET.model === "social" ? [60, 10] : [150, 25];
 
-// The social model's friendships (net.mjs --model social): each site's friends, and its circles (social.mjs).
-const friendsOf = new Map();
-const circlesOf = new Map();
-if (NET.edges) {
-  for (let i = 0; i < NET.edges.length; i += 2) {
-    const [a, b] = [NET.people[NET.edges[i]], NET.people[NET.edges[i + 1]]];
-    if (!friendsOf.has(a)) friendsOf.set(a, []);
-    if (!friendsOf.has(b)) friendsOf.set(b, []);
-    friendsOf.get(a).push(b);
-    friendsOf.get(b).push(a);
-  }
-  NET.circles.forEach((members, c) => { for (const i of members) { const h = NET.people[i]; if (!circlesOf.has(h)) circlesOf.set(h, new Set()); circlesOf.get(h).add(c); } });
+/** A seeded random number source, so a run's day is the same each time it's made. */
+function seeded(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-/** A made-up photo: JPEG markers round random bytes (the site stores and hashes it, and never decodes it). */
+// --- Signing, as a browser does ---------------------------------------------------------------------------------------
+
+const keys = new Map(); // host -> {privateKey, publicKey}, as records.js makeRecord takes them
+async function keyOf(host) {
+  if (!keys.has(host)) {
+    const saved = state.sites[host];
+    const privateKey = await crypto.subtle.importKey("pkcs8", Buffer.from(saved.key, "base64url"), { name: "Ed25519" }, false, ["sign"]);
+    keys.set(host, { privateKey, publicKey: saved.publicKey });
+  }
+  return keys.get(host);
+}
+/** A record signed by `host`'s owner: {sent, fp}. */
+const sign = async (host, fields, content) => makeRecord({ author: state.sites[host].person, ...fields }, content, await keyOf(host));
+
+/** A passkey's answer to a prompt signing `statements` under `nonce` (signed.js statementsChallenge), as passkey.js gives it. */
+async function passkeySigns(host, nonce, statements) {
+  const passkey = makePasskey(host, state.sites[host].passkey);
+  return passkey.login({ challenge: await S.statementsChallenge(nonce, statements) }, `https://${host}`, 0);
+}
+
+/**
+ * POSTs JSON as the owner of `host` (or through `site`, one Site kept for steps that pass a challenge in a cookie, as
+ * a start and finish do); the answer's JSON, or throws.
+ */
+async function post(host, path, body, ok = [200], site = owner(host)) {
+  const r = await site.fetch(path, { method: "POST", body });
+  if (!ok.includes(r.status)) throw new Error(`${path} ${r.status} ${r.text.slice(0, 160)}`);
+  return r.text ? r.json() : {};
+}
+
+/** The data-sign-* attributes of the first form matching `cls` on a page (views/items.js signAttrs), or null. */
+function signData(html, cls = "say") {
+  const tag = new RegExp(`<form[^>]*class="[^"]*\\b${cls}\\b[^"]*"[^>]*>`).exec(html)?.[0];
+  if (!tag) return null;
+  const d = {};
+  for (const m of tag.matchAll(/data-sign-([a-z-]+)="([^"]*)"/g)) d[m[1]] = m[2];
+  return d;
+}
+const seenOf = (d) => (d?.["seen-n"] ? { n: Number(d["seen-n"]), h: d["seen-h"] } : null);
+
+/** A record signed on the page at `path` (its comment form, or poll form) and sent where that page sends it. */
+async function signOn(host, path, relay, kind, content, { form = "say", extra = {} } = {}) {
+  const page = await owner(host).fetch(path);
+  if (page.status !== 200) throw new Error(`${path}: ${page.status}`);
+  const d = signData(page.text, form);
+  if (!d) throw new Error(`${path}: no ${form} form`);
+  const made = await sign(host, { kind, host: d.host, item: d.item, seen: seenOf(d), prev: d.prev || null,
+    ...(kind === "vote" && { version: d.version || d.item }), ...extra }, content);
+  const r = await owner(host).fetch(relay, { method: "POST", form: { sent: JSON.stringify(made.sent), back: path } });
+  if (r.status !== 303 && r.status !== 200) throw new Error(`${relay}: ${r.status} ${r.text.slice(0, 160)}`);
+  return made.fp;
+}
+
+// --- Photos and posts -------------------------------------------------------------------------------------------------
+
+const PHOTO_KB = [60, 10]; // a made-up photo and its thumbnail (what's stored, and how, is the same whatever the size)
 function photo(kb) {
   const body = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), randomBytes(kb * 1024), Buffer.from([0xff, 0xd9])]);
   return { body, hash: createHash("sha256").update(body).digest("hex") };
 }
-
-/** Writes a post as the owner of `site`, with a made-up photo if `withPhoto`. */
-export async function writePost(site, text, withPhoto) {
-  const photos = [];
-  if (withPhoto) {
-    const full = photo(PHOTO_KB[0]);
-    const thumb = photo(PHOTO_KB[1]);
-    for (const f of [full, thumb]) {
-      const put = await site.fetch(`/_admin/import/files/${f.hash}`, { method: "PUT", body: f.body, headers: { "Content-Type": "image/jpeg" } });
-      if (put.status !== 200) throw new Error(`${site.host}: photo ${put.status} ${put.text.slice(0, 200)}`);
-    }
-    photos.push({ hash: full.hash, thumb_hash: thumb.hash, width: 2560, height: 1920, size: full.body.length });
+async function upload(host) {
+  const full = photo(PHOTO_KB[0]);
+  const thumb = photo(PHOTO_KB[1]);
+  for (const f of [full, thumb]) {
+    const put = await owner(host).fetch(`/_admin/import/files/${f.hash}`, { method: "PUT", body: f.body, headers: { "Content-Type": "image/jpeg" } });
+    if (put.status !== 200) throw new Error(`photo ${put.status} ${put.text.slice(0, 160)}`);
   }
-  const r = await site.fetch("/_admin/posts", { method: "POST", body: { text, photos } });
-  if (r.status !== 200) throw new Error(`${site.host}: post ${r.status} ${r.text.slice(0, 200)}`);
+  return { hash: full.hash, thumb_hash: thumb.hash, width: 2560, height: 1920, size: full.body.length };
 }
 
 /**
- * Who is friends with whom: the social model's list (net.json edges); otherwise each hub with the first N leaves, and
- * each leaf with the 5 after it, round the ring (10 each).
+ * A post by `host`'s owner, signed as compose.js signs one: on their own site, or in a group (`group`: {id (on their
+ * site), person}). Each photo is an item of its own, signed first. Returns the post's id.
  */
-function friendships() {
-  if (NET.edges) {
-    const pairs = [];
-    for (let i = 0; i < NET.edges.length; i += 2) pairs.push([NET.people[NET.edges[i]], NET.people[NET.edges[i + 1]]]);
-    return pairs;
-  }
-  const leaves = all.filter((s) => s.role === "leaf");
-  const pairs = [];
-  for (const hub of all.filter((s) => s.role === "hub")) for (const leaf of leaves.slice(0, hub.friends)) pairs.push([hub.host, leaf.host]);
-  if (leaves.length > 1) {
-    const reach = Math.min(5, Math.floor((leaves.length - 1) / 2));
-    for (let i = 0; i < leaves.length; i++) {
-      for (let d = 1; d <= reach; d++) pairs.push([leaves[i].host, leaves[(i + d) % leaves.length].host]);
-    }
-  }
-  return pairs;
+async function writePost(host, text, { withPhoto = false, group = null, extra = {} } = {}) {
+  const photos = withPhoto ? [await upload(host)] : [];
+  const fields = { kind: "item", host: group ? group.person : state.sites[host].person };
+  const made = [];
+  for (const p of photos) made.push(await sign(host, fields, { type: "photo", ...p }));
+  const postRecord = await sign(host, fields, { type: "post", text, photos: photos.map((p, i) => ({ item: made[i].fp, ...p })), ...extra });
+  if (group) await post(host, `/_groups/${group.id}/items`, { sent: postRecord.sent, photos: made.map((m) => m.sent), files: photos });
+  else await post(host, "/_admin/items", { sent: postRecord.sent, photos: made.map((m) => m.sent) });
+  return postRecord.fp;
 }
 
+// --- Setting up -----------------------------------------------------------------------------------------------------
+
+const POSTS = 3; // each person's own posts before the day (Home keeps 10 a friend)
+
 const steps = {
-  /** Each person's site gets its owner, signed in with a passkey made here. */
+  /** Each person's site gets its owner, signed in with a passkey made here, and set up to sign (keys.js). */
   async owners() {
     await waitUp();
-    const todo = people.filter((s) => !state.sites[s.host]?.cookies);
+    const todo = people.filter((s) => !state.sites[s.host]?.person);
     let done = 0;
     let failed = 0;
     await pool(todo, Math.max(16, AT_ONCE / 4), async (s) => {
@@ -150,7 +195,19 @@ const steps = {
           const { link } = await tools(s.tools, "/owner", { host: s.host, name: ownerName(s) });
           const site = new Site(s.host, s.machine, s.port);
           await site.signInWith(link);
-          state.sites[s.host] = { cookies: Object.fromEntries(site.cookies) };
+          // The recovery-code page (views/pages.js keysPage): its code's key, a new browser key, one prompt.
+          const recovery = await S.recoveryKey(S.newRecoveryCode());
+          const pair = await S.newKeyPair(true);
+          const publicKey = await S.publicKeyText(pair.publicKey);
+          const started = await site.fetch("/_admin/keys/start", { method: "POST", body: { recovery: recovery.publicKey, browserKey: publicKey } });
+          if (started.status !== 200) throw new Error(`keys/start ${started.status} ${started.text.slice(0, 160)}`);
+          const start = started.json();
+          const statements = [await S.fingerprintOf("identity", S.fromB64url(start.identity)), await S.fingerprintOf("delegation", S.fromB64url(start.delegation))];
+          const response = site.passkey.login({ challenge: await S.statementsChallenge(start.nonce, statements) }, site.origin, 0);
+          const finished = await site.fetch("/_admin/keys/finish", { method: "POST", body: { identity: start.identity, delegation: start.delegation, response } });
+          if (finished.status !== 200) throw new Error(`keys/finish ${finished.status} ${finished.text.slice(0, 160)}`);
+          state.sites[s.host] = { cookies: Object.fromEntries(site.cookies), person: finished.json().person, publicKey,
+            key: Buffer.from(await crypto.subtle.exportKey("pkcs8", pair.privateKey)).toString("base64url"), passkey: site.passkey.saved() };
         });
       } catch (error) {
         failed++;
@@ -162,27 +219,26 @@ const steps = {
       }
     });
     save();
-    console.log(`Owners: ${people.length - failed} sites signed in, ${failed} failed.`);
+    console.log(`Owners: ${people.length - failed} sites signed in and signing, ${failed} failed.`);
     tooMany(failed, people.length, "owners");
   },
 
-  /** Each person's site gets its own posts, before it has friends (so no notes go out). */
+  /** Each person's own posts, before they have friends (so no notes go out): one in POSTS with a photo. */
   async posts() {
-    const todo = people.filter((s) => state.sites[s.host]?.cookies && !state.sites[s.host].posted);
-    let done = 0;
+    const todo = people.filter((s) => state.sites[s.host]?.person && !state.sites[s.host].posted);
     let failed = 0;
+    let done = 0;
     await pool(todo, Math.max(12, AT_ONCE / 4), async (s) => {
-      const site = owner(s.host);
       for (let n = 1; n <= POSTS; n++) {
         try {
-          await retry(3, () => writePost(site, `Post ${n} from ${ownerName(s)}: a made-up post for the scale test.`, n % PHOTO_EVERY === 0));
+          await retry(3, () => writePost(s.host, `Post ${n} from ${ownerName(s)}: a made-up post for the scale test.`, { withPhoto: n === 1 }));
         } catch (error) {
           failed++;
           if (failed <= 50) console.error(`${s.host}: post ${n}: ${error.message}`);
         }
       }
       state.sites[s.host].posted = POSTS;
-      if (++done % 50 === 0) {
+      if (++done % 100 === 0) {
         save();
         console.log(`${done}/${todo.length} sites posted`);
       }
@@ -193,214 +249,190 @@ const steps = {
   },
 
   /**
-   * Friend links made, pasted and approved, as people do it (connect.js): a block of friendships at a time, then
-   * everyone who made a link in it lets in whoever's asking (Friends → Approve). Progress is kept by the block, so a
-   * run that stops carries on from the block it was in: a friendship made already is simply already there.
+   * Friend links made, pasted and approved, as people do it (connect.js): each hub with its first N leaves, and each
+   * leaf with the 5 after it round the ring (10 each). In blocks, shuffled, so each block is spread over many sites.
    */
   async friends() {
-    const BLOCK = 5000;
-    // In a shuffled order (the same every time), so each block is spread over thousands of sites: in the list's own
-    // order a block was a few people with hundreds each, and each site answers one request at a time, so it went no
-    // faster however many were asked at once. A run that began in the list's own order (before this) carries on
-    // shuffling only what it hadn't done.
-    const listed = friendships();
-    if (!state.friendOrder) {
-      state.friendOrder = { from: Math.min(listed.length, (state.friendBlocks ?? 0) * BLOCK) };
-      state.friendShuffledBlocks = 0;
-      save();
-    }
+    const pairs = [];
+    for (const hub of hubs) for (const leaf of leaves.slice(0, hub.friends)) pairs.push([hub.host, leaf.host]);
+    const reach = Math.min(5, Math.floor((leaves.length - 1) / 2));
+    for (let i = 0; i < leaves.length; i++) for (let d = 1; d <= reach; d++) pairs.push([leaves[i].host, leaves[(i + d) % leaves.length].host]);
     const random = seeded(4242);
-    const pairs = listed.slice(state.friendOrder.from);
     for (let i = pairs.length - 1; i > 0; i--) {
       const j = Math.floor(random() * (i + 1));
       [pairs[i], pairs[j]] = [pairs[j], pairs[i]];
     }
+    const BLOCK = 2000;
+    state.friendBlocks ??= 0;
     let failed = 0;
     let approved = 0;
-    const missed = []; // tried again once at the end
-    const started = Date.now();
-    for (let b = state.friendShuffledBlocks; b * BLOCK < pairs.length; b++) {
-      const block = pairs.slice(b * BLOCK, (b + 1) * BLOCK);
-      await pool(block, AT_ONCE, async ([a, other]) => {
-        try {
-          const made = await owner(a).fetch("/_admin/connections/link", { method: "POST", body: {} });
-          if (made.status !== 200) throw new Error(`link ${made.status} ${made.text.slice(0, 120)}`);
-          const { link } = made.json();
-          const added = await owner(other).fetch(`/_admin/connections/new?link=${encodeURIComponent(link)}`, { method: "POST", body: {} });
-          if (added.status !== 200 && !(added.status === 409 && /already/i.test(added.text))) throw new Error(`add ${added.status} ${added.text.slice(0, 120)}`);
-        } catch (error) {
-          failed++;
-          missed.push([a, other]);
-          if (failed <= 50) console.error(`${a} → ${other}: ${error.message}`);
+    const ask = async ([a, other]) => {
+      const { link } = await post(a, "/_admin/connections/link", {});
+      const added = await owner(other).fetch(`/_admin/connections/new?link=${encodeURIComponent(link)}`, { method: "POST", body: {} });
+      if (added.status !== 200 && !(added.status === 409 && /already/i.test(added.text))) throw new Error(`add ${added.status} ${added.text.slice(0, 120)}`);
+    };
+    const letIn = async (host) => {
+      const site = owner(host);
+      for (;;) {
+        const page = await site.fetch("/friend");
+        const ids = [...new Set([...page.text.matchAll(/formaction="\/_admin\/connections\/(\d+)\/approve/g)].map((m) => m[1]))];
+        if (!ids.length) return;
+        for (const id of ids) {
+          const r = await site.fetch(`/_admin/connections/${id}/approve`, { method: "POST", form: {} });
+          if (r.status !== 303) throw new Error(`${host}: approve ${id}: ${r.status}`);
+          approved++;
         }
-      });
-      await pool([...new Set(block.map(([a]) => a))], Math.max(32, AT_ONCE / 2), async (host) => {
-        const site = owner(host);
-        for (;;) {
-          const page = await site.fetch("/friend");
-          const ids = [...new Set([...page.text.matchAll(/formaction="\/_admin\/connections\/(\d+)\/approve/g)].map((m) => m[1]))];
-          if (!ids.length) break;
-          for (const id of ids) {
-            const r = await site.fetch(`/_admin/connections/${id}/approve`, { method: "POST", form: {} });
-            if (r.status !== 303) throw new Error(`${host}: approve ${id}: ${r.status}`);
-            approved++;
-          }
-        }
-      });
-      state.friendShuffledBlocks = b + 1;
-      save();
-      const done = Math.min((b + 1) * BLOCK, pairs.length);
-      console.log(`${state.friendOrder.from + done}/${listed.length} friendships, ${failed} failed, ${approved} approved ` +
-        `(${Math.round(done / ((Date.now() - started) / 1000))} a second)`);
-    }
-    // Those that failed (a connection dropped, a site too busy), once more, a few at a time; then let in.
-    let again = 0;
-    await pool(missed, 16, async ([a, other]) => {
-      try {
-        const made = await owner(a).fetch("/_admin/connections/link", { method: "POST", body: {} });
-        if (made.status !== 200) return;
-        const added = await owner(other).fetch(`/_admin/connections/new?link=${encodeURIComponent(made.json().link)}`, { method: "POST", body: {} });
-        if (added.status === 200 || (added.status === 409 && /already/i.test(added.text))) again++;
-      } catch {}
-    });
-    await pool([...new Set(missed.map(([a]) => a))], 16, async (host) => {
-      const page = await owner(host).fetch("/friend");
-      for (const id of new Set([...page.text.matchAll(/formaction="\/_admin\/connections\/(\d+)\/approve/g)].map((m) => m[1]))) {
-        const r = await owner(host).fetch(`/_admin/connections/${id}/approve`, { method: "POST", form: {} });
-        if (r.status === 303) approved++;
       }
-    }).catch((error) => console.error(`Letting in the second tries: ${error.message}`));
-    console.log(`Friends: ${listed.length} friendships, ${failed} failed (this run), ${again} of them made on a second try, ${approved} approved.`);
+    };
+    const missed = [];
+    for (let b = state.friendBlocks; b * BLOCK < pairs.length; b++) {
+      const block = pairs.slice(b * BLOCK, (b + 1) * BLOCK);
+      await pool(block, AT_ONCE, async (pair) => {
+        try { await ask(pair); } catch (error) {
+          failed++;
+          missed.push(pair);
+          if (failed <= 50) console.error(`${pair[0]} → ${pair[1]}: ${error.message}`);
+        }
+      });
+      await pool([...new Set(block.map(([a]) => a))], 32, (host) => letIn(host).catch((e) => console.error(e.message)));
+      state.friendBlocks = b + 1;
+      save();
+      console.log(`${Math.min((b + 1) * BLOCK, pairs.length)}/${pairs.length} friendships, ${failed} failed, ${approved} approved`);
+    }
+    let again = 0;
+    await pool(missed, 16, async (pair) => { try { await ask(pair); again++; } catch {} });
+    await pool([...new Set(missed.map(([a]) => a))], 16, (host) => letIn(host).catch(() => {}));
+    console.log(`Friends: ${pairs.length} friendships, ${failed} failed, ${again} of them made on a second try, ${approved} approved.`);
     tooMany(failed - again, pairs.length, "friendships");
   },
 
   /**
-   * Everyone opens Home once, and their sites make their first copies of all their friends' posts (feed.js), before the
-   * day: as people who've used afterwrd a while, not ones opening it for the first time, so a day's measurements are a
-   * normal day's. Run without the delays (setting up), it waits until the sites have gone quiet.
-   */
-  async warm() {
-    const since = Date.now();
-    let done = 0;
-    let failed = 0;
-    await pool(people.filter((s) => state.sites[s.host]?.cookies), Math.max(24, AT_ONCE / 4), async (s) => {
-      try {
-        await retry(3, async () => {
-          const r = await owner(s.host).fetch("/");
-          if (r.status !== 200) throw new Error(`Home ${r.status}`);
-        });
-      } catch (error) {
-        failed++;
-        if (failed <= 50) console.error(`${s.host}: ${error.message}`);
-      }
-      if (++done % 200 === 0) console.log(`${done}/${people.length} opened Home`);
-    });
-    tooMany(failed, people.length, "first Homes", 0.05);
-    console.log(`Home opened on all ${people.length} sites; waiting for their copies of friends' posts`);
-    await waitQuiet([], since, { quietMs: 30_000, maxMs: 60 * 60_000 });
-    console.log(`Warm: ${Math.round((Date.now() - since) / 1000)} s.`);
-  },
-
-  /**
-   * Each group's site claimed by its owner (Groups → Start a group, self-hosted), and its members let in, 10 at a time.
-   * A member who can't join is tried again in a later round (three times in all), then left out; a group that can't
-   * be made is left out, and the others carry on.
+   * Each group's site claimed by its owner (Groups → Start a group, self-hosted), its identity signed by their passkey
+   * (groupidentity.js), and its members let in as people are: each signs a `join` through an invite link, and the
+   * owner signs an `approve` for each (members.js). At most 10 wait at once (groups.js), so ten at a time.
    */
   async groups() {
     state.groups ??= {};
-    let lostGroups = 0;
-    // All the groups at once (each its own site and owner): a group of 2,000 lets people in 10 at a time.
-    await pool(all.filter((s) => s.role === "group"), 8, async (g) => {
-      try {
-        const host = g.owner;
-        const site = owner(host);
-        const mine = (state.groups[g.host] ??= { members: {} });
-        if (!mine.id) {
-          await retry(3, async () => {
-            const made = await site.fetch("/_groups/create/local", { method: "POST",
-              body: { origin: `https://${g.host}`, setup: g.vars.GROUP_KEY, name: `Walkers ${g.members}`, about: "A made-up group for the scale test." } });
-            if (made.status !== 200) throw new Error(`create ${made.status} ${made.text.slice(0, 200)}`);
-            const claimed = await site.fetch("/_groups/create/claim", { method: "POST", body: { id: made.json().id } });
-            if (claimed.status !== 200) throw new Error(`claim ${claimed.status} ${claimed.text.slice(0, 200)}`);
-            mine.id = claimed.json().id;
-          });
-          save();
-        }
-        const tries = new Map();
-        let joining = (g.memberHosts ? g.memberHosts.map((h) => byHost.get(h)) : all.filter((s) => s.role === "leaf").slice(0, g.members))
-          .filter((s) => s && state.sites[s.host]?.cookies && !mine.members[s.host]);
-        // Lets in everyone waiting (Members → Approve).
-        const approveWaiting = () => retry(3, async () => {
-          const page = await site.fetch(`/groups/${mine.id}/members`);
-          const ids = [...new Set([...page.text.matchAll(new RegExp(`formaction="/_groups/${mine.id}/members/(\\d+)/approve`, "g"))].map((m) => m[1]))];
-          for (const m of ids) {
-            const r = await site.fetch(`/_groups/${mine.id}/members/${m}/approve`, { method: "POST", form: {} });
-            if (r.status !== 303) throw new Error(`approve ${m}: ${r.status}`);
+    for (const g of groupSites) {
+      const host = g.owner;
+      const mine = (state.groups[g.host] ??= { members: {} });
+      if (!mine.person) {
+        // Each part kept as it's done, so a retry carries on from where it stopped.
+        await retry(3, async () => {
+          try {
+            mine.made ??= (await post(host, "/_groups/create/local", { origin: `https://${g.host}`, setup: g.vars.GROUP_KEY, name: `Walkers ${g.members}`,
+              about: "A made-up group for the scale test." })).id;
+            mine.id ??= (await post(host, "/_groups/create/claim", { id: mine.made })).id;
+            save();
+            const site = owner(host); // the challenge comes back as a cookie (auth.js withChallenge)
+            const start = await post(host, `/_groups/${mine.id}/identity/start`, {}, [200], site);
+            const response = await passkeySigns(host, start.nonce, [await S.fingerprintOf("identity", S.fromB64url(start.doc))]);
+            await post(host, `/_groups/${mine.id}/identity/finish`, { doc: start.doc, response }, [200], site);
+          } catch (error) {
+            console.error(`${g.host}: starting it: ${error.message}`);
+            throw error;
           }
         });
-        // Anyone left waiting by a run that stopped part way (they'd count towards the 10).
-        await approveWaiting();
-        // At most 10 may wait at once (groups.js MAX_WAITING): ask, then let in, ten at a time. A link takes 100
-        // requests, so each round gets a new one.
-        for (let round = 0; joining.length; round++) {
-          const batch = joining.slice(0, 10);
-          joining = joining.slice(10);
-          const { link: joinLink } = await retry(3, async () => {
-            const link = await site.fetch(`/_groups/${mine.id}/link`, { method: "POST", body: {} });
-            if (link.status !== 200) throw new Error(`link ${link.status} ${link.text.slice(0, 200)}`);
-            return link.json();
-          });
-          await pool(batch, 10, async (s) => {
-            try {
-              const r = await owner(s.host).fetch("/_groups/join", { method: "POST", body: { link: joinLink } });
-              if (r.status !== 200) throw new Error(`${r.status} ${r.text.slice(0, 120)}`);
-              mine.members[s.host] = r.json().id;
-            } catch (error) {
-              const n = (tries.get(s.host) ?? 0) + 1;
-              tries.set(s.host, n);
-              if (n < 3) joining.push(s);
-              else console.error(`${s.host} couldn't join ${g.host}: ${error.message}`);
-            }
-          });
-          await approveWaiting().catch((error) => console.error(`${g.host}: letting people in: ${error.message}`));
-          save();
-          // A big group lets people in for a while: say how far it's got, so the watchdog knows it's not stuck.
-          if (round % 20 === 19) console.log(`${g.host}: ${Object.keys(mine.members).length} of ${g.members - 1} joined so far`);
+        const chain = (await new Site(g.host, g.machine, g.port).fetch("/.well-known/afterwrd")).json().chain;
+        mine.person = await S.fingerprintOf("identity", S.fromB64url(chain[0].bytes));
+        save();
+      }
+      // The owner signs an approve for each join waiting (ui/groupsign.js, from the members page's buttons).
+      const approveWaiting = async () => {
+        const page = await owner(host).fetch(`/groups/${mine.id}/members`);
+        const joins = [...new Set([...page.text.matchAll(/data-group-record="approve"[^>]*data-about="([A-Za-z0-9_-]{43})"/g)].map((m) => m[1]))];
+        for (const about of joins) {
+          const at = await post(host, `/_groups/${mine.id}/point`, {});
+          const made = await sign(host, { kind: "approve", host: at.host, item: at.item, seen: at.seen ?? null, prev: at.prev ?? null, about,
+            ...(at.role_at && { role_at: at.role_at }) });
+          await post(host, `/_groups/${mine.id}/records`, { sent: made.sent });
         }
-        const page = await site.fetch(`/groups/${mine.id}/members`);
-        console.log(`${g.host}: ${Object.keys(mine.members).length} joined; members page ${page.status}, ${(page.text.match(/\/remove"/g) ?? []).length} removable.`);
-      } catch (error) {
-        lostGroups++;
-        console.error(`${g.host}: left out: ${error.message}`);
+        return joins.length;
+      };
+      await approveWaiting();
+      const tries = new Map();
+      // Members are the first (members - 1) leaves: with the owner, `members` in all.
+      let joining = leaves.slice(0, g.members - 1).filter((s) => state.sites[s.host]?.person && !mine.members[s.host]);
+      const started = Date.now();
+      for (let round = 0; joining.length; round++) {
+        const batch = joining.slice(0, 10);
+        joining = joining.slice(10);
+        const { link } = await retry(3, () => post(host, `/_groups/${mine.id}/link`, {}));
+        await pool(batch, 10, async (s) => {
+          try {
+            const at = await post(s.host, "/_groups/join/point", { link });
+            const made = await sign(s.host, { kind: "join", host: at.host, item: at.item, seen: at.seen ?? null, prev: at.prev ?? null }, { name: at.name });
+            mine.members[s.host] = (await post(s.host, "/_groups/join", { sent: made.sent, link })).id;
+          } catch (error) {
+            const n = (tries.get(s.host) ?? 0) + 1;
+            tries.set(s.host, n);
+            if (n < 3) joining.push(s);
+            else console.error(`${s.host} couldn't join ${g.host}: ${error.message}`);
+          }
+        });
+        await retry(3, approveWaiting).catch((error) => console.error(`${g.host}: letting people in: ${error.message}`));
+        save();
+        if (round % 10 === 9) console.log(`${g.host}: ${Object.keys(mine.members).length} of ${g.members - 1} joined (${Math.round((Date.now() - started) / 1000)} s)`);
+      }
+      console.log(`${g.host}: ${Object.keys(mine.members).length} joined in ${Math.round((Date.now() - started) / 1000)} s.`);
+    }
+  },
+
+  /**
+   * Everyone opens Home once, so their sites have copies of all their friends' posts and groups' (and the harness
+   * learns each site's numbers for its friends), before the day: as people who've used afterwrd a while.
+   */
+  async warm() {
+    const since = Date.now();
+    let failed = 0;
+    await pool(people.filter((s) => state.sites[s.host]?.person), Math.max(24, AT_ONCE / 4), async (s) => {
+      try { await retry(3, () => home(s.host)); } catch (error) {
+        failed++;
+        if (failed <= 50) console.error(`${s.host}: ${error.message}`);
       }
     });
-    if (lostGroups) console.log(`Groups: ${lostGroups} couldn't be made, and are left out.`);
+    tooMany(failed, people.length, "first Homes", 0.05);
+    console.log(`Home opened on all ${people.length} sites; waiting for their copies to settle`);
+    await waitQuiet([], since, { quietMs: 30_000, maxMs: 10 * 60_000 });
+    // Once more, now the copies are there, for the friends' numbers.
+    await pool(people.filter((s) => state.sites[s.host]?.person), 24, (s) => home(s.host).catch(() => {}));
+    save();
+    console.log(`Warm: ${Math.round((Date.now() - since) / 1000)} s.`);
   },
 };
 
-// --- Scenarios ------------------------------------------------------------------------------------------------------
+// --- Pages, as people open them --------------------------------------------------------------------------------------
 
-/** What a page's Server-Timing header says (timing.js): calls out, queries, rounds, rows read, time on other sites. */
-function timingOf(response) {
-  const h = String(response.headers["server-timing"] ?? "");
-  const num = (re) => Number(re.exec(h)?.[1] ?? NaN);
-  return { calls: num(/Calls out: (\d+)/), queries: num(/Database: (\d+) quer/), rounds: num(/in (\d+) rounds?/),
-    rowsRead: num(/Running them: (\d+) rows/), sitesMs: num(/sites;dur=(\d+)/), totalMs: num(/total;dur=(\d+)/) };
+/**
+ * Home, as `host`'s owner opens it: the friends' posts on it, by friend (each friend's number on this site is learnt
+ * from its cards: views/items.js friendItemCard), kept in state.sites[host].friends.
+ */
+async function home(host) {
+  const r = await owner(host).fetch("/");
+  if (r.status !== 200) throw new Error(`Home ${r.status}`);
+  const friends = (state.sites[host].friends ??= {});
+  const posts = [];
+  for (const m of r.text.matchAll(/id="fi(\d+)-([A-Za-z0-9_-]{43})"[^>]*data-who="https:\/\/([^"]+)"/g)) {
+    friends[m[3]] = Number(m[1]);
+    posts.push({ friend: m[3], connection: Number(m[1]), id: m[2] });
+  }
+  return posts;
 }
+const friendPost = (host, poster, id) => `/friend/${state.sites[host].friends?.[poster]}/posts/${id}`;
+const friendRelay = (host, poster, id) => `/_admin/friend/${state.sites[host].friends?.[poster]}/items/${id}/records`;
 
-// The measuring lines (timing.js AFTERWRD_STATS), read as they come, from where the last read stopped: a big network's
-// day writes gigabytes of them, too many to read again every few seconds. Only the last KEEP_MS are kept, and only
-// what the scenarios look at; every scenario looks back less far than that.
+// --- The measuring lines (timing.js AFTERWRD_STATS) ------------------------------------------------------------------
+
 const STATS = "/out/stats.log";
 const KEEP_MS = 20 * 60_000;
 let statsRead = existsSync(STATS) ? statSync(STATS).size : 0;
-let statsPartial = Buffer.alloc(0); // the start of a line not finished yet (bytes: a piece can end mid-character)
+let statsPartial = Buffer.alloc(0);
 let recent = [];
+/** Reads the lines added since last time, a piece at a time (a day can add gigabytes), keeping the last KEEP_MS. */
 function readNewStats() {
   if (!existsSync(STATS)) return;
   const size = statSync(STATS).size;
   if (size < statsRead) statsRead = 0;
-  // A piece at a time: a whole day can add gigabytes, more than one Buffer may hold (the 19 Nov run's day crashed so).
   if (size > statsRead) {
     const fd = openSync(STATS, "r");
     const buffer = Buffer.alloc(Math.min(size - statsRead, 64 << 20));
@@ -416,7 +448,7 @@ function readNewStats() {
         for (const line of piece.toString("utf8", 0, end).split("\n")) {
           if (!line) continue;
           const r = JSON.parse(line);
-          if (r.t0 >= cutoff) recent.push({ site: r.site, obj: r.obj, m: r.m, path: r.path, t0: r.t0, ms: r.ms, rw: r.rw });
+          if (r.t0 >= cutoff) recent.push({ site: r.site, obj: r.obj, m: r.m, path: r.path, t0: r.t0, ms: r.ms, rr: r.rr, rw: r.rw, calls: r.calls, refused: r.refused, st: r.st });
         }
       }
     } finally {
@@ -428,21 +460,17 @@ function readNewStats() {
   if (keepFrom > 0) recent = recent.slice(keepFrom);
   else if (keepFrom < 0) recent = [];
 }
-
-/** The measuring lines for runs that started at or after `since` (and within the last KEEP_MS). */
 function statsSince(since) {
   readNewStats();
   return recent.filter((r) => r.t0 >= since);
 }
-
-/** Waits until none of `hosts`' objects has finished a run for `quietMs` (at least `minMs`, at most `maxMs`). */
+/** Waits until none of `hosts`' objects (any, if none given) has finished a run for `quietMs`. */
 async function waitQuiet(hosts, since, { quietMs = 15_000, minMs = 5_000, maxMs = 15 * 60_000 } = {}) {
   const set = new Set(hosts);
   const start = Date.now();
   let said = start;
   for (;;) {
     await sleep(2000);
-    // A long wait says so now and then: the watchdog (watchdog.sh) takes a quiet log for a stuck run.
     if (Date.now() - said > 5 * 60_000) {
       said = Date.now();
       console.log(`  (waiting for the sites to settle: ${Math.round((said - start) / 60_000)} minutes so far)`);
@@ -456,630 +484,278 @@ async function waitQuiet(hosts, since, { quietMs = 15_000, minMs = 5_000, maxMs 
     }
   }
 }
-
 function record(name, data) {
   mkdirSync("/out/results", { recursive: true });
   writeFileSync(`/out/results/${name}.json`, JSON.stringify(data, null, 1));
   console.log(`Wrote /out/results/${name}.json`);
 }
 
-const FRIEND_POST = /<article[^>]*\bid="f(\d+)-(post-\d+-[0-9a-f]{8})"/g;
-const friendPosts = (html) => [...html.matchAll(FRIEND_POST)].map((m) => ({ connection: m[1], target: m[2] }));
-const pick = (list) => list[Math.floor(Math.random() * list.length)];
+// --- The day (section 8's assumptions) --------------------------------------------------------------------------------
 
-/** Opens `path` as the owner of `s`, with the CPU its site used meanwhile. */
-async function visit(s, path, label) {
-  const site = owner(s.host);
-  const { result: r, cpuMs, wallMs } = await withCpu(s.proc, s.host, () => site.fetch(path));
-  const row = { label, path, status: r.status, wallMs, cpuMs, ...timingOf(r), friendPosts: friendPosts(r.text).length,
-    burst: (r.text.match(/Burst post/g) ?? []).length };
-  console.log(`  ${label.padEnd(12)} ${path.padEnd(22)} ${r.status} wall ${wallMs} ms, cpu ${cpuMs} ms, calls ${row.calls}, queries ${row.queries}, rows ${row.rowsRead}, friends' posts ${row.friendPosts}`);
-  return { row, html: r.text };
-}
+const groupOf = (memberHost) => {
+  for (const g of groupSites) {
+    const mine = state.groups?.[g.host];
+    const id = memberHost === g.owner ? mine?.id : mine?.members[memberHost];
+    if (id) return { site: g.host, id, person: mine.person };
+  }
+  return null;
+};
 
 Object.assign(steps, {
   /**
-   * Home with 5, 150 and 500 friends: the first visit (no stored copies yet), then after the background refreshes, a
-   * few warm visits and friends' pages. On the 150 hub, a third of its friends post at once, and Home is opened
-   * 10 s and 60 s later to see how many of those posts it shows.
+   * One day, as section 8 of docs/signed-conversations.md assumes it, squeezed into `minutes` (by default a day over
+   * the network's squeeze: 3 hours at 8):
+   * - everyone posts 2 items (1 in 4 with a photo), visits Home 10 times and opens 5 of their friends' posts;
+   * - each post gets about 10 comments from the poster's friends (20 comments a person);
+   * - the person with the most friends (the first hub) has each of their posts opened by 100 friends, 10 commenting;
+   * - the group gets 50 posts (a third with a photo) with 20 comments each, and every member opens it 3 times and 5 of
+   *   its posts.
+   * The real limits apply (allowances, caps), and honest sites should never meet them. Each action is logged.
    */
-  async home(only) {
-    // The social model has ten outliers, each with a couple of thousand friends to refresh: the three with most.
-    const hubs = all.filter((s) => s.role === "hub" && (!only || s.host === only)).sort((a, b) => b.friends - a.friends);
-    for (const hub of NET.model === "social" && !only ? hubs.slice(0, 3) : hubs) {
-      console.log(`${hub.host} (${hub.friends} friends)`);
-      const rows = [];
-      const since = Date.now();
-      rows.push((await visit(hub, "/", "first")).row);
-      await waitQuiet([hub.host], since, { quietMs: 20_000 });
-      let html = "";
-      for (let i = 0; i < 5; i++) {
-        const v = await visit(hub, "/", "warm");
-        rows.push(v.row);
-        html = v.html;
-        await sleep(1000);
-      }
-      const ids = [...new Set([...html.matchAll(/data-region="\/friend\/(\d+)\/posts"/g)].map((m) => m[1]))];
-      for (const id of ids.slice(0, 3)) rows.push((await visit(hub, `/friend/${id}/posts`, "friend page")).row);
-      let burst = null;
-      if (hub.friends >= 100 && hub.friends < 500) {
-        const posters = (friendsOf.get(hub.host)?.map((h) => byHost.get(h)) ?? all.filter((s) => s.role === "leaf").slice(0, hub.friends))
-          .filter((_, i) => i % 3 === 0);
-        const at = Date.now();
-        await pool(posters, 25, (s) => writePost(owner(s.host), `Burst post from ${ownerName(s)}.`, false));
-        const posted = Date.now() - at;
-        await sleep(10_000);
-        rows.push((await visit(hub, "/", "burst +10s")).row);
-        await sleep(50_000);
-        rows.push((await visit(hub, "/", "burst +60s")).row);
-        burst = { posters: posters.length, postingMs: posted };
-      }
-      record(`home-${hub.host}`, { hub: hub.host, friends: hub.friends, since, until: Date.now(), rows, burst });
+  async day(minutes) {
+    const span = (Number(minutes) || 24 * 60 / SQUEEZE) * 60_000;
+    const random = seeded(2026);
+    const at = () => Math.floor(random() * span);
+    const actions = [];
+    const active = people.filter((s) => state.sites[s.host]?.person);
+    const big = hubs[0];
+    for (const s of active) {
+      for (let k = 0; k < 10; k++) actions.push({ t: at(), who: s.host, kind: "home" });
+      for (let k = 0; k < 2; k++) actions.push({ t: at(), who: s.host, kind: "post", photo: random() < 0.25 });
+      if (s.host === big.host) continue; // the first hub's friends' posts are opened through their own schedule
+      for (let k = 0; k < 5; k++) actions.push({ t: at(), who: s.host, kind: "open" });
+      for (let k = 0; k < 20; k++) actions.push({ t: at(), who: s.host, kind: "comment" });
     }
+    // The first hub's two posts: 100 friends open each, 10 of them comment, in the hours after it's posted.
+    for (const a of actions.filter((x) => x.who === big.host && x.kind === "post")) {
+      a.watched = true;
+      const friends = leaves.slice(0, big.friends);
+      for (let k = 0; k < 100; k++) {
+        const t = a.t + Math.floor(random() * Math.max(1, span - a.t));
+        actions.push({ t, who: pickFrom(friends, random).host, kind: "open-big", comment: k < 10 });
+      }
+    }
+    // The group.
+    for (const g of groupSites) {
+      const members = [g.owner, ...Object.keys(state.groups?.[g.host]?.members ?? {})];
+      for (let k = 0; k < 50; k++) actions.push({ t: at(), who: pickFrom(members, random), kind: "gpost", photo: k % 3 === 0 });
+      for (let k = 0; k < 50 * 20; k++) actions.push({ t: at(), who: pickFrom(members, random), kind: "gcomment" });
+      for (const m of members) {
+        for (let k = 0; k < 3; k++) actions.push({ t: at(), who: m, kind: "gopen" });
+        for (let k = 0; k < 5; k++) actions.push({ t: at(), who: m, kind: "gthread" });
+      }
+    }
+    actions.sort((a, b) => a.t - b.t);
+    const todayBy = new Map(); // poster -> their posts today (ids)
+    const groupToday = new Map(); // group site -> posts today
+    const counts = {};
+    const failures = {};
+    const count = (kind, ok) => {
+      counts[kind] ??= { ok: 0, failed: 0, skipped: 0 };
+      counts[kind][ok]++;
+    };
+    const since = Date.now();
+    console.log(`The day: ${actions.length} actions over ${Math.round(span / 60_000)} minutes, from ${new Date(since).toISOString()}`);
+    const log = openSync("/out/results-day.jsonl", "a");
+    const act = async (a) => {
+      const g = a.kind.startsWith("g") ? groupOf(a.who) : null;
+      switch (a.kind) {
+        case "home": await home(a.who); return "ok";
+        case "post": {
+          const id = await writePost(a.who, `A post for the day [${Math.round(a.t / 1000)}]`, { withPhoto: a.photo });
+          (todayBy.get(a.who) ?? todayBy.set(a.who, []).get(a.who)).push(id);
+          return "ok";
+        }
+        case "open": case "comment": {
+          // A friend's post from today (or their newest, early in the day), not the first hub's (it has its own).
+          const friends = Object.keys(state.sites[a.who].friends ?? {}).filter((h) => h !== big.host);
+          const poster = pickFrom(friends.filter((h) => todayBy.get(h)?.length), random) ?? null;
+          if (!poster) return "skipped";
+          const id = pickFrom(todayBy.get(poster), random);
+          if (a.kind === "open") {
+            const r = await owner(a.who).fetch(friendPost(a.who, poster, id));
+            if (r.status !== 200) throw new Error(`open ${r.status}`);
+          } else {
+            await signOn(a.who, friendPost(a.who, poster, id), friendRelay(a.who, poster, id), "comment", { text: "A comment for the day." });
+          }
+          return "ok";
+        }
+        case "open-big": {
+          const id = todayBy.get(big.host)?.at(-1);
+          if (!id || !state.sites[a.who].friends?.[big.host]) return "skipped";
+          if (a.comment) await signOn(a.who, friendPost(a.who, big.host, id), friendRelay(a.who, big.host, id), "comment", { text: "Lovely." });
+          else {
+            const r = await owner(a.who).fetch(friendPost(a.who, big.host, id));
+            if (r.status !== 200) throw new Error(`open ${r.status}`);
+          }
+          return "ok";
+        }
+        case "gpost": {
+          if (!g) return "skipped";
+          const id = await writePost(a.who, "A post for the group's day.", { withPhoto: a.photo, group: g });
+          (groupToday.get(g.site) ?? groupToday.set(g.site, []).get(g.site)).push(id);
+          return "ok";
+        }
+        case "gcomment": case "gthread": {
+          const posts = g && groupToday.get(g.site);
+          if (!posts?.length) return "skipped";
+          const id = pickFrom(posts, random);
+          const path = `/groups/${g.id}/posts/${id}`;
+          if (a.kind === "gthread") {
+            const r = await owner(a.who).fetch(path);
+            if (r.status !== 200) throw new Error(`thread ${r.status}`);
+          } else await signOn(a.who, path, `/_groups/${g.id}/items/${id}/records`, "comment", { text: "A comment for the group's day." });
+          return "ok";
+        }
+        case "gopen": {
+          if (!g) return "skipped";
+          const r = await owner(a.who).fetch(`/groups/${g.id}`);
+          if (r.status !== 200) throw new Error(`group ${r.status}`);
+          return "ok";
+        }
+        default: return "skipped";
+      }
+    };
+    let next = 0;
+    let running = 0;
+    let lastSaid = since;
+    const AT_MOST = 200; // actions at once (a slow site holds one up for a while)
+    await new Promise((resolve) => {
+      const tick = () => {
+        const now = Date.now() - since;
+        while (next < actions.length && actions[next].t <= now && running < AT_MOST) {
+          const a = actions[next++];
+          running++;
+          const started = Date.now();
+          act(a).then((how) => { count(a.kind, how); return how; }, (error) => {
+            count(a.kind, "failed");
+            const why = String(error.message).slice(0, 80);
+            failures[`${a.kind}: ${why}`] = (failures[`${a.kind}: ${why}`] ?? 0) + 1;
+            return "failed";
+          }).then((how) => {
+            running--;
+            const line = JSON.stringify({ t: started - since, kind: a.kind, who: a.who, how, ms: Date.now() - started });
+            try { writeFileSync(log, `${line}\n`); } catch {}
+          });
+        }
+        if (Date.now() - lastSaid > 60_000) {
+          lastSaid = Date.now();
+          console.log(`  ${Math.round(now / 60_000)} min: ${next}/${actions.length} started, ${running} running`);
+        }
+        if (next >= actions.length && running === 0) resolve();
+        else setTimeout(tick, 100);
+      };
+      tick();
+    });
+    closeSync(log);
+    const until = Date.now();
+    // A squeezed network is never quiet (its sites pull each other every few minutes), so it's given a fixed while to
+    // finish what the day set going (notes, the last pulls), and that's counted with the day.
+    const settle = Math.min(2 * 60_000, span / 20);
+    console.log(`The day's actions done in ${Math.round((until - since) / 60_000)} minutes; ${Math.round(settle / 1000)} s for the sites to settle`);
+    await sleep(settle);
+    record("day", { since, until, settled: Date.now(), span, squeeze: SQUEEZE, counts, failures, big: big.host,
+      group: groupSites[0]?.host ?? null, groupOwner: groupSites[0]?.owner ?? null });
+    save();
   },
 
-  /** One post (with a photo) from the 500 hub reaching all its friends, and their sites coming back for it. */
-  async fanout() {
-    const hub = all.filter((s) => s.role === "hub").sort((a, b) => b.friends - a.friends)[0];
-    const leaves = new Set(friendsOf.get(hub.host) ?? all.filter((s) => s.role === "leaf").slice(0, hub.friends).map((s) => s.host));
-    console.log(`${hub.host} posts to ${leaves.size} friends`);
-    const since = Date.now();
-    const { cpuMs } = await withCpu(hub.proc, hub.host, () => writePost(owner(hub.host), "Fan-out post, with a photo.", true));
+  /**
+   * One-offs, each measured on its own: the first hub's post reaching all its friends (fat notes from its Outbox: how
+   * many runs, and how long until the last arrives); an @here to the whole group; a poll in the group that every member
+   * answers and opens.
+   */
+  async oneoffs() {
+    const big = hubs[0];
+    const friends = new Set(leaves.slice(0, big.friends).map((s) => s.host));
+    // 1. Fan-out.
+    let since = Date.now();
+    const id = await writePost(big.host, "One post, to everyone.", { withPhoto: true });
     const reached = new Map();
     for (;;) {
       await sleep(5000);
-      for (const r of statsSince(since)) {
-        if (leaves.has(r.site) && r.obj === "site" && r.path === "/_peer/notify" && !reached.has(r.site)) reached.set(r.site, r.t0 + r.ms - since);
-      }
-      console.log(`  ${Math.round((Date.now() - since) / 1000)} s: ${reached.size}/${leaves.size} told`);
-      if (reached.size >= leaves.size || Date.now() - since > 15 * 60_000) break;
+      for (const r of statsSince(since)) if (friends.has(r.site) && r.obj === "site" && r.path === "/_p/notes" && !reached.has(r.site)) reached.set(r.site, r.t0 + r.ms - since);
+      console.log(`  fan-out ${Math.round((Date.now() - since) / 1000)} s: ${reached.size}/${friends.size} told`);
+      if (reached.size >= friends.size || Date.now() - since > 20 * 60_000) break;
     }
-    await waitQuiet([hub.host], since, { quietMs: 30_000 });
+    await sleep(30_000); // its Outbox's last runs (a squeezed network is never quiet)
+    const runs = statsSince(since).filter((r) => r.site === big.host && r.obj === "outbox");
     const times = [...reached.values()].sort((a, b) => a - b);
-    const at = (q) => times[Math.min(times.length - 1, Math.floor(q * times.length))] ?? null;
-    record("fanout", { hub: hub.host, friends: leaves.size, since, until: Date.now(), postCpuMs: cpuMs, told: reached.size,
-      toldMs: { p50: at(0.5), p90: at(0.9), p99: at(0.99), last: times.at(-1) ?? null } });
-  },
-
-  /**
-   * A day in each group, squeezed into `minutes` (default 20): half its members each open it 4 times (evenly spread)
-   * and comment twice on its newest post, and 1 in 5 of them posts. All of it lands on the group's owner's account.
-   */
-  async group_day(minutes = "20") {
-    const span = Number(minutes) * 60_000;
-    const events = [];
-    const groups = [];
-    for (const g of all.filter((s) => s.role === "group")) {
-      const active = Object.entries(state.groups[g.host].members).filter((_, i) => i % 2 === 0);
-      groups.push({ host: g.host, members: Object.keys(state.groups[g.host].members).length, active: active.length });
-      active.forEach(([host, id], i) => {
-        const gap = span / 4;
-        const first = Math.random() * gap;
-        for (let k = 0; k < 4; k++) events.push({ at: first + k * gap, host, id, group: g.host, type: "open" });
-        for (let k = 0; k < 2; k++) events.push({ at: Math.random() * span, host, id, group: g.host, type: "comment" });
-        if (i % 5 === 0) events.push({ at: Math.random() * span, host, id, group: g.host, type: "post" });
+    const q = (p) => times[Math.min(times.length - 1, Math.floor(p * times.length))] ?? null;
+    const fanout = { post: id, friends: friends.size, told: reached.size, ms: { p50: q(0.5), p90: q(0.9), last: times.at(-1) ?? null },
+      outboxRuns: runs.length, outboxCalls: runs.reduce((n, r) => n + (r.calls ?? 0), 0), refused: runs.reduce((n, r) => n + (r.refused ?? 0), 0),
+      longestRunMs: Math.max(0, ...runs.map((r) => r.ms)) };
+    console.log(`  fan-out: ${JSON.stringify(fanout)}`);
+    // 2. @here, from the group's owner.
+    const g = groupSites[0];
+    const results = { fanout };
+    if (g) {
+      const gs = groupOf(g.owner);
+      const members = new Set(Object.keys(state.groups[g.host].members));
+      since = Date.now();
+      await writePost(g.owner, "@here: walk moved to 10am", { group: gs, extra: { here: true } });
+      const told = new Map();
+      for (;;) {
+        await sleep(5000);
+        for (const r of statsSince(since)) if (members.has(r.site) && r.obj === "site" && r.path === "/_p/notes" && !told.has(r.site)) told.set(r.site, r.t0 + r.ms - since);
+        if (told.size >= members.size || Date.now() - since > 20 * 60_000) break;
+      }
+      await sleep(30_000);
+      const gRuns = statsSince(since).filter((r) => r.site === g.host);
+      const tt = [...told.values()].sort((a, b) => a - b);
+      results.here = { members: members.size, told: told.size, lastMs: tt.at(-1) ?? null, groupRuns: gRuns.length,
+        outboxRuns: gRuns.filter((r) => r.obj === "outbox").length, rowsWritten: gRuns.reduce((n, r) => n + (r.rw ?? 0), 0) };
+      console.log(`  @here: ${JSON.stringify(results.here)}`);
+      // 3. A poll every member answers and then opens.
+      since = Date.now();
+      const poll = await writePost(g.owner, "Which day for the big walk?", { group: gs, extra: { poll: { options: ["Saturday", "Sunday"], multiple: 0, closes_at: null } } });
+      let voted = 0;
+      let failed = 0;
+      const voters = [...members];
+      await pool(voters, 32, async (host, i) => {
+        const mineG = groupOf(host);
+        const path = `/groups/${mineG.id}/posts/${poll}`;
+        try {
+          await signOn(host, path, `/_groups/${mineG.id}/items/${poll}/records`, "vote", { choices: [i % 2] }, { form: "poll-form" });
+          voted++;
+        } catch (error) {
+          if (++failed <= 10) console.error(`${host}: vote: ${error.message}`);
+        }
       });
+      const votedAt = Date.now();
+      const opens = [];
+      await pool(voters, 32, async (host) => {
+        const mineG = groupOf(host);
+        const r = await owner(host).fetch(`/groups/${mineG.id}/posts/${poll}`).catch(() => null);
+        if (r) opens.push(r.ms);
+      });
+      await sleep(10_000);
+      const pollRuns = statsSince(votedAt).filter((r) => r.site === g.host && r.obj === "site" && r.path.startsWith("/_p/items/"));
+      opens.sort((a, b) => a - b);
+      results.poll = { voters: voters.length, voted, failed, votingMs: votedAt - since, opens: opens.length,
+        openMs: { p50: opens[Math.floor(opens.length / 2)] ?? null, p90: opens[Math.floor(opens.length * 0.9)] ?? null },
+        groupRowsReadPerOpen: pollRuns.length ? Math.round(pollRuns.reduce((n, r) => n + r.rr, 0) / pollRuns.length) : null };
+      console.log(`  poll: ${JSON.stringify(results.poll)}`);
     }
-    events.sort((a, b) => a.at - b.at);
-    console.log(`${groups.map((g) => `${g.host}: ${g.active} of ${g.members} active`).join("; ")}; ${events.length} actions over ${minutes} minutes`);
-    const newest = new Map(); // each member's newest post seen in each group, to comment on (many are in both)
-    const done = [];
-    const since = Date.now();
-    const act = async ({ host, id, group, type }) => {
-      const site = owner(host);
-      const seen = `${host} ${group}`;
-      const started = performance.now();
-      let status = 0;
-      try {
-        if (type === "open" || (type === "comment" && !newest.has(seen))) {
-          const page = await site.fetch(`/groups/${id}`);
-          const post = /id="gp(\d+)"/.exec(page.text)?.[1];
-          if (post) newest.set(seen, post);
-          if (type === "open") status = page.status;
-        }
-        if (type === "comment") {
-          const post = newest.get(seen);
-          if (!post) status = -1;
-          else {
-            const r = await site.fetch(`/_groups/${id}/comments`, { method: "POST", form: { post, text: "A comment for the group day.", back: `/groups/${id}` } });
-            status = r.status;
-          }
-        } else if (type === "post") {
-          const r = await site.fetch(`/_groups/${id}/posts`, { method: "POST", body: { text: "A post for the group day.", photos: [] } });
-          status = r.status;
-        }
-      } catch (error) {
-        console.error(`  ${host} ${type} in ${group}: ${error.message}`);
-      }
-      done.push({ host, group, type, status, ms: Math.round(performance.now() - started) });
-    };
-    const running = new Set();
-    for (const event of events) {
-      const wait = since + event.at - Date.now();
-      if (wait > 0) await sleep(wait);
-      while (running.size >= 32) await Promise.race(running);
-      const p = act(event).finally(() => running.delete(p));
-      running.add(p);
-      if (done.length && done.length % 500 === 0) console.log(`  ${Math.round((Date.now() - since) / 60_000)} min: ${done.length}/${events.length}`);
-    }
-    await Promise.all(running);
-    await waitQuiet(groups.map((g) => g.host), since, { quietMs: 30_000 });
-    record("group-day", { minutes: Number(minutes), since, until: Date.now(), groups, actions: done });
-  },
-
-  /** In each group: a member posts with a photo, another comments, the owner removes someone; `close` closes them too. */
-  async groups_run(close) {
-    for (const g of all.filter((s) => s.role === "group")) {
-      const mine = state.groups[g.host];
-      const members = Object.entries(mine.members);
-      console.log(`${g.host} (${members.length} members)`);
-      const since = Date.now();
-      const [poster, posterId] = members[0];
-      const posted = await owner(poster).fetch(`/_groups/${posterId}/posts`, { method: "POST", body: { text: "Group post for the scale test.", photos: [] } });
-      console.log(`  post ${posted.status}`);
-      await waitQuiet([g.host], since, { quietMs: 20_000 });
-      const [commenter, commenterId] = members[1];
-      const page = await owner(commenter).fetch(`/groups/${commenterId}`);
-      const post = /id="gp(\d+)"/.exec(page.text)?.[1];
-      const commented = await owner(commenter).fetch(`/_groups/${commenterId}/comments`, { method: "POST",
-        form: { post, text: "A comment for the scale test.", back: `/groups/${commenterId}` } });
-      console.log(`  comment ${commented.status}`);
-      await waitQuiet([g.host], since, { quietMs: 20_000 });
-      const site = owner(g.owner);
-      // The one post that goes to every member: @here, from an admin (notify.js notifyGroupMentions).
-      const hereAt = Date.now();
-      const here = await site.fetch(`/_groups/${mine.id}/posts`, { method: "POST",
-        body: { text: "@here a note for everyone in the scale test.", photos: [], mentions: [{ name: "here", origin: "here" }] } });
-      await waitQuiet([g.host], hereAt, { quietMs: 20_000 });
-      const hereTold = new Set(statsSince(hereAt).filter((x) => x.path === "/_member/notify").map((x) => x.site)).size;
-      console.log(`  @here ${here.status}: ${hereTold} of ${members.length} members told`);
-      const list = await site.fetch(`/groups/${mine.id}/members`);
-      const removable = [...list.text.matchAll(new RegExp(`formaction="/_groups/${mine.id}/members/(\\d+)/remove`, "g"))].map((m) => m[1]);
-      const removed = await site.fetch(`/_groups/${mine.id}/members/${removable.at(-1)}/remove`, { method: "POST", form: {} });
-      console.log(`  remove ${removed.status}`);
-      let closed = null;
-      if (close === "close") {
-        const at = Date.now();
-        const r = await site.fetch(`/_groups/${mine.id}/delete`, { method: "POST", body: {} });
-        await waitQuiet([g.host], at, { quietMs: 20_000 });
-        const told = new Set(statsSince(at).filter((x) => x.path === "/_member/removed").map((x) => x.site));
-        closed = { status: r.status, told: told.size, members: members.length - 1 };
-        console.log(`  close ${r.status}: ${told.size} of ${members.length - 1} members told`);
-      }
-      record(`group-${g.host}`, { group: g.host, members: members.length, since, until: Date.now(), closed, here: { status: here.status, told: hereTold, at: hereAt } });
-    }
-  },
-
-  /**
-   * A day's activity squeezed into `minutes` (default 30; 60 or more keeps Home visits over 5 minutes apart): every hub,
-   * and a third of the others, each open Home 10 times, write a post (1 in 4 with a photo), comment on 5 friends' posts
-   * and open 2 friends' pages.
-   */
-  async day(minutes = "30") {
-    const span = Number(minutes) * 60_000;
-    const active = people.filter((s, i) => s.role === "hub" || i % 3 === 0);
-    const events = [];
-    for (const s of active) {
-      const add = (type, n) => { for (let i = 0; i < n; i++) events.push({ at: Math.random() * span, s, type }); };
-      // Home evenly spread, as visits in a real day are hours apart: with 60 minutes or more, each one finds every
-      // copy older than FRESH_SECONDS (feed.js, 5 minutes), so each refreshes all friends, as it would in a real day.
-      const gap = span / 10;
-      const first = Math.random() * gap;
-      for (let i = 0; i < 10; i++) events.push({ at: first + i * gap, s, type: "home" });
-      add(Math.random() < 0.25 ? "photo post" : "post", 1);
-      add("comment", 5);
-      add("friend page", 2);
-    }
-    events.sort((a, b) => a.at - b.at);
-    console.log(`${active.length} people active, ${events.length} actions over ${minutes} minutes`);
-    const lastHome = new Map();
-    const done = [];
-    const since = Date.now();
-    const act = async ({ s, type }) => {
-      const site = owner(s.host);
-      const started = performance.now();
-      let status = 0;
-      let calls = NaN;
-      try {
-        if (type === "home" || ((type === "comment" || type === "friend page") && !lastHome.has(s.host))) {
-          const r = await site.fetch("/");
-          lastHome.set(s.host, r.text);
-          if (type === "home") {
-            status = r.status;
-            calls = timingOf(r).calls;
-          }
-        }
-        if (type === "post" || type === "photo post") {
-          await writePost(site, `Post from ${ownerName(s)} today.`, type === "photo post");
-          status = 200;
-        } else if (type === "comment") {
-          const target = pick(friendPosts(lastHome.get(s.host)));
-          if (!target) status = -1;
-          else {
-            const r = await site.fetch("/_feed/comments", { method: "POST", form: { ...target, text: "A comment for the scale test.", back: "/" } });
-            status = r.status;
-          }
-        } else if (type === "friend page") {
-          const ids = [...new Set([...lastHome.get(s.host).matchAll(/data-region="\/friend\/(\d+)\/posts"/g)].map((m) => m[1]))];
-          if (!ids.length) status = -1;
-          else {
-            const r = await site.fetch(`/friend/${pick(ids)}/posts`);
-            status = r.status;
-            calls = timingOf(r).calls;
-          }
-        }
-      } catch (error) {
-        status = 0;
-        console.error(`  ${s.host} ${type}: ${error.message}`);
-      }
-      done.push({ host: s.host, type, status, ms: Math.round(performance.now() - started), calls });
-    };
-    const running = new Set();
-    for (const event of events) {
-      const wait = since + event.at - Date.now();
-      if (wait > 0) await sleep(wait);
-      while (running.size >= 64) await Promise.race(running);
-      const p = act(event).finally(() => running.delete(p));
-      running.add(p);
-      if (done.length && done.length % 500 === 0) console.log(`  ${Math.round((Date.now() - since) / 60_000)} min: ${done.length}/${events.length}`);
-    }
-    await Promise.all(running);
-    await waitQuiet([], since, { quietMs: 30_000 });
-    record("day", { minutes: Number(minutes), active: active.map((s) => s.host), since, until: Date.now(), actions: done });
-  },
-
-  /**
-   * What refreshing the biggest hub's stored copies writes: Home opened now, again 6 minutes later in the same hour
-   * (copies older than 5 minutes are fetched again), and just after the hour turns, when friends' photo links change
-   * (share.js signs them to the hour) and posts with photos are rewritten. Run it with nothing else going on.
-   */
-  async refresh() {
-    const hub = all.filter((s) => s.role === "hub").sort((a, b) => b.friends - a.friends)[0];
-    const friends = new Set(friendsOf.get(hub.host) ?? all.filter((s) => s.role === "leaf").slice(0, hub.friends).map((s) => s.host));
-    const site = owner(hub.host);
-    const rounds = [];
-    const round = async (label) => {
-      const since = Date.now();
-      const r = await site.fetch("/");
-      await waitQuiet([hub.host], since, { quietMs: 20_000 });
-      const list = statsSince(since);
-      const refreshed = new Set(list.filter((x) => friends.has(x.site) && x.obj === "site" && x.path === "/_peer/feed").map((x) => x.site)).size;
-      const written = list.filter((x) => x.site === hub.host).reduce((a, x) => a + x.rw, 0);
-      rounds.push({ label, since, status: r.status, refreshed, written });
-      console.log(`  ${label}: ${refreshed} friends refreshed, ${written} rows written`);
-    };
-    const HOUR = 3_600_000;
-    await round("start");
-    if (HOUR - (Date.now() % HOUR) > 8 * 60_000) {
-      await sleep(6 * 60_000);
-      await round("same hour, 6 min later");
-    }
-    const last = rounds.at(-1).since;
-    const turn = Date.now() + HOUR - (Date.now() % HOUR) + 60_000;
-    const at = Math.max(turn, last + 6 * 60_000);
-    console.log(`  waiting ${Math.round((at - Date.now()) / 60_000)} min for the hour to turn`);
-    await sleep(at - Date.now());
-    await round("new hour");
-    record("refresh", { hub: hub.host, friends: friends.size, since: rounds[0].since, until: Date.now(), rounds });
+    record("oneoffs", results);
   },
 });
-
-// --- The social model's day (net.mjs --model social) ---------------------------------------------------------------
-
-/** A small binary heap of {at, act}, earliest first: the day's schedule, which grows as flurries start. */
-class Schedule {
-  constructor() { this.items = []; }
-  get size() { return this.items.length; }
-  peek() { return this.items[0]; }
-  push(item) {
-    const a = this.items;
-    a.push(item);
-    for (let i = a.length - 1; i > 0;) {
-      const up = (i - 1) >> 1;
-      if (a[up].at <= a[i].at) break;
-      [a[up], a[i]] = [a[i], a[up]];
-      i = up;
-    }
-  }
-  pop() {
-    const a = this.items;
-    const top = a[0];
-    const last = a.pop();
-    if (a.length) {
-      a[0] = last;
-      for (let i = 0; ;) {
-        const [l, r] = [2 * i + 1, 2 * i + 2];
-        let m = i;
-        if (l < a.length && a[l].at < a[m].at) m = l;
-        if (r < a.length && a[r].at < a[m].at) m = r;
-        if (m === i) break;
-        [a[m], a[i]] = [a[i], a[m]];
-        i = m;
-      }
-    }
-    return top;
-  }
-}
-
-/** What a refusal said: a JSON answer's error, or the sentence on an error page that says what went wrong. */
-function saidIn(text) {
-  try {
-    const error = JSON.parse(text)?.error;
-    if (error) return String(error).slice(0, 160);
-  } catch {}
-  const plain = text.replace(/<(script|style)[\s\S]*?<\/\1>/g, " ").replace(/<[^>]+>/g, " ").replace(/&#39;|&apos;/g, "'").replace(/\s+/g, " ");
-  const m = /[^.!]*(couldn't|can't|too many|try again|not allowed|isn't|wasn't|a lot of|no longer|went wrong|refused)[^.!]*[.!]/i.exec(plain);
-  return (m?.[0] ?? plain).trim().slice(0, 160);
-}
-
-/** The article on a page whose words carry `[day n]`, and its id; null if it isn't there. */
-function cardWith(html, n, idPattern) {
-  for (const chunk of html.split("<article").slice(1)) {
-    if (!chunk.includes(`[day ${n}]`)) continue;
-    const m = idPattern.exec(chunk.slice(0, 400));
-    if (m) return m;
-  }
-  return null;
-}
 
 Object.assign(steps, {
-  /**
-   * A waking day (7:00 to 23:00) of the social model, squeezed NET.squeeze times (8: 16 hours in 2), as people use a
-   * social site, from a seed:
-   * - Most people mostly read (55% open Home 3 times a day and rarely post), some are regular (35%: 8 times, a post most
-   *   days), a few are busy (10%, and every outlier: 14 times, 3 posts). More of it at lunch and in the evening.
-   * - A post with a photo (40% of them) starts a flurry: 2–8 of the poster's friends, mostly from the circles they
-   *   share, find it on their Home and comment over the next half hour or so; the poster often replies, those who
-   *   commented are told and some come back, and some reply again. A post without one gets fewer.
-   * - Group members open their groups, some post, and a post brings a few comments from other members.
-   * Every action goes to /out/results/social-day.jsonl as it happens. Each Home visit also notes which friends' posts
-   * from the day it already shows, and how old the ones it doesn't are (how fast posts reach friends).
-   */
-  async social_day(seed = "7") {
-    if (!NET.edges) throw new Error("social_day needs the social model (net.mjs --model social).");
-    const random = seeded(Number(seed));
-    const squeeze = NET.squeeze ?? 8;
-    const MINUTE = 60_000 / squeeze; // a real minute, in the test's time
-    const span = 16 * 60 * MINUTE;
-    const expo = (minutes) => -Math.log(1 - random()) * minutes * MINUTE;
-    const poisson = (mean) => {
-      let k = 0;
-      for (let p = Math.exp(-mean), sum = p, u = random(); u > sum; k++) { p *= mean / (k + 1); sum += p; }
-      return k;
-    };
-    const bump = (h, at, width) => Math.exp(-(((h - at) / width) ** 2));
-    const busy = (x) => { const h = 7 + 16 * x; return 0.3 + 0.6 * bump(h, 8, 1) + 0.8 * bump(h, 12.5, 1) + 1.3 * bump(h, 20.5, 1.5); };
-    const when = () => { for (;;) { const x = random(); if (random() * 2.2 < busy(x)) return x * span; } };
-    const CLASSES = {
-      lurker: { home: 3, posts: 0.15, comments: 0.3, groupOpens: 1, groupPosts: 0.03 },
-      regular: { home: 8, posts: 0.8, comments: 1.5, groupOpens: 3, groupPosts: 0.2 },
-      heavy: { home: 14, posts: 3, comments: 5, groupOpens: 6, groupPosts: 0.8 },
-    };
-    const classOf = (s) => {
-      if (s.role === "hub") return "heavy";
-      const r = parseInt(createHash("sha256").update(s.host).digest("hex").slice(0, 8), 16) / 2 ** 32;
-      return r < 0.55 ? "lurker" : r < 0.9 ? "regular" : "heavy";
-    };
-    const persons = all.filter((s) => !s.group);
-    // Each person's groups, as their own site numbers them (the owner's too).
-    const groupsOf = new Map();
-    const groupMembers = new Map();
-    for (const g of all.filter((s) => s.role === "group")) {
-      const mine = state.groups?.[g.host];
-      if (!mine?.id) continue;
-      const members = [[g.owner, mine.id], ...Object.entries(mine.members)];
-      groupMembers.set(g.host, members);
-      for (const [host, id] of members) {
-        if (!groupsOf.has(host)) groupsOf.set(host, []);
-        groupsOf.get(host).push({ group: g.host, id });
-      }
-    }
-    const shared = (a, b) => [...(circlesOf.get(a) ?? [])].some((c) => circlesOf.get(b)?.has(c));
-    /** `k` of `host`'s friends, those sharing a circle with them five times as likely. */
-    const someFriends = (host, k) => {
-      const list = friendsOf.get(host) ?? [];
-      const weights = list.map((f) => (shared(host, f) ? 5 : 1));
-      const chosen = new Set();
-      for (let tries = 0; chosen.size < Math.min(k, list.length) && tries < k * 20; tries++) {
-        let x = random() * weights.reduce((a, w) => a + w, 0);
-        for (let i = 0; i < list.length; i++) { x -= weights[i]; if (x <= 0) { chosen.add(list[i]); break; } }
-      }
-      return [...chosen];
-    };
-
-    mkdirSync("/out/results", { recursive: true });
-    const LOG = "/out/results/social-day.jsonl";
-    writeFileSync(LOG, "");
-    const since = Date.now();
-    const now = () => Date.now() - since;
-    const log = (entry) => appendFileSync(LOG, `${JSON.stringify({ t: now(), ...entry })}\n`);
-    const schedule = new Schedule();
-    const later = (at, act) => schedule.push({ at, act });
-
-    // The day's posts (n: the [day n] in their words), and each poster's, to know what a friend's Home should show.
-    const posts = new Map();
-    const postsBy = new Map();
-    let made = 0;
-    const firstSeen = new Set();
-    const counts = { home: 0, post: 0, comment: 0, unseen: 0, reply: 0, groupOpen: 0, groupPost: 0, groupComment: 0, failed: 0 };
-
-    /** Home, as `host` opens it: what it shows of their friends' posts from the day, and how fast they got there. */
-    const visit = async (host, why) => {
-      const started = performance.now();
-      const r = await owner(host).fetch("/");
-      const t = now();
-      const seen = new Set([...r.text.matchAll(/\[day (\d+)\]/g)].map((m) => Number(m[1])));
-      let shown = 0;
-      let missing = 0;
-      let oldest = 0;
-      const arrived = [];
-      for (const f of friendsOf.get(host) ?? []) {
-        for (const p of postsBy.get(f) ?? []) {
-          if (seen.has(p.n)) {
-            shown++;
-            if (!firstSeen.has(`${host} ${p.n}`)) { firstSeen.add(`${host} ${p.n}`); arrived.push(Math.round((t - p.at) * squeeze / 1000)); }
-          } else if (t - p.at > Math.max(2 * MINUTE, 60_000)) {
-            missing++;
-            oldest = Math.max(oldest, Math.round((t - p.at) * squeeze / 1000));
-          }
-        }
-      }
-      counts.home++;
-      const timing = timingOf(r);
-      log({ a: "home", host, why, st: r.status, ms: Math.round(performance.now() - started), calls: timing.calls, rows: timing.rowsRead,
-        shown, missing, oldest, arrived });
-      return r.text;
-    };
-
-    const post = async (host, photo) => {
-      const n = ++made;
-      const started = performance.now();
-      await writePost(owner(host), `A post from ${ownerName(byHost.get(host))} [day ${n}]`, photo);
-      const p = { n, host, at: now(), photo, commenters: [] };
-      posts.set(n, p);
-      if (!postsBy.has(host)) postsBy.set(host, []);
-      postsBy.get(host).push(p);
-      counts.post++;
-      log({ a: "post", host, n, photo, ms: Math.round(performance.now() - started) });
-      // The flurry: friends who'll come and comment.
-      for (const friend of someFriends(host, photo ? 2 + Math.min(6, poisson(3)) : poisson(0.8))) {
-        later(now() + expo(photo ? 20 : 40), () => comment(friend, p, 0, 0));
-      }
-    };
-
-    /** A friend finds the post on their Home and comments; tries twice more later if it isn't there yet. */
-    const comment = async (host, p, tries, round) => {
-      const page = await visit(host, "to comment");
-      const card = cardWith(page, p.n, /id="f(\d+)-(post-\d+-[0-9a-f]{8})"/);
-      if (!card) {
-        counts.unseen++;
-        log({ a: "unseen", host, n: p.n, tries, age: Math.round((now() - p.at) * squeeze / 1000) });
-        if (tries < 2) later(now() + expo(10), () => comment(host, p, tries + 1, round));
-        return;
-      }
-      const started = performance.now();
-      const r = await owner(host).fetch("/_feed/comments", { method: "POST", form: { connection: card[1], target: card[2],
-        text: `A comment from ${ownerName(byHost.get(host))} on [day ${p.n}]`, back: "/" } });
-      const ok = r.status === 303 || r.status === 200;
-      counts.comment++;
-      if (!ok) counts.failed++;
-      log({ a: "comment", host, n: p.n, round, st: r.status, ms: Math.round(performance.now() - started), ...(ok ? {} : { said: saidIn(r.text) }) });
-      if (!ok) return;
-      // Those who commented before are told (their sites get a note); some come back to look.
-      for (const other of p.commenters) if (random() < 0.3) later(now() + expo(6), () => visit(other, "told"));
-      p.commenters.push(host);
-      if (random() < 0.6) later(now() + expo(8), () => reply(p));
-      if (round < 2 && random() < 0.25) later(now() + expo(15), () => comment(host, p, 0, round + 1));
-    };
-
-    /** The poster replies on their own post (Posts). */
-    const reply = async (p) => {
-      const site = owner(p.host);
-      const page = await site.fetch("/posts");
-      const card = cardWith(page.text, p.n, /id="p-(post-\d+-[0-9a-f]{8})"/);
-      if (!card) { counts.failed++; log({ a: "reply", host: p.host, n: p.n, st: "not found" }); return; }
-      const started = performance.now();
-      const r = await site.fetch("/_comments", { method: "POST", form: { target: card[1], text: `Thanks, all [day ${p.n}]`, back: "/posts" } });
-      counts.reply++;
-      const ok = r.status === 303 || r.status === 200;
-      if (!ok) counts.failed++;
-      log({ a: "reply", host: p.host, n: p.n, st: r.status, ms: Math.round(performance.now() - started), ...(ok ? {} : { said: saidIn(r.text) }) });
-    };
-
-    /** An unprompted comment: on whichever friend's post Home shows first. */
-    const browse = async (host) => {
-      const page = await visit(host, "browsing");
-      const cards = [...page.matchAll(/id="f(\d+)-(post-\d+-[0-9a-f]{8})"/g)];
-      if (!cards.length) return;
-      const [, connection, target] = cards[Math.floor(random() * Math.min(10, cards.length))];
-      const r = await owner(host).fetch("/_feed/comments", { method: "POST", form: { connection, target, text: "Lovely.", back: "/" } });
-      counts.comment++;
-      const ok = r.status === 303 || r.status === 200;
-      if (!ok) counts.failed++;
-      log({ a: "comment", host, browsing: true, st: r.status, ...(ok ? {} : { said: saidIn(r.text) }) });
-    };
-
-    const groupOpen = async (host, id, group) => {
-      const started = performance.now();
-      const r = await owner(host).fetch(`/groups/${id}`);
-      counts.groupOpen++;
-      if (r.status !== 200) counts.failed++;
-      log({ a: "groupOpen", host, group, st: r.status, ms: Math.round(performance.now() - started), rows: timingOf(r).rowsRead });
-      return r.text;
-    };
-
-    const groupPost = async (host, id, group) => {
-      const n = ++made;
-      const started = performance.now();
-      const r = await owner(host).fetch(`/_groups/${id}/posts`, { method: "POST", body: { text: `A group post [day ${n}]`, photos: [] } });
-      counts.groupPost++;
-      const ok = r.status === 200;
-      if (!ok) counts.failed++;
-      log({ a: "groupPost", host, group, n, st: r.status, ms: Math.round(performance.now() - started), ...(ok ? {} : { said: saidIn(r.text) }) });
-      if (!ok) return;
-      const members = groupMembers.get(group).filter(([h]) => h !== host);
-      for (let i = 0, k = 1 + poisson(2.5); i < k && members.length; i++) {
-        const [member, memberId] = members[Math.floor(random() * members.length)];
-        later(now() + expo(15), () => groupComment(member, memberId, group, n));
-      }
-    };
-
-    const groupComment = async (host, id, group, n) => {
-      const page = await groupOpen(host, id, group);
-      const card = cardWith(page, n, /id="gp(\d+)"/);
-      if (!card) { counts.unseen++; log({ a: "unseen", host, group, n }); return; }
-      const started = performance.now();
-      const r = await owner(host).fetch(`/_groups/${id}/comments`, { method: "POST", form: { post: card[1], text: `Group comment [day ${n}]`, back: `/groups/${id}` } });
-      counts.groupComment++;
-      const ok = r.status === 303 || r.status === 200;
-      if (!ok) counts.failed++;
-      log({ a: "groupComment", host, group, n, st: r.status, ms: Math.round(performance.now() - started), ...(ok ? {} : { said: saidIn(r.text) }) });
-    };
-
-    // The day as planned; flurries are added as posts are made.
-    const classes = { lurker: 0, regular: 0, heavy: 0 };
-    for (const s of persons) {
-      const c = CLASSES[classOf(s)];
-      classes[classOf(s)]++;
-      for (let i = poisson(c.home); i > 0; i--) later(when(), () => visit(s.host, "planned"));
-      for (let i = poisson(c.posts); i > 0; i--) { const photo = random() < 0.4; later(when(), () => post(s.host, photo)); }
-      for (let i = poisson(c.comments); i > 0; i--) later(when(), () => browse(s.host));
-      for (const { group, id } of groupsOf.get(s.host) ?? []) {
-        for (let i = poisson(c.groupOpens); i > 0; i--) later(when(), () => groupOpen(s.host, id, group));
-        for (let i = poisson(c.groupPosts); i > 0; i--) later(when(), () => groupPost(s.host, id, group));
-      }
-    }
-    console.log(`${persons.length} people (${JSON.stringify(classes)}), ${schedule.size} actions planned over ${Math.round(span / 60_000)} minutes, before flurries`);
-
-    const running = new Set();
-    let lastReport = 0;
-    while (schedule.size || running.size) {
-      if (now() - lastReport > 5 * 60_000) {
-        lastReport = now();
-        console.log(`  ${Math.round(now() / 60_000)} min (${Math.round(now() * squeeze / 3_600_000 + 7)}:00 in the day): ${JSON.stringify(counts)}, ${running.size} running, ${schedule.size} to come`);
-      }
-      if (!schedule.size) { await Promise.race(running); continue; }
-      const wait = schedule.peek().at - now();
-      if (wait > 0) { await Promise.race([sleep(Math.min(wait, 1000)), ...running]); continue; }
-      while (running.size >= 256) await Promise.race(running);
-      const { act } = schedule.pop();
-      const p = act().catch((error) => { counts.failed++; log({ a: "error", said: String(error.message).slice(0, 200) }); }).finally(() => running.delete(p));
-      running.add(p);
-    }
-    console.log(`  done at ${Math.round(now() / 60_000)} min: ${JSON.stringify(counts)}; waiting for the sites to go quiet`);
-    await waitQuiet([], since, { quietMs: 60_000, maxMs: 20 * 60_000 });
-    record("social-day", { squeeze, minutes: span / 60_000, since, until: Date.now(), classes, counts,
-      posts: [...posts.values()].map(({ n, host, at, photo, commenters }) => ({ n, host, at, photo, commenters: commenters.length })) });
+  /** Does nothing, for ever: for rehearsing the watchdog (README.md, "When a run ends"). */
+  async stall() {
+    setInterval(() => {}, 60_000);
+    await new Promise(() => {});
   },
 });
 
-// For rehearsing the watchdog (watchdog.sh): a step that never ends, and logs nothing.
-steps.stall = () => new Promise(() => setInterval(() => {}, 1 << 30));
+function pickFrom(list, random) {
+  return list?.length ? list[Math.floor(random() * list.length)] : undefined;
+}
 
 const [step, ...rest] = process.argv.slice(2);
 if (!steps[step]) {
   console.error(`Steps: ${Object.keys(steps).join(", ")}`);
   process.exit(1);
 }
-await waitUp();
 await steps[step](...rest);
+process.exit(0);

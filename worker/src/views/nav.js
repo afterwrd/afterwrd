@@ -107,7 +107,7 @@ export const FAVICON = `${LOOK}
  */
 export function siteHeader({ main, menu, current, face = {}, updateKnown = true }) {
   const badge = (b) => (b === true ? '<span class="dot" aria-hidden="true"></span>'
-    : b ? `<span class="count">${Number(b)}<span class="hidden"> new</span></span>` : "");
+    : b ? `<span class="count">${Number(b) >= 100 ? "99+" : Number(b)}<span class="hidden"> new</span></span>` : ""); // archive/comments.js NEW_COUNT_MAX
   const link = ({ key, label, href, badge: b }) =>
     `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ""}>${icon(key)}<span>${escape(label)}</span>${badge(b)}</a>`;
   const waiting = menu.some((i) => i.badge);

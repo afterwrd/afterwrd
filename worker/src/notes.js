@@ -103,22 +103,41 @@ const keyOfRecord = (sent) => (typeof sent?.record === "string" ? parseRecord(fr
 
 /**
  * A note (an Outbox row: {kind, item, fp}) as `connection` is sent it, or null if what it's about has gone meanwhile
- * (nothing is sent).
+ * (nothing is sent). `shared` (a Map the Outbox keeps for one run) holds what's the same for every recipient, worked
+ * out once a run: from the Outbox's object each statement is a call to the site's object, billed as a request, and a
+ * note to 40 friends otherwise read the same rows 40 times (step 9's scale run).
  */
-export async function noteFor(env, note, connection) {
+export async function noteFor(env, note, connection, shared = new Map()) {
   const db = env.DB;
   if (note.kind === "gone" || note.kind === "gone-off") return { v: 2, kind: "gone", item: note.item, cancelled: note.kind === "gone-off" };
+  const once = (part, work) => {
+    const key = `${note.id ?? note.item}\n${part}`;
+    if (!shared.has(key)) shared.set(key, work());
+    return shared.get(key);
+  };
   // An event's notes go only to those still invited when they're sent.
-  const invited = await db.prepare("SELECT audience FROM items WHERE id = ?").bind(note.item).first();
+  const invited = await once("audience", () => db.prepare("SELECT audience FROM items WHERE id = ?").bind(note.item).first());
   if (invited?.audience === "invited"
     && !(await db.prepare("SELECT 1 FROM item_guests WHERE item = ? AND connection_id = ?").bind(note.item, connection.id).first())) return null;
   if (note.kind === "item") {
-    const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
-      WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
-    if (!row) return null;
-    const item = await itemForFriend(env, note.origin, row, connection.id);
-    return { v: 2, kind: "item", item, delegations: await delegationsFor(db, [item.sent, ...item.records.map((x) => x.sent)].map(keyOf)) };
+    const base = await once("item", async () => {
+      const row = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
+        WHERE i.id = ? AND i.type = 'post' AND l.deleted_at IS NULL`).bind(note.item).first();
+      if (!row) return null;
+      const entries = await listEntries(db, note.item);
+      // The delegations are the same for everyone: only the photo links are each friend's.
+      const sample = await itemForFriend(env, note.origin, row, connection.id, entries);
+      return { row, entries, delegations: await delegationsFor(db, [sample.sent, ...sample.records.map((x) => x.sent)].map(keyOf)) };
+    });
+    if (!base) return null;
+    return { v: 2, kind: "item", item: await itemForFriend(env, note.origin, base.row, connection.id, base.entries), delegations: base.delegations };
   }
+  return once("body", () => sameForEveryone(env, note));
+}
+
+/** A comment or change note's body, the same for every friend it goes to. */
+async function sameForEveryone(env, note) {
+  const db = env.DB;
   const host = await ownHost(env);
   const entries = host ? await listEntries(db, note.item) : [];
   const at = entries.findIndex((e) => e.fp === note.fp);

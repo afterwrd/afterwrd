@@ -82,6 +82,12 @@ export class Outbox extends DurableObject {
       id INTEGER PRIMARY KEY AUTOINCREMENT, note INTEGER NOT NULL, connection_id INTEGER NOT NULL,
       tries INTEGER NOT NULL DEFAULT 0, due INTEGER NOT NULL
     )`);
+    // Each run asks what's due, and when the next is: by index, not by reading every note and retry waiting (the scale
+    // run's busy group had thousands of retries, read whole several times a run).
+    this.sql.exec("CREATE INDEX IF NOT EXISTS fat_notes_due ON fat_notes(due)");
+    this.sql.exec("CREATE INDEX IF NOT EXISTS note_retries_due ON note_retries(due)");
+    // And a run's tidying (fat_notes done with no retry left) looks each note's retries up, not every retry for every note.
+    this.sql.exec("CREATE INDEX IF NOT EXISTS note_retries_note ON note_retries(note)");
   }
 
   /**
@@ -249,6 +255,8 @@ export class Outbox extends DurableObject {
     const friends = new Map(results.map((c) => /** @type {[number, any]} */ ([Number(c.id), c])));
     // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
     const deliveries = [];
+    // What each note says that's the same for everyone it goes to, worked out once this run (notes.js noteFor).
+    const shared = new Map();
     await Promise.all(calls.map(async ({ note, connection, retry }) => {
       const friend = note.kind === "receipt" ? null : friends.get(connection);
       let again = false;
@@ -262,7 +270,7 @@ export class Outbox extends DurableObject {
         }
       } else if (friend && group) {
         try {
-          const body = await groupNoteFor(this.env, note, friend);
+          const body = await groupNoteFor(this.env, note, friend, shared);
           if (body) {
             const response = await callMember(this.env, friend, "/_p/notes", body);
             await response.body?.cancel();
@@ -275,7 +283,7 @@ export class Outbox extends DurableObject {
         }
       } else if (friend) {
         try {
-          const body = await noteFor(this.env, note, friend);
+          const body = await noteFor(this.env, note, friend, shared);
           if (body) await callFriend(this.env, String(note.origin), String(friend.origin), "/_p/notes", { body, timeout: TIMEOUT_MS });
           delivered = Boolean(body);
         } catch (error) {

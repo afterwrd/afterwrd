@@ -161,15 +161,16 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
 /**
  * A list as readers fetch it: its entries after `after` (all of them by default), and the host's signature on its
  * end now. A reader with nothing checked yet (`after` 0) of a list longer than CHECKPOINT starts from the newest
- * checkpoint: `checkpoint` is its signed head, and the entries run on from there. null if this site doesn't host it;
+ * checkpoint: `checkpoint` is its signed head, and the entries run on from there; unless it's `whole`, a group's
+ * members list, which can only be checked from its start (who's in follows from every join and approval). null if this site doesn't host it;
  * {deleted: true} if its owner deleted it.
  */
-export async function readList(db, list, { host, after = 0 }) {
+export async function readList(db, list, { host, after = 0, whole = false }) {
   const row = await db.prepare("SELECT owner, n, head, deleted_at FROM lists WHERE id = ?").bind(list).first();
   if (!row) return null;
   if (row.deleted_at) return { deleted: true };
   let checkpoint = null;
-  if (after === 0 && Number(row.n) > CHECKPOINT) {
+  if (after === 0 && !whole && Number(row.n) > CHECKPOINT) {
     const cp = await db.prepare("SELECT n, signed FROM checkpoints WHERE list = ? ORDER BY n DESC LIMIT 1").bind(list).first();
     if (cp) { checkpoint = JSON.parse(String(cp.signed)); after = Number(cp.n); }
   }

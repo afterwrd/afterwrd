@@ -97,9 +97,14 @@ export function parseGroupMembers(data, site, n, env) {
 // --- loading a group for its pages -----------------------------------------------------------------------------------------
 
 /** A call to a group's site, signed by this site (calls.js). Only groups with an identity are called. */
+// A group's whole members list (groupmembers.js signedMembers): every join and approval, with each member's identity
+// and delegation, about 4.6 MB at 1,000 members (the scale run found 509 members past the usual 2 MB). Fetched whole
+// by an admin for every decision; fetching only what's new since is for later (docs/signed-conversations.md, 9b).
+const MEMBERS_REPLY = 8_000_000;
 const call = async (env, group, path, body) => {
   if (!group.identity) throw new Refusal("This group is from before signing: it can't be asked anything now.");
-  return callFriend(env, await ownOrigin(env.DB), String(group.origin), path, { ...(body !== undefined && { body }), timeout: 25_000 });
+  return callFriend(env, await ownOrigin(env.DB), String(group.origin), path, { ...(body !== undefined && { body }), timeout: 25_000,
+    ...(path.endsWith("/members") && { maxReply: MEMBERS_REPLY }) });
 };
 
 /** Keeps a group's name, owner, our role and whether it's closed up to date, from what it just said. */

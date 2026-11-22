@@ -12,7 +12,7 @@ MINUTES="${2:-30}"
 OUT="$PWD/test/scale/out"
 say() { echo "== watchdog: $* $(date -u +%H:%M:%S)"; }
 changed() { # when the newest of the run's logs last changed (seconds since 1970), on Linux or a Mac
-  for f in "$OUT/$MODE/run.log" "$OUT/results/social-day.jsonl"; do
+  for f in "$OUT/$MODE/run.log" "$OUT/results-day.jsonl"; do
     if [ -e "$f" ]; then stat -c %Y "$f" 2>/dev/null || stat -f %m "$f"; fi
   done | sort -n | tail -n 1
 }
