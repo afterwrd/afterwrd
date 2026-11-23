@@ -24,3 +24,5 @@ export { fold } from "../../src/names.js";
 export { learnPeopleIn, signersIn } from "../../src/identities.js";
 export { keepSentKeys } from "../../src/groupcopies.js";
 export { ensureSchema } from "../../src/migrate.js";
+export { Outbox } from "../../src/outbox.js";
+export { objectNamed } from "../../src/sqlite.js";

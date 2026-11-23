@@ -58,7 +58,7 @@ export async function sitePage(request, { url, testing }, newest) {
   } else {
     let release;
     try {
-      release = await newest();
+      release = await remembered(newest);
     } catch {
       return plain("afterwrd.app couldn't check which release is signed just now. Try again in a minute.", 503);
     }
@@ -68,6 +68,24 @@ export async function sitePage(request, { url, testing }, newest) {
       .replaceAll("__REPO_PAGE__", REPO_PAGE);
   }
   return new Response(request.method === "HEAD" ? null : page, { headers });
+}
+
+// The newest signed release, as last read (a few minutes fresh), and as a fallback for a week when GitHub can't be read
+// or its list doesn't check: the pages stay up, naming the last release that was signed.
+const FRESH_MS = 10 * 60_000;
+const CACHE_KEY = `https://${SITE_HOST}/_cache/newest-signed`;
+async function remembered(newest) {
+  const cache = /** @type {any} */ (globalThis).caches?.default;
+  const kept = cache ? await cache.match(CACHE_KEY).then((r) => r?.json()).catch(() => null) : null;
+  if (kept?.release && Date.now() - kept.at < FRESH_MS) return kept.release;
+  try {
+    const release = await newest();
+    if (cache) await cache.put(CACHE_KEY, new Response(JSON.stringify({ release, at: Date.now() }), { headers: { "Cache-Control": "max-age=604800" } })).catch(() => {});
+    return release;
+  } catch (error) {
+    if (kept?.release) return kept.release;
+    throw error;
+  }
 }
 
 const plain = (text, status) => new Response(text, { status, headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" } });

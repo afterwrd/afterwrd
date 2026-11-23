@@ -1093,10 +1093,17 @@ const caraId = sql(stateA, `SELECT id FROM connections WHERE origin = '${C}'`)[0
 sql(stateC, "DELETE FROM connections");
 copiesOld(stateA);
 await ann.goto(`${A}/`);
+// The first refusal may only be for now (her site looking Ann's up again): her posts are kept, and she's asked again soon.
+check("a friend's site refusing once keeps her posts for now, and asks again soon",
+  sql(stateA, `SELECT said_no FROM connections WHERE id = ${caraId}`)[0].said_no === 0
+  && sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE connection_id = ${caraId}`)[0].n > 0
+  && sql(stateA, `SELECT items_checked_at FROM connections WHERE id = ${caraId}`)[0].items_checked_at < Math.floor(Date.now() / 1000) - 2000);
+copiesOld(stateA);
+await ann.goto(`${A}/`);
 check("Home says nothing about a friend who's removed you",
   !(await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent).join(" "))).includes("Cara"));
-check("…and remembers their site said no", sql(stateA, `SELECT said_no FROM connections WHERE id = ${caraId}`)[0].said_no === 1);
-check("…and forgets the copy of her posts at once", sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE connection_id = ${caraId}`)[0].n === 0);
+check("…and, refused again, remembers their site said no", sql(stateA, `SELECT said_no FROM connections WHERE id = ${caraId}`)[0].said_no === 1);
+check("…and forgets the copy of her posts", sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE connection_id = ${caraId}`)[0].n === 0);
 await ann.goto(`${A}/friend/${caraId}/posts`);
 const caraNotice = await ann.$eval("p.notice", (p) => p.textContent).catch(() => "");
 check("her page says she may have removed you", caraNotice.includes("Cara Example may have removed you as a friend"), caraNotice);

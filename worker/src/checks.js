@@ -56,7 +56,7 @@ const AUDIT_PAGE = 500;
 const OTHER_WORKERS = 8; // other Workers looked at (two calls each, within the free plan's 50 a request)
 // The bindings afterwrd gives a personal site (src/deploy.js deployVersion), and the secrets it may have.
 const BINDINGS = ["assets ASSETS", "d1 DB", "durable_object_namespace MEDIA MediaStore", "durable_object_namespace OUTBOX Outbox", "version_metadata VERSION"];
-const SECRETS = new Set(["SETUP_CODE", "UPDATE_TOKEN"]);
+const SECRETS = new Set(["SETUP_CODE", "UPDATE_TOKEN", "OUTBOX_KEY"]); // OUTBOX_KEY: the key calls to its objects carry (sqlite.js)
 
 // --- the owner's side -------------------------------------------------------------------------------------------
 
@@ -366,10 +366,14 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
   result.account = account.slice(-6);
   if (tie) {
     result.accountId = account; // for the automatic check's next step; not kept
-    const name = (await getJSON(`/accounts/${account}/workers/subdomain`).catch(() => ({}))).result?.subdomain;
+    const read = await getJSON(`/accounts/${account}/workers/subdomain`).then((d) => d, () => null);
+    const name = read?.result?.subdomain;
     // (On this computer a test says what the stand-in account's name is.)
     const expected = testingHere(env, here) && env.TEST_SUBDOMAIN ? env.TEST_SUBDOMAIN : new URL(site).hostname.split(".")[1];
-    if (!name || name !== expected) {
+    if (!read || typeof name !== "string") {
+      result.tieFailed = true;
+      problems.push("Couldn't confirm the Cloudflare account that was allowed is the one at the site's address: Cloudflare wouldn't say its workers.dev name.");
+    } else if (name !== expected) {
       result.tieFailed = true;
       problems.push("The Cloudflare account that was allowed isn't the one at the site's address (its workers.dev name is different).");
     }
@@ -545,11 +549,16 @@ export async function siteFiles(site, manifest, fetcher = fetch, most = 25) {
   const paths = (manifest.assets ?? []).map((a) => a?.path).filter((p) => typeof p === "string" && /^\/static\/[\w./-]+$/.test(p)
     && !p.startsWith("/static/fonts/") && !isPublicStatic(p));
   const direct = [];
+  let unread = 0; // couldn't be asked (out of calls, or the site away): not a pass
   for (const path of paths.slice(0, most)) {
     const response = await fetcher(site + path, { method: "HEAD", redirect: "manual" }).catch(() => null);
-    if (response && response.status === 200) direct.push(path);
+    if (!response) unread++;
+    else if (response.status === 200) direct.push(path);
   }
-  return direct.length ? [`Cloudflare hands out ${direct.length === 1 ? "one of its files" : `${direct.length} of its files`} without its code checking them first (${direct.slice(0, 3).join(", ")}).`] : [];
+  return [
+    ...(direct.length ? [`Cloudflare hands out ${direct.length === 1 ? "one of its files" : `${direct.length} of its files`} without its code checking them first (${direct.slice(0, 3).join(", ")}).`] : []),
+    ...(unread ? [`Couldn't look at ${unread === 1 ? "one of its files" : `${unread} of its files`}, to see they only come through its code.`] : []),
+  ];
 }
 
 // What afterwrd does in an account through Connect: installing and updating its site, starting and deleting groups

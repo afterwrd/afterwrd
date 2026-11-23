@@ -28,6 +28,7 @@
 // changed the database the old one can't run on it: then the new version is kept, and Home says what happened.
 // (Versions before 0.41.0 didn't know this, and put the old version back regardless.) The time of every switch is
 // kept for a later, owner-chosen restore.
+import { objectNamed } from "./sqlite.js";
 import pkg from "../package.json";
 import { CLIENT_ID, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
 import { existingDatabase, FILES_AT_ONCE, findWorker, liveVersion, loadRelease, stageVersion, switchTo, uploadAssets, useApiBase, api } from "./deploy.js";
@@ -78,7 +79,7 @@ export async function autoState(db) {
 
 // Merged in one statement (JSON merge patch: a null removes that field), so writes from a run, its steps and the
 // owner's page can't undo each other.
-async function saveState(db, change) {
+export async function saveState(db, change) {
   await db.prepare(`INSERT INTO settings (key, value) VALUES (?1, json_patch('{}', ?2))
     ON CONFLICT(key) DO UPDATE SET value = json_patch(settings.value, ?2)`).bind(SETTINGS_KEY, JSON.stringify(change)).run();
 }
@@ -86,7 +87,7 @@ async function saveState(db, change) {
 // The secrets live in an Outbox object of their own, named "vault": separate storage from the queue of notes to
 // friends' sites (the object called "outbox"), whose alarm and sending code never see it. Not a class of its own, as a
 // new class can't be installed carefully (scripts/release.mjs refuses one without --new-store).
-const vault = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("vault"));
+const vault = (env) => objectNamed(env, "vault"); // with the site's own key (sqlite.js)
 
 // --- turning it on and off ----------------------------------------------------------------------------------------
 

@@ -57,9 +57,10 @@ installer or your site gets a token that lasts **one hour**. Nothing is kept aft
 - reading the account's basic settings (its workers.dev name).
 
 Since 0.57.0 your site keeps everything in its own Durable Object. Unlike a D1 database, Cloudflare's API has no way
-to query it from outside: reaching it means deploying code, either to your site or to another Worker in the same
-account bound to your site's objects. Friends' checks look at both: your site's code, and every other Worker's bindings
-(up to eight; more is reported). The D1 permission remains for the database sites kept everything
+to query it from outside: reaching it means deploying code to your site, which friends' checks look at. Another
+Worker in the same account can be bound to your site's objects, but every call to them must carry a random key only
+your site's own Worker holds (a secret, added at install or at the first update that finds it missing), so it gets
+nothing; friends' checks report such a Worker too. The D1 permission remains for the database sites kept everything
 in before then (left as it was, a safety copy), and for groups, until a later version stops needing it.
 
 Automatic updates, if turned on, ask once for **Background Access** with *Workers Editor* only: changing (not making)

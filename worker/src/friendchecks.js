@@ -26,6 +26,7 @@
 // needs automatic updates on (their schedule and the steps' key). The owner can stop it:
 //   POST /_admin/checks/checking-off, /checking-on
 //   POST /_admin/checks/found/<id>/seen   puts a finding away on Home
+import { objectNamed } from "./sqlite.js";
 import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
@@ -50,10 +51,11 @@ const SOON = 2; // friends' "please check soon" taken on one run
 const SOON_DAYS = 3;
 const VERSIONS_MAX = 30; // uploads looked at in one check
 const REFUSALS = 3; // checks in a row a friend's site wouldn't allow before Home says so
+const BUSY_REFUSALS = 5; // …or said it was busy, every time (all of those KEEP keeps)
 const KEEP = 5; // results kept for each friend
 const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
-const vault = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("vault"));
+const vault = (env) => objectNamed(env, "vault"); // with the site's own key (sqlite.js)
 const setting = async (db, key) => {
   const row = await db.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first().catch(() => null);
   return row ? JSON.parse(row.value) : {};
@@ -381,10 +383,10 @@ async function checkFriend(env, origin, friend) {
   try {
     token = (await callFriend(env, origin, friend.origin, "/_p/check-token", { body: { type: "CheckToken" } })).token;
   } catch (error) {
-    // Busy (429: its checks for today are used up, perhaps by other friends' sites, or it's past its day's allowance)
-    // isn't refusing: nothing's kept, and it's asked again at the next run.
-    if (error.status === 429) return;
-    return refused(error.message, { off: error.status === 409 || error.status === 404 });
+    // Busy (429: its checks for today are used up, perhaps by other friends' sites, or it's past its day's allowance):
+    // kept as busy, which Home says only after more of them in a row than refusals (BUSY_REFUSALS), as a site that's
+    // only ever "busy" is one that can't be checked.
+    return refused(error.message, { off: error.status === 409 || error.status === 404, ...(error.status === 429 && { busy: true }) });
   }
   if (typeof token !== "string" || !CODE_RE.test(token)) return refused("It didn't hand over a token.");
   const since = await lastComplete(env.DB, friend.id);
@@ -491,12 +493,14 @@ export async function friendCheckResults(db) {
   for (const r of results) {
     // How many checks in a row, newest back, their site wouldn't allow (after it had once).
     let refusals = 0;
+    let busy = false; // every one of them only busy (429)
     if (r.verdict === "couldn't check") {
-      const { results: recent } = await db.prepare("SELECT verdict FROM friend_checks WHERE connection_id = ? ORDER BY id DESC").bind(r.connection_id).all();
+      const { results: recent } = await db.prepare("SELECT verdict, result FROM friend_checks WHERE connection_id = ? ORDER BY id DESC").bind(r.connection_id).all();
       const allowedOnce = recent.some((x) => x.verdict !== "couldn't check");
       refusals = allowedOnce ? recent.findIndex((x) => x.verdict !== "couldn't check") : 0; // (the newest that got through is always kept)
+      busy = recent.slice(0, refusals).every((x) => { try { return JSON.parse(String(x.result)).busy === true; } catch { return false; } });
     }
-    out.push({ ...r, result: JSON.parse(r.result), refusals });
+    out.push({ ...r, result: JSON.parse(r.result), refusals: busy && refusals < BUSY_REFUSALS ? 0 : refusals });
   }
   return out;
 }

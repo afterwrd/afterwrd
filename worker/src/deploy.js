@@ -4,9 +4,9 @@
 //
 // A release is a folder of files published at `base` (a GitHub release): manifest.json lists every code module
 // and site file with its SHA-256, and each file is published under its hash. Every file is checked against
-// its hash before it's used, so a release can't be swapped piecemeal; the manifest itself is checked against a
-// pinned hash when the caller has one (the Deploy-page installer does; the Update page and install.afterwrd.app take
-// the release from GitHub as published, so trust rests on GitHub's release, as the rebuild check in SECURITY.md covers).
+// its hash before it's used, so a release can't be swapped piecemeal; the manifest itself is checked against the hash
+// signed with afterwrd's own key (signing.js), by every caller: updates, groups and install.afterwrd.app.
+import { b64url } from "../public/static/signed.js";
 
 export const API = "https://api.cloudflare.com/client/v4";
 
@@ -190,6 +190,11 @@ export async function switchTo(token, account, script, id) {
 /** What Cloudflare is sent with the release's code (and the store classes it would add), for deploying or staging. */
 function releaseMetadata(release, { jwt, databaseId, settings, secrets = {} }) {
   const { manifest } = release;
+  // The key every call to the site's objects carries (sqlite.js objectNamed, outbox.js allowed): made at install, or
+  // at the first update that finds the Worker without one, then kept with its other secrets.
+  if (!settings.bindings?.some((b) => b.type === "secret_text" && b.name === "OUTBOX_KEY")) {
+    secrets = { ...secrets, OUTBOX_KEY: b64url(crypto.getRandomValues(new Uint8Array(32))) };
+  }
   const hasStore = (name) => settings.bindings?.some((b) => b.type === "durable_object_namespace" && b.class_name === name);
   const newClasses = manifest.migrations.new_sqlite_classes.filter((name) => !hasStore(name));
   const metadata = {

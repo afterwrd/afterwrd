@@ -4,7 +4,7 @@
 // bad host tries its luck with readers.
 import { pathToFileURL } from "node:url";
 const { signed, readIdentity, makeRecord, checkRecord, recordTrouble, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules,
-  learnPeopleIn, signersIn, keepSentKeys, ensureSchema }
+  learnPeopleIn, signersIn, keepSentKeys, ensureSchema, Outbox, objectNamed }
   = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -616,6 +616,31 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   await keepSentKeys(env, [{ key: bob.browser.publicKey, d: delegations.get(bob.browser.publicKey), records: [{ sent: real1.sent, taken: real }] }]);
   check("…while Bob's own, with a record of his that checks, is kept as his",
     raw.prepare(`SELECT person FROM known_delegations WHERE key = '${bob.browser.publicKey}'`).get()?.person === bob.id);
+}
+
+
+// --- the site's objects answer only calls carrying its own key (outbox.js allowed, sqlite.js objectNamed) ------------
+{
+  const raw = new DatabaseSync(":memory:");
+  const sql = { exec(text, ...params) { const rows = raw.prepare(text).all(...params); return { toArray: () => rows, one: () => rows[0] }; } };
+  const box = new Outbox({ id: { name: "vault" }, storage: { sql } }, { OUTBOX_KEY: "the-site-key" });
+  box.keepSecret("the-site-key", "auto_refresh", "secret token");
+  let refused = null;
+  try { box.secret("someone-else", "auto_refresh"); } catch (error) { refused = error.message; }
+  check("the site's vault refuses a call without its key (another Worker bound to it)", refused === "Not allowed.");
+  check("…and answers one with it", box.secret("the-site-key", "auto_refresh") === "secret token");
+  let noKey = null;
+  try { box.keepSecret(undefined, "auto_refresh", "theirs"); } catch (error) { noKey = error.message; }
+  check("…nor changes anything for a call with none", noKey === "Not allowed." && box.secret("the-site-key", "auto_refresh") === "secret token");
+  // The site's own calls carry it, through objectNamed.
+  const seen = [];
+  const env = { OUTBOX_KEY: "the-site-key", OUTBOX: { idFromName: (n) => n, get: () => ({ secret: (...args) => { seen.push(args); return "ok"; }, fetch: () => "fetched" }) } };
+  const vault = objectNamed(env, "vault");
+  check("the site's own calls to its objects carry its key", (await vault.secret("auto_key")) === "ok" && seen[0][0] === "the-site-key" && seen[0][1] === "auto_key");
+  check("…but not a request handed on (fetch)", vault.fetch() === "fetched");
+  // A site from before the key (until its next update adds one) answers any call, as it did.
+  const old = new Outbox({ id: { name: "vault" }, storage: { sql } }, {});
+  check("a site without a key yet still answers its own calls", old.secret(undefined, "auto_refresh") === "secret token");
 }
 
 process.exit(failed ? 1 : 0);

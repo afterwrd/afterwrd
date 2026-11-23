@@ -99,6 +99,8 @@ export function noteAnswer(db, connection, error = null, at = now()) {
  * that's away isn't asked again for an hour (Home doesn't wait for it), and whether it answered (noteAnswer). A site
  * that says it doesn't know this one any more (they removed the owner here) has its posts forgotten at once.
  */
+const AGAIN_SECONDS = 600; // a friend's first refusal, asked again this soon
+
 export async function pullItems(env, from, connection) {
   const failed = async (error) => {
     // Moved here in the last fortnight: a friend's site that doesn't know this address yet hasn't followed yet (it
@@ -106,6 +108,16 @@ export async function pullItems(env, from, connection) {
     if (error.status === 401) {
       const moved = await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1 AND moving_to = ? AND moving_at > ?").bind(from, now() - FOLLOW_SECONDS).first();
       if (moved) error = { status: 409 };
+    }
+    // The first refusal after answering: maybe only for now (their site looks this one up again when its signature
+    // doesn't check with the key it knows, after answering: identities.js hostingKeyFor). Asked again in ten minutes,
+    // keeping their posts; refused again, it's meant.
+    if (error.status === 401 && !connection.said_no && !connection.missing_since) {
+      await env.DB.batch([
+        noteAnswer(env.DB, connection, { status: 0 }),
+        env.DB.prepare("UPDATE connections SET items_checked_at = ? WHERE id = ?").bind(now() - rateWindow(PULL_SECONDS) + AGAIN_SECONDS, connection.id),
+      ]);
+      return null;
     }
     // Asked again in an hour; or, if their site says this one has had its allowance there today, once the day's over.
     const busy = busyUntil(error);

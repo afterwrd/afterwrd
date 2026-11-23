@@ -296,14 +296,24 @@ check("…nor say it found something without having been handed a token", (await
 sql(stateA, `INSERT INTO check_tokens (connection_id, at) VALUES ((SELECT id FROM connections LIMIT 1), ${Math.floor(Date.now() / 1000)})`);
 check("…and words of its own aren't taken", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: A, found: ["Reinstall from evil.example"] })).status === 400);
 
-// --- Ann's site busy (its checks for today used up, by other friends' sites say): not a refusal ----------------------
-again();
-await fromSam("/_p/check-token", { type: "CheckToken" });
-await fromSam("/_p/check-token", { type: "CheckToken" }); // two a day: the run's own ask now gets 429
-const rowsBefore = sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n;
-await samsRun(10000);
-check("a friend's site that's busy (429) isn't counted as refusing: nothing's kept, and it's asked again next time",
-  sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n === rowsBefore);
+// --- Ann's site busy (its checks for today used up, by other friends' sites say): not a refusal, until it's always so --
+const busyRun = async () => {
+  again();
+  await fromSam("/_p/check-token", { type: "CheckToken" });
+  await fromSam("/_p/check-token", { type: "CheckToken" }); // two a day: the run's own ask now gets 429
+  return samsRun();
+};
+found = await busyRun();
+await sam.goto(`${B}/`);
+check("a friend's site that's busy (429) is kept as busy, and Home says nothing yet",
+  found?.verdict === "couldn't check" && JSON.parse(found.result).busy === true && !(await text(sam, ".friend-check")).includes("hasn't let yours check"),
+  JSON.stringify(found));
+for (let i = 0; i < 4; i++) await busyRun();
+await sam.goto(`${B}/`);
+check("…but a site that's busy every time, five in a row, can't be checked: Home says so",
+  (await text(sam, ".friend-check")).includes("hasn't let yours check it the last 5 times"), await text(sam, ".friend-check"));
+// (Gone again, so what follows counts from a clean slate.)
+sql(stateB, "DELETE FROM friend_checks WHERE json_extract(result, '$.busy') = 1");
 
 // --- Ann stops letting them: three refusals in a row show on Sam's Home ---------------------------------------------
 await ann.goto(`${A}/_admin/update`);

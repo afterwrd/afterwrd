@@ -260,6 +260,8 @@ const staged = cf.versions.at(-1);
 check("the run installs the newest release that's signed and has waited three days (99.0.1)", s.last?.version === "99.0.1" && s.last?.result === "done", JSON.stringify(s.last ?? s));
 check("…staged first (a version, not a direct deploy), with the database and secrets kept",
   staged?.meta?.bindings?.some((b) => b.type === "d1" && b.id === "db-uuid") && staged?.meta?.keep_bindings?.includes("secret_text") && !staged?.meta?.migrations);
+check("…and, as the site had none, a key for calls to its objects added (sqlite.js objectNamed)",
+  /^[\w-]{43}$/.test(staged?.meta?.bindings?.find((b) => b.type === "secret_text" && b.name === "OUTBOX_KEY")?.text ?? ""));
 check("…then switched to exactly that version", cf.deployments.at(-1)?.to === staged?.id && cf.live === staged?.id);
 check("…using a token from refreshing the grant, never the refresh token itself", token.refreshes.length === 1 && !asked.some((a) => / ref-auto-\d/.test(a)));
 check("…and the list's sequence number is remembered", state().listSeq === list.seq);

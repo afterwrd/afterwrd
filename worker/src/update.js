@@ -26,7 +26,7 @@ import pkg from "../package.json";
 import { connectedToken, testingHere, tokenFor } from "./cloudflare.js";
 import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, stageVersion, uploadAssets } from "./deploy.js";
 import { recovering } from "./recover.js";
-import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, setEarly, startRunNow, switchCarefully, turnOff } from "./auto.js";
+import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, saveState, setEarly, startRunNow, switchCarefully, turnOff } from "./auto.js";
 import { checkNewer, PROBLEM_KEY } from "./migrate.js";
 import { releaseKey, signedList } from "./signing.js";
 import { GROUP_RELEASE, isGroupWorker } from "./groupsites.js";
@@ -179,10 +179,16 @@ export async function signedManifest(env, origin, version) {
   return signed.manifestSha256;
 }
 
-/** The signed list of releases, if it's genuine and no older than one this site has already seen (auto.js keeps that). */
+/**
+ * The signed list of releases, if it's genuine and no older than one this site has already seen; a newer one is noted
+ * (as automatic updates do: auto.js), so an older genuine list put back later, with a release since pulled, isn't taken.
+ */
 async function currentList(env, origin) {
   const list = await signedList(env, origin);
-  return list && list.seq >= ((await autoState(env.DB)).listSeq ?? 0) ? list : null;
+  const seen = (await autoState(env.DB)).listSeq ?? 0;
+  if (!list || list.seq < seen) return null;
+  if (list.seq > seen) await saveState(env.DB, { listSeq: list.seq });
+  return list;
 }
 
 /** What a self-hosted site's Update page shows: this version, the latest release, and this site's updates. */

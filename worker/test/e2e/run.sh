@@ -73,8 +73,8 @@ stop() { pkill -f "wrangler dev --port 8787" 2>/dev/null; sleep 2; }
 fresh() { stop; rm -rf "$WORKER/.wrangler/state"; start "$@"; }
 suite() { echo "== $1"; (cd "$HERE" && node "$@") | grep -v '^PASS' ; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1; }
 
-run_core() { # each on a new site
-  fresh; suite security.mjs
+run_core() { # each on a new site (the first with the key its objects' calls carry, as an installed site has: sqlite.js)
+  fresh --var OUTBOX_KEY:local-test-outbox-key; suite security.mjs
   fresh; suite comments.mjs "$OUT/fake-export.zip"
   fresh; suite posts.mjs "$OUT/fake-export.zip" "$PHOTOS"
   fresh; suite admin.mjs

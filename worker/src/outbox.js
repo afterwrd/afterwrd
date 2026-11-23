@@ -13,7 +13,7 @@ import { DurableObject } from "cloudflare:workers";
 import { handle, HEADERS } from "./app.js";
 import { ensureSchema } from "./migrate.js";
 import { copyOnce } from "./sitecopy.js";
-import { FRONT_HEADER, frontIsNewer, local, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, siteObject, ZONE_HEADER } from "./sqlite.js";
+import { FRONT_HEADER, frontIsNewer, local, objectNamed, oldDatabase, OLDER_CODE, remote, runBatches, runStatements, ZONE_HEADER } from "./sqlite.js";
 import { measured, scaleTest } from "./timing.js";
 import { messagePage } from "./views/pages.js";
 import { noteFor } from "./notes.js";
@@ -29,7 +29,7 @@ const TIMEOUT_MS = 5000;
 const NOTE_RETRY_SECONDS = [60, 300, 1800, 7200, 21600, 43200, 86400];
 const DONE = Number.MAX_SAFE_INTEGER; // a fat note's `due` once everyone's had it (only retries may be left)
 
-export const outbox = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("outbox"));
+export const outbox = (env) => objectNamed(env, "outbox");
 
 // Queues there once were: for messages between friends and in groups' chats (gone in 0.47.0); friends to fetch again
 // (refreshes, then refresh_queue); notes and invitations to friends' sites before posts were signed (notes, invites:
@@ -157,15 +157,32 @@ export class Outbox extends DurableObject {
       { waitUntil: (promise) => this.ctx.waitUntil(promise) });
   }
 
+  /**
+   * Whether a call from another object or the Worker carries the site's own key (OUTBOX_KEY: sqlite.js objectNamed).
+   * Another Worker in the account can be bound to these objects, by naming this site's Worker, but can't know it: it
+   * gets nothing. A site without a key yet (from before it, until its next update adds one) takes any call, as before.
+   */
+  allowed(key) {
+    const own = this.env.OUTBOX_KEY;
+    if (typeof own !== "string" || !own) return;
+    const a = new TextEncoder().encode(typeof key === "string" ? key : "");
+    const b = new TextEncoder().encode(own);
+    let differ = a.length ^ b.length; // every byte looked at, whatever differs, so how long it takes says nothing
+    for (let i = 0; i < b.length; i++) differ |= (a[i] ?? 0) ^ b[i];
+    if (differ) throw new Error("Not allowed.");
+  }
+
   /** In the "site" object: statements from another object or the Worker, run on the database here (sqlite.js remote). */
-  async query(statements, together) {
+  async query(key, statements, together) {
+    this.allowed(key);
     if (!this.isSite()) throw new Error("Only the site's own object has its database.");
     if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
     return runStatements(this.ctx.storage, statements, together);
   }
 
   /** In the "site" object: several batches from another object, each its own transaction (sqlite.js batches). */
-  async queryBatches(batches) {
+  async queryBatches(key, batches) {
+    this.allowed(key);
     if (!this.isSite()) throw new Error("Only the site's own object has its database.");
     if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
     return runBatches(this.ctx.storage, batches);
@@ -175,7 +192,8 @@ export class Outbox extends DurableObject {
    * In the "site" object: fat notes' bodies for their recipients ([{note, connection}]), and the signed calls that send
    * them, for the Outbox's run (sendNotes): worked out here, next to the database, in one call (prepareNotes).
    */
-  async prepareNotes(calls, group) {
+  async prepareNotes(key, calls, group) {
+    this.allowed(key);
     if (!this.isSite()) throw new Error("Only the site's own object has its database.");
     if (!(await this.ready())) throw new Error("This site is moving to faster storage. Try again in a minute.");
     return prepareNotes(this.env, calls, group);
@@ -211,12 +229,22 @@ export class Outbox extends DurableObject {
   }
 
   /** A secret kept here (auto.js), or null. */
-  secret(name) {
+  secret(key, name) {
+    this.allowed(key);
+    return this.#read(name);
+  }
+
+  #read(name) {
     return this.sql.exec("SELECT value FROM vault WHERE name = ?", name).toArray()[0]?.value ?? null;
   }
 
   /** Keeps a secret here, replacing any of that name; null deletes it. */
-  keepSecret(name, value) {
+  keepSecret(key, name, value) {
+    this.allowed(key);
+    this.#keep(name, value);
+  }
+
+  #keep(name, value) {
     if (value === null) this.sql.exec("DELETE FROM vault WHERE name = ?", name);
     else this.sql.exec("INSERT INTO vault (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value", name, value);
   }
@@ -225,30 +253,32 @@ export class Outbox extends DurableObject {
    * In the vault: "Install it now" (auto.js). The alarm asks the site's own address to run the automatic update, and
    * waits for it, so the run belongs to this object (which has up to 15 minutes), not to the owner's page.
    */
-  async runSoon(origin) {
-    this.keepSecret("run_now", origin);
-    await this.wake(Date.now());
+  async runSoon(key, origin) {
+    this.allowed(key);
+    this.#keep("run_now", origin);
+    await this.#wake(Date.now());
   }
 
   /** Queues a fat note about a signed post (notes.js): {origin, kind, item, fp?, audience? | recipients?}. */
-  async sendNote({ origin, kind, item, fp = null, audience = null, recipients = null }) {
+  async sendNote(key, { origin, kind, item, fp = null, audience = null, recipients = null }) {
+    this.allowed(key);
     const at = Date.now();
     this.sql.exec("INSERT INTO fat_notes (origin, kind, item, fp, audience, recipients, due) VALUES (?, ?, ?, ?, ?, ?, ?)",
       origin, kind, item, fp, audience, recipients && JSON.stringify(recipients), at);
-    await this.wake(at);
+    await this.#wake(at);
   }
 
   /** Sees that the alarm goes off by `at`, even if it was set for later (a retry hours away). */
-  async wake(at) {
+  async #wake(at) {
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > at) await this.ctx.storage.setAlarm(at);
   }
 
   async alarm() {
-    const origin = this.secret("run_now");
+    const origin = this.#read("run_now");
     if (origin) {
-      this.keepSecret("run_now", null);
-      const key = this.secret("auto_key");
+      this.#keep("run_now", null);
+      const key = this.#read("auto_key");
       if (key) {
         await fetch(`${origin}/_auto/step`, { method: "POST", redirect: "manual",
           headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" }, body: JSON.stringify({ step: "run-now" }) })
@@ -310,7 +340,7 @@ export class Outbox extends DurableObject {
     const group = Boolean(this.env.GROUP_KEY);
     const toSites = calls.filter((c) => c.note.kind !== "receipt");
     const prepared = toSites.length
-      ? await siteObject(this.env).prepareNotes(toSites.map((c) => ({ note: c.note, connection: c.connection })), group) : [];
+      ? await objectNamed(this.env, "site").prepareNotes(toSites.map((c) => ({ note: c.note, connection: c.connection })), group) : [];
     const ready = new Map(toSites.map((c, i) => [c, prepared[i]]));
     // What became of each invitation to an event (a new-post note to chosen guests), for its guest list.
     const deliveries = [];

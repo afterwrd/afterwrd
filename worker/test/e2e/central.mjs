@@ -248,8 +248,9 @@ check("…and what's typed there is tidied (\"Ann Exämple 2 \" → ann-example-
   && fresh.page.previews[1] === "afterwrd.ann-example-2.workers.dev", fresh.page.previews.join(" | "));
 const made = state["tok-fresh"].deployed[0];
 const bindings = (made?.metadata.bindings ?? []).map((b) => `${b.type} ${b.name}`).sort().join(", ");
-check("the site is installed as a new Worker called afterwrd, with its database, stores, files and setup code", made?.script === "afterwrd"
-  && bindings === "assets ASSETS, d1 DB, durable_object_namespace MEDIA, durable_object_namespace OUTBOX, secret_text SETUP_CODE, version_metadata VERSION"
+check("the site is installed as a new Worker called afterwrd, with its database, stores, files, setup code and its objects' key", made?.script === "afterwrd"
+  && bindings === "assets ASSETS, d1 DB, durable_object_namespace MEDIA, durable_object_namespace OUTBOX, secret_text OUTBOX_KEY, secret_text SETUP_CODE, version_metadata VERSION"
+  && /^[\w-]{43}$/.test(made.metadata.bindings.find((b) => b.name === "OUTBOX_KEY")?.text ?? "")
   && made.metadata.bindings.find((b) => b.name === "DB").id === "new-database" && made.metadata.assets.jwt === "completion-jwt", bindings);
 check("…and switched on at its workers.dev address", state["tok-fresh"].enabled === `${A}/afterwrd`);
 const setupCode = made?.metadata.bindings.find((b) => b.name === "SETUP_CODE")?.text;
@@ -328,7 +329,9 @@ check("the Connect page's one script carries the answer's nonce, with the sign-i
 check("a folder without its last slash goes to the one with it", (await sitePath("/how-it-works")).headers.get("location")?.endsWith("/how-it-works/"));
 check("anything else isn't there", (await sitePath("/wp-login.php")).status === 404);
 signing.releases = [];
-check("with no signed release to name, the install page says to try again", (await sitePath("/")).status === 503);
+const fallback = await sitePath("/");
+check("when the signed list can't be used, the install page still names the last signed release it saw", fallback.status === 200
+  && (await fallback.text()).includes("9.9.9"), String(fallback.status));
 signing.releases = realSigning;
 
 // Refusals.

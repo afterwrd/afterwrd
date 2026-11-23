@@ -205,7 +205,26 @@ export const local = (storage) => client(async (statements, together) => runStat
   async (batches) => runBatches(storage, batches));
 
 /** The object holding the site's database: an Outbox object named "site" (no new kind of object: scripts/release.mjs). */
-export const siteObject = (env) => env.OUTBOX.get(env.OUTBOX.idFromName("site"));
+export const siteObject = (env) => objectNamed(env, "site");
+
+/**
+ * The site's object called `name` ("site", "outbox", "vault"), whose every call but `fetch` carries the site's own key
+ * (env.OUTBOX_KEY, a secret only the site's Worker has: outbox.js `allowed`). Another Worker in the same account can be
+ * bound to these objects, but without the key it gets nothing from them.
+ * @param {any} env @param {string} name
+ * @returns {any}
+ */
+export function objectNamed(env, name) {
+  const stub = env.OUTBOX.get(env.OUTBOX.idFromName(name));
+  const key = typeof env.OUTBOX_KEY === "string" ? env.OUTBOX_KEY : "";
+  return new Proxy(stub, {
+    get(target, prop) {
+      const value = target[prop];
+      if (typeof prop !== "string" || prop === "fetch" || prop === "then" || typeof value !== "function") return typeof value === "function" ? value.bind(target) : value;
+      return (...args) => target[prop](key, ...args);
+    },
+  });
+}
 
 /** env.DB anywhere else (the Outbox, the Worker): each statement or batch is one call to the site's object. */
 export const remote = (env) => client((statements, together) => siteObject(env).query(statements, together),
