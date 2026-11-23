@@ -3,7 +3,8 @@
 // their browsers (real browser keys, allowed by software passkeys). Then bad writers try their luck with the host, and a
 // bad host tries its luck with readers.
 import { pathToFileURL } from "node:url";
-const { signed, readIdentity, makeRecord, checkRecord, recordTrouble, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules }
+const { signed, readIdentity, makeRecord, checkRecord, recordTrouble, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules,
+  learnPeopleIn, signersIn, keepSentKeys, ensureSchema }
   = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -56,7 +57,8 @@ async function person(origin) {
   const state = await readIdentity([{ bytes: doc, sig: { passkey: proof } }], () => 0, NOW);
   states.set(id, state);
   delegations.set(key, { bytes: b64url(delegation), proof });
-  return { id, origin, hosting, browser: { privateKey: browser.privateKey, publicKey: key }, state };
+  return { id, origin, hosting, browser: { privateKey: browser.privateKey, publicKey: key }, state, passkey,
+    chain: [{ bytes: b64url(doc), sig: { passkey: proof } }] };
 }
 const lookups = { identityOf: async (p) => states.get(p) ?? null, delegationOf: async (k) => delegations.get(k) ?? null };
 
@@ -213,8 +215,8 @@ check("…nor does one shown in a different order", (await read(post, { entries:
 const emptied = structuredClone(post.entries);
 delete emptied[1].sent;
 const left = await read(post, { entries: emptied });
-check("a comment's words withheld, with nothing signed saying why, shows as left out (and the rest still checks)",
-  !left.problem && left.entries[1].state === "left-out" && left.entries[2].state === "ok", left.problem);
+check("a comment's words withheld, with nothing signed saying why, is the host's doing: the list doesn't check (honest hosts only empty what a delete or removal names)",
+  left.problem === "unexpected" && left.entries[1].state === "left-out", left.problem);
 const reworded = structuredClone(post.entries);
 reworded[1].sent.content = b64url(encode({ text: "Bob never said this" }));
 const rew = await read(post, { entries: reworded });
@@ -272,6 +274,28 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   const noKey = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: shed.list, owner: ann.id, entries: withWords,
     signedHead: await shed.signed(), lookups: { ...lookups, delegationOf: async (k) => (k === bob.browser.publicKey ? null : delegations.get(k) ?? null) } });
   check("…nor one sent without its delegation", noKey.problem === "unexpected", noKey.problem);
+  // …nor one simply left out: the words back, the delete's entry emptied (its fingerprint, time and head kept).
+  const dropped = structuredClone(shed.entries);
+  dropped[1].sent = words;
+  delete dropped[2].sent;
+  check("…nor a delete left out, its words put back", (await read(shed, { entries: dropped })).problem === "unexpected");
+  // A removal whose writer the host left out of who's who (so it can't be judged here), the post it removed still shown.
+  const removable = new Host(ann);
+  const walk = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Walk?" }, ann.browser);
+  await removable.take(walk.sent);
+  writes.set(mineOn(removable, ann), walk.fp);
+  const rude = await writeAndTake(cat, removable, { kind: "comment" }, { text: "Rude" });
+  const words2 = structuredClone(removable.entries[1].sent);
+  await writeAndTake(ann, removable, { kind: "remove", about: rude.fp }, undefined);
+  const unremoved = structuredClone(removable.entries);
+  unremoved[1].sent = words2;
+  const annUnknown = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: removable.list, owner: ann.id, entries: unremoved,
+    signedHead: await removable.signed(), lookups: { ...lookups, identityOf: async (p) => (p === ann.id ? null : states.get(p) ?? null) } });
+  check("…nor a removal by someone the host left unknown, with what it removed shown again", annUnknown.problem === "unexpected", annUnknown.problem);
+  // A comment (not a delete or removal) whose delegation the host leaves out: an honest host always has it.
+  const hidden = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: post.list, owner: ann.id, entries: post.entries,
+    signedHead: await post.signed(), lookups: { ...lookups, delegationOf: async (k) => (k === bob.browser.publicKey ? null : delegations.get(k) ?? null) } });
+  check("…nor a comment sent without its delegation, to hide it quietly", hidden.problem === "unexpected", hidden.problem);
 }
 
 // A full list takes nothing more, but its item can still be deleted or removed, or closed.
@@ -546,6 +570,49 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("…and look-alike letters: digits, Cyrillic, Greek, I and l", fold("B0b Ехаmple") === fold("Bob Example") && fold("Вill") === fold("BiII")
     && fold("Αnn") === fold("Ann") && fold("Mia") !== fold("Mi"), [fold("B0b Ехаmple"), fold("Bob Example")].join(" "));
   check("…but different names stay different", fold("Bob Example") !== fold("Rob Example") && fold("Ann") !== fold("Anne"));
+}
+
+// --- learning people and keeping their keys from what another site sends (identities.js, groupcopies.js) ---------------
+{
+  // A site's whole database, on Node's SQLite, as the site's object has it.
+  const raw = new DatabaseSync(":memory:");
+  const total = () => raw.prepare("SELECT total_changes() AS t").get().t;
+  const storage = {
+    sql: { exec(text, ...params) {
+      const before = total();
+      const rows = raw.prepare(text).all(...params);
+      return { toArray: () => rows, one: () => rows[0], rowsRead: rows.length, rowsWritten: total() - before, columnNames: rows[0] ? Object.keys(rows[0]) : [] };
+    } },
+    transactionSync(fn) { raw.exec("BEGIN"); try { const r = fn(); raw.exec("COMMIT"); return r; } catch (e) { raw.exec("ROLLBACK"); throw e; } },
+  };
+  const env = { DB: local(storage) };
+  await ensureSchema(env); // every migration, as a site runs them
+  const real = Math.floor(Date.now() / 1000);
+  const count = (sql) => raw.prepare(sql).get()?.n ?? 0;
+  const fake = (who, key = "k".repeat(43)) => ({ record: b64url(encode({ v: 2, kind: "comment", author: who.id, key })), sig: "x".repeat(86) });
+  // Someone named as the writer of records that don't check, with their real identity beside them: not learnt.
+  const note = { items: [{ sent: fake(bob), taken: real }] };
+  await learnPeopleIn(env, { [bob.id]: { chain: bob.chain } }, signersIn(note), { from: "https://group.example" });
+  check("a person named only as the writer of records that don't check isn't learnt", count("SELECT COUNT(*) AS n FROM identities") === 0);
+  // With a record of theirs that checks, they are, and it's counted against the site that sent them.
+  const real1 = await makeRecord({ kind: "comment", author: bob.id, host: ann.id, item: "i".repeat(43), seen: null, prev: null }, { text: "hi" }, bob.browser);
+  await learnPeopleIn(env, { [bob.id]: { chain: bob.chain } }, signersIn({ items: [{ sent: real1.sent, taken: real }] }),
+    { delegations: { [bob.browser.publicKey]: delegations.get(bob.browser.publicKey) }, from: "https://group.example" });
+  check("…and one whose record checks is, counted against the site that sent them", count(`SELECT COUNT(*) AS n FROM identities WHERE person = '${bob.id}'`) === 1
+    && count("SELECT n FROM learning WHERE host = 'https://group.example'") === 1);
+  const real2 = await makeRecord({ kind: "comment", author: cat.id, host: ann.id, item: "i".repeat(43), seen: null, prev: null }, { text: "hi" }, cat.browser);
+  await learnPeopleIn(env, { [cat.id]: { chain: cat.chain } }, signersIn({ items: [{ sent: real2.sent, taken: real }] }),
+    { delegations: { [cat.browser.publicKey]: delegations.get(cat.browser.publicKey) } });
+  // Cat (running a group) signs a delegation for Bob's browser key as hers, and names herself the writer of a record
+  // "signed" with it, which doesn't check: Bob's key isn't kept as Cat's.
+  const forBob = encode({ v: 2, kind: "delegation", person: cat.id, key: bob.browser.publicKey, origin: cat.origin, expires: NOW + 30 * DAY });
+  const catsClaim = { bytes: b64url(forBob), proof: await cat.passkey.sign([await fingerprintOf("delegation", forBob)]) };
+  await keepSentKeys(env, [{ key: bob.browser.publicKey, d: catsClaim, records: [{ sent: fake(cat, bob.browser.publicKey), taken: real }] }]);
+  check("a group can't have someone's browser key kept as another's by naming them as the writer of a record that doesn't check",
+    count(`SELECT COUNT(*) AS n FROM known_delegations WHERE key = '${bob.browser.publicKey}'`) === 0);
+  await keepSentKeys(env, [{ key: bob.browser.publicKey, d: delegations.get(bob.browser.publicKey), records: [{ sent: real1.sent, taken: real }] }]);
+  check("…while Bob's own, with a record of his that checks, is kept as his",
+    raw.prepare(`SELECT person FROM known_delegations WHERE key = '${bob.browser.publicKey}'`).get()?.person === bob.id);
 }
 
 process.exit(failed ? 1 : 0);

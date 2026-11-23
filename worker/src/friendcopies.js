@@ -407,7 +407,7 @@ export async function friendThread(env, from, connection, id) {
   // Only those who wrote something in it (identities.js learnPeopleIn); their names kept, so pages elsewhere (a poll's
   // voters, an event's guests) can name them too.
   const learn = async (answer) => {
-    for (const [p, name] of await learnPeopleIn(env, answer.people, signersIn(answer.entries))) names.set(p, name);
+    for (const [p, name] of await learnPeopleIn(env, answer.people, signersIn(answer.entries), { delegations: answer.delegations, from: String(connection.origin) })) names.set(p, name);
   };
   await learn(data);
   const hostState = await identityState(env, person);

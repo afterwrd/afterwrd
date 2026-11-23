@@ -61,11 +61,11 @@ export async function checkHead(signed, { hostingKey, host, list }) {
   return (await checkAs("head", hostingKey, bytes, signed.sig)) ? { n: h.n, head: h.head } : null;
 }
 
-/** Whether a record sent acts on others (deletes, edits, removes, closes, changes…): its failing would change what's shown. */
-function actsOnOthers(sent) {
+/** The record an entry that couldn't be checked says it is, if it acts on another (`about`): only a claim. */
+function claimedAct(sent) {
   let record = null;
   try { record = parseRecord(fromB64url(sent.record)); } catch {}
-  return !record || ABOUT.has(record.kind) || ["close", "end", "change"].includes(record.kind);
+  return record && ABOUT.has(record.kind) && typeof record.about === "string" ? { kind: record.kind, about: record.about } : null;
 }
 
 /**
@@ -319,9 +319,10 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
     const answer = e.sent ? await recordTrouble(e.sent, { ...lookups, at: e.taken }) : null;
     const got = answer?.got ?? null;
     // Only a writer nobody here can judge (unknown, frozen or closed) leaves a record shown as failed. A record changed
-    // on the way, or an act on another (a delete, an edit, a removal…) sent without what lets it be checked, is the
-    // host's doing: otherwise it could undo a delete by spoiling it, or blank someone's words.
-    if (answer && !got && (answer.why === "bad" || (answer.why === "key" && actsOnOthers(e.sent)))) { problem = "unexpected"; break; }
+    // on the way, or sent without the delegation that lets it be checked (an honest host always has it: it keeps every
+    // one it took a record with), is the host's doing: otherwise it could undo a delete by spoiling it, blank someone's
+    // words, or quietly hide a comment, or a vote or an answer so an older one counts.
+    if (answer && !got && (answer.why === "bad" || answer.why === "key")) { problem = "unexpected"; break; }
     if (got) {
       const why = rules.refuse(got, e.taken, { checkpointed: rules.from });
       if (why) { problem = "unexpected"; break; }
@@ -330,18 +331,27 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
     if (e.head !== head) { problem = "broken"; break; }
     checked.push(e);
     shown.push({ n: e.n, fp: e.fp, taken: e.taken, state: got ? "ok" : e.sent ? "failed" : "gone", record: got?.record ?? null, content: got?.content, by: got?.record.author ?? null,
-      ...(got?.byHost && { byHost: true }) });
+      ...(got?.byHost && { byHost: true }), ...(!got && e.sent && { claimed: claimedAct(e.sent) }) });
   }
   // The end must be what the host signed.
   const end = shown.length ? { n: shown.at(-1).n, head: rules.heads.get(shown.at(-1).n) } : from;
   const signed = await checkHead(signedHead, { hostingKey, host, list });
   if (!problem && (!signed || !end || signed.n !== end.n || signed.head !== end.head)) problem = "broken";
-  // What became of each record that's gone: a signed delete by its writer, or a removal; otherwise it was left out.
+  // What became of each record that's gone: a signed delete by its writer, or a removal. A host only ever empties an
+  // entry when one names it (hosted.js), and sends everything from where a reader starts to the list's end, so the act
+  // is always in what's read. One emptied with nothing that names it is the host's doing (it could bring back deleted
+  // words, or undo an edit or a removal, by leaving the act out), unless the act is there but its writer can't be
+  // judged here (`claimed`): then the words are gone either way.
   for (const s of shown) {
     if (s.state !== "gone") continue;
     const by = shown.find((o) => o.record && (o.record.kind === "delete" || o.record.kind === "remove") && o.record.about === s.fp);
+    if (!by && !shown.some((o) => o.claimed?.about === s.fp) && !problem) problem = "unexpected";
     s.state = by ? (by.record.kind === "delete" ? "deleted" : "removed") : "left-out";
     if (by?.record.kind === "remove") s.removedBy = by.record.author;
   }
+  // An act on another record whose writer can't be judged here, while what it acts on is still shown with its words:
+  // the host left out who that writer is (an admin removing a post, say), so the act wouldn't count.
+  if (!problem && shown.some((o) => ["delete", "remove"].includes(o.claimed?.kind) && shown.some((t) => t.fp === o.claimed.about && t.state === "ok"))) problem = "unexpected";
+  for (const s of shown) delete s.claimed;
   return { entries: shown, upTo: end?.n ?? 0, head: end?.head ?? "", problem, rules };
 }

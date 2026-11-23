@@ -13,6 +13,7 @@ import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/st
 import { checkDelegation } from "./identity.js";
 import { json, now } from "./util.js";
 import { later } from "./later.js";
+import { recordTrouble } from "./records.js";
 
 const MAX_CHAIN = 200;
 const MAX_REPLY = 512 * 1024;
@@ -110,42 +111,65 @@ export async function learnIdentity(env, chain, { owner = null } = {}) {
 }
 
 const MAX_NEW = 1100; // identities new to this site one answer can have it learn: a group's or a friend's thousand, and a few
+// …and one site sending them, in a day (UTC): a 1,000-member group's first pull, and its growth (table `learning`).
+const NEW_PER_DAY = 3000;
 
-/** Everyone who signed a record anywhere in `value` (an answer or note, as decoded: records are `{record, sig}`). */
+/**
+ * Everyone who wrote a record anywhere in `value` (an answer or note, as decoded: records are `{record, sig}`, often
+ * as an entry's `sent` beside its `taken`), with those records: person -> [{sent, at}]. Only a claim: learnPeopleIn
+ * checks one of each new person's records before learning them.
+ * @returns {Map<string, { sent: { record: string, sig: string }, at: number }[]>}
+ */
 export function signersIn(value) {
-  const out = new Set();
-  const walk = (v, depth) => {
+  const out = new Map();
+  const walk = (v, depth, taken) => {
     if (!v || typeof v !== "object" || depth > 8) return;
     if (typeof v.record === "string" && typeof v.sig === "string") {
       try {
         const author = JSON.parse(new TextDecoder().decode(fromB64url(v.record)))?.author;
-        if (typeof author === "string") out.add(author);
+        if (typeof author === "string") {
+          if (!out.has(author)) out.set(author, []);
+          const mine = out.get(author);
+          if (mine.length < 3) mine.push({ sent: v, at: Number.isSafeInteger(taken) ? taken : now() }); // with its words, if any
+        }
       } catch {}
     }
-    for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1);
+    const here = Number.isSafeInteger(v.taken) ? v.taken : taken;
+    for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1, here);
   };
-  walk(value, 0);
+  walk(value, 0, null);
   return out;
 }
 
 /**
- * Learns, from `people` as another site passed them on ({person: {chain, profile?}}), only those in `wanted` (who signed
- * something in what it sent: signersIn), and at most MAX_NEW this site didn't know: a host can't fill this site with
- * identities, or use up its writes, by sending ones nobody needs. Returns their signed names, checked (person -> name).
- * @param {Env} env @param {any} people @param {Set<string>} wanted
+ * Learns, from `people` as another site passed them on ({person: {chain, profile?}}), only those in `signers` (who wrote
+ * something in what it sent: signersIn); someone this site doesn't know yet only once one of their records there
+ * checks against their chain (read here first, keeping nothing), with `delegations` (the answer's) or those kept here;
+ * at most MAX_NEW new ones an answer, and NEW_PER_DAY a day from `from` (the site that sent them). So a host can't fill
+ * this site with identities, or use up its writes, by sending ones nobody signed anything with. Returns their signed
+ * names, checked (person -> name).
+ * @param {Env} env @param {any} people @param {Map<string, { sent: any, at: number }[]>} signers
+ * @param {{ delegations?: any, from?: string }} [options]
  */
-export async function learnPeopleIn(env, people, wanted) {
+export async function learnPeopleIn(env, people, signers, { delegations = null, from = "" } = {}) {
   const names = new Map();
-  const asked = Object.entries(people && typeof people === "object" ? people : {}).filter(([p]) => wanted.has(p) && /^[A-Za-z0-9_-]{43}$/.test(p));
+  const asked = Object.entries(people && typeof people === "object" ? people : {}).filter(([p]) => signers.has(p) && /^[A-Za-z0-9_-]{43}$/.test(p));
   if (!asked.length) return names;
   const { results } = await env.DB.prepare("SELECT person FROM identities WHERE person IN (SELECT value FROM json_each(?))")
     .bind(JSON.stringify(asked.map(([p]) => p))).all();
   const known = new Set(results.map((r) => String(r.person)));
+  const day = Math.floor(now() / 86400);
+  const used = from ? Number((await env.DB.prepare("SELECT n FROM learning WHERE host = ? AND day = ?").bind(from, day).first())?.n ?? 0) : 0;
+  const room = Math.min(MAX_NEW, NEW_PER_DAY - used);
   let fresh = 0;
   for (const [p, info] of asked) {
-    if (!known.has(p) && fresh++ >= MAX_NEW) continue;
     const chain = parseChain(info?.chain);
-    const state = chain && (await learnIdentity(env, chain));
+    if (!chain) continue;
+    if (!known.has(p)) {
+      if (fresh >= room || !(await wroteHere(env, chain, p, signers.get(p) ?? [], delegations))) continue;
+      fresh++;
+    }
+    const state = await learnIdentity(env, chain);
     if (!state || state.id !== p) continue;
     const profile = info.profile && (await checkProfile(info.profile, state));
     if (profile) {
@@ -153,7 +177,26 @@ export async function learnPeopleIn(env, people, wanted) {
       await keepNewerProfile(env.DB, p, info.profile, profile.at);
     }
   }
+  if (from && fresh) {
+    await env.DB.prepare(`INSERT INTO learning (host, day, n) VALUES (?, ?, ?) ON CONFLICT(host, day) DO UPDATE SET n = n + excluded.n`)
+      .bind(from, day, fresh).run();
+    await env.DB.prepare("DELETE FROM learning WHERE day < ?").bind(day - 1).run();
+  }
   return names;
+}
+
+/** Whether one of `records` (by `person`) checks against `chain` read as it is here, keeping nothing. */
+async function wroteHere(env, chain, person, records, delegations) {
+  const state = await readChain(env.DB, chain, await seenTimes(env.DB, chain));
+  if (!state || state.id !== person || state.problem) return false;
+  const delegationOf = async (key) => delegations?.[key]
+    ?? await env.DB.prepare("SELECT bytes, proof FROM known_delegations WHERE key = ? AND person = ?").bind(key, person).first()
+      .then((r) => (r ? { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) } : null));
+  for (const { sent, at } of records) {
+    const answer = await recordTrouble(sent, { identityOf: async (q) => (q === person ? state : null), delegationOf, at });
+    if (answer?.got) return true;
+  }
+  return false;
 }
 
 /** Fetches the identity a site's address gives, learns it, and checks it names that address; null if not. */

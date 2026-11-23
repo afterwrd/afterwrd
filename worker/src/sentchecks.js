@@ -340,7 +340,7 @@ async function checkHost(env, from, me, host, where, rows) {
     return;
   }
   // Only those who signed something in the answer (identities.js learnPeopleIn).
-  const learnt = await learnPeopleIn(env, data.people, signersIn(data));
+  const learnt = await learnPeopleIn(env, data.people, signersIn(data), { delegations: data.delegations, from: origin });
   const mayRemove = await removersAt(env, host, where, data);
   const answers = new Map((Array.isArray(data.results) ? data.results : []).map((r) => [r?.fp, r]));
   for (const row of asking) {

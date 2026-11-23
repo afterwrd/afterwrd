@@ -1452,10 +1452,14 @@ A reader sorts every empty entry as follows (`checkList`):
 |---|---|
 | `deleted` | A `delete` in the entries shown has `about` equal to its fingerprint. |
 | `removed` | A `remove` in the entries shown has `about` equal to its fingerprint (`removedBy` is that remover). |
-| `left-out` | Nothing signed in the entries shown says why it is empty. |
+| `left-out` | Nothing in the entries shown says why it is empty. |
 
-`left-out` is the host leaving something out without a signed reason. Reading from a checkpoint can make an empty entry
-before the checkpoint look `left-out`, because its marker isn't shown; the marker always comes after its target.
+A host sends everything from where a reader starts to the list's end, and a marker always comes after its target, so
+an honest host's empty entry always has its marker in what's read. A `left-out` entry is the host leaving something
+out (a `delete` or `remove` left out brings its target's words back), so the list is **unexpected**, unless an entry
+shown as `failed` (its writer can't be judged here) says it is the `delete` or `remove` of it: then the words are gone
+either way. A `failed` entry that says it deletes or removes an entry still shown with its words makes the list
+**unexpected** too: the host left out who its writer is, so the act wouldn't count.
 
 When a writer's site asks what became of its records (`POST /_p/records/check`, section 8), the host answers `deleted`
 or `removed` with `marker: {sent, taken}`, the signed record that emptied it and when it was taken. The writer's site
@@ -1543,8 +1547,10 @@ delegations. Starting at `from` (or at 0 with head ""), for each entry in order:
 2. If it has `sent`, `fingerprintOf("record", record bytes)` must equal `fp`. Otherwise **broken**: the host put in a
    different record.
 3. If `sent` passes `checkRecord` (5.3) at time `taken`, the list rules must accept it as the next entry (below).
-   If they refuse, **unexpected**: an entry no honest host would have taken. If `sent` doesn't pass `checkRecord`, the
-   entry is shown as `failed` (hidden) and counted as an entry whose record is gone.
+   If they refuse, **unexpected**: an entry no honest host would have taken. If `sent` doesn't pass `checkRecord`
+   because its writer can't be judged here (unknown, frozen or closed), the entry is shown as `failed` (hidden) and
+   counted as an entry whose record is gone. Any other failure (a signature that doesn't check, words missing or
+   changed, no delegation for its key: an honest host keeps every delegation it took a record with) is **unexpected**.
 4. The reader computes the running head (6.3); it must equal the entry's `head`. Otherwise **broken**.
 
 At the end, `signedHead` must pass `checkHead` for this host and list, and its `n` and `head` must equal the last entry
@@ -3756,8 +3762,8 @@ Source: `src/friendcalls.js` `handleFriendCalls`; `src/checks.js` `askForCheck`,
   passing a record along can't make one that checks.
 - **No quiet edits, drops or reordering.** Each list entry's running head covers everything before it, and readers
   recompute every head and check the host's signature on the end (section 6). A host that rewrites anything a reader
-  has already checked shows up as a fork to that reader (6.11). An emptied entry is either explained by a signed
-  `delete` or `remove`, or shown as left out.
+  has already checked shows up as a fork to that reader (6.11). An emptied entry must be explained by a signed
+  `delete` or `remove` in what the reader reads; otherwise the list doesn't check (`unexpected`).
 - **Records stay where they belong.** A record names its host and item, and its fingerprint is its id, so it can't be
   replayed onto another list or another site, and a second copy is a `duplicate`.
 - **Hosts are caught out by their own receipts.** A writer keeps the host's signed receipt for each record and asks

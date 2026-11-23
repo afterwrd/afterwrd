@@ -20,3 +20,7 @@ export { MemberRules } from "../../src/members.js";
 export { local } from "../../src/sqlite.js";
 // Names as the owner knows people (step 7b).
 export { fold } from "../../src/names.js";
+// What lists.mjs tests of learning people and keeping their keys (the review of the fixes: F1, F2).
+export { learnPeopleIn, signersIn } from "../../src/identities.js";
+export { keepSentKeys } from "../../src/groupcopies.js";
+export { ensureSchema } from "../../src/migrate.js";

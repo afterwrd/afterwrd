@@ -90,7 +90,7 @@ export async function checkMembers(env, group, data, { rules = null } = {}) {
   if (!state) state = await fetchIdentity(env, String(group.origin));
   if (!state || state.id !== person || state.frozen) throw new Refusal("The group's identity doesn't check.");
   // Only those who signed something on the list (identities.js learnPeopleIn).
-  await learnPeopleIn(env, data.people, signersIn(data.entries));
+  await learnPeopleIn(env, data.people, signersIn(data.entries), { delegations: data.delegations, from: String(group.origin) });
   // A group with nobody in it yet but its owner has nothing on its list, and nothing for the group to sign.
   const entries = Array.isArray(data.entries) ? data.entries : [];
   if (!entries.length && !rules) {

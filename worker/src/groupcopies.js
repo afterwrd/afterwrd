@@ -19,7 +19,6 @@ import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDa
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { identityState, learnPeopleIn, signersIn } from "./identities.js";
-import { checkDelegation } from "./identity.js";
 import { frozenUntil, ID_RE, keepKnown, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
@@ -53,7 +52,7 @@ const snippet = (text) => (typeof text === "string" ? text.replace(/\s+/g, " ").
  * Those a group sent (`people`: {person: {chain, profile}}) who signed something in what it sent (`sent`: the answer or
  * note), learnt and checked here, with their signed names (identities.js learnPeopleIn).
  */
-const learnPeople = (env, people, sent) => learnPeopleIn(env, people, signersIn(sent));
+const learnPeople = (env, people, sent, group) => learnPeopleIn(env, people, signersIn(sent), { delegations: sent?.delegations, from: String(group.origin) });
 
 /** What to say when a group's site refused a call: if it's had a lot from this one today (allowances.js), that. */
 const busyMessage = (group, error) => (busyUntil(error) ? `${group.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message);
@@ -87,7 +86,7 @@ export async function pullGroup(env, from, group) {
     // Anything signed as the owner here that this site never sent (sentchecks.js).
     if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
     const sentKeys = await fillGaps(env, from, group, data);
-    await learnPeople(env, data.people, data);
+    await learnPeople(env, data.people, data, group);
     await keepSentKeys(env, sentKeys);
     const rules = await copyRules(env, group, data);
     const statements = [];
@@ -119,12 +118,13 @@ export async function pullGroup(env, from, group) {
  */
 async function fillGaps(env, from, group, data) {
   const db = env.DB;
-  const sents = [];
+  const sents = []; // [{sent, taken}]
   for (const item of Array.isArray(data.items) ? data.items.slice(0, 60) : []) {
-    sents.push(item?.sent, ...(Array.isArray(item?.records) ? item.records.slice(0, 60).map((x) => x?.sent) : []));
+    sents.push({ sent: item?.sent, taken: item?.taken }, ...(Array.isArray(item?.records) ? item.records.slice(0, 60).map((x) => ({ sent: x?.sent, taken: x?.taken })) : []));
   }
-  for (const proof of Object.values(data.roles ?? {}).slice(0, 50)) sents.push(proof?.join, proof?.role);
-  const records = sents.map((x) => (typeof x?.record === "string" ? parseRecord(fromB64url(x.record)) : null)).filter(Boolean);
+  for (const proof of Object.values(data.roles ?? {}).slice(0, 50)) sents.push({ sent: proof?.join }, { sent: proof?.role });
+  const parsed = sents.map((x) => ({ ...x, record: typeof x.sent?.record === "string" ? parseRecord(fromB64url(x.sent.record)) : null })).filter((x) => x.record);
+  const records = parsed.map((x) => x.record);
   if (!records.length) return [];
   const sent = data.delegations && typeof data.delegations === "object" ? data.delegations : {};
   data.delegations = { ...sent };
@@ -149,24 +149,34 @@ async function fillGaps(env, from, group, data) {
       for (const [k, d] of Object.entries(asked)) if (keys.includes(k)) data.delegations[k] ??= d;
     }
   }
-  // Those it was sent (not those it had), to keep once the people in it are learnt (keepSentKeys), each with the person
-  // who signed a record here with that key.
-  const signer = new Map(records.map((r) => [String(r.key), String(r.author)]));
-  return Object.entries({ ...sent, ...asked }).filter(([key]) => signer.has(key)).map(([key, d]) => ({ key, person: signer.get(key), d }));
+  // Those it was sent (not those it had), to keep once the people in it are learnt (keepSentKeys), each with the records
+  // here said to be signed with that key: one of them has to check with it before it's kept.
+  const signed = new Map();
+  for (const x of parsed) {
+    const key = String(x.record.key);
+    if (!signed.has(key)) signed.set(key, []);
+    if (signed.get(key).length < 3) signed.get(key).push(x);
+  }
+  return Object.entries({ ...sent, ...asked }).filter(([key]) => signed.has(key)).map(([key, d]) => ({ key, d, records: signed.get(key) }));
 }
 
 /**
- * Keeps the delegations a group sent (fillGaps), one row each, as people's devices sign in: only one that checks against
- * the identity of the person who signed with that key, so a group can't have this site keep someone's key as another's.
+ * Keeps the delegations a group sent (fillGaps), one row each, as people's devices sign in: only one a record signed with
+ * that key checks with, as its writer's (the rule items.js keepIfSigned keeps for bringing things over).
  */
-async function keepSentKeys(env, sentKeys) {
-  const states = new Map();
-  for (const { key, person, d } of sentKeys ?? []) {
+export async function keepSentKeys(env, sentKeys) {
+  for (const { key, d, records } of sentKeys ?? []) {
     const bytes = typeof d?.bytes === "string" ? fromB64url(d.bytes) : null;
     if (!bytes) continue;
-    if (!states.has(person)) states.set(person, await identityState(env, person));
-    const state = states.get(person);
-    if (!state || state.frozen || (await checkDelegation(bytes, d.proof, state, now())) !== key) continue;
+    // Kept only if a record here really signed with that key checks with it, as its writer's: the group can't have this
+    // site keep someone's key as another's by naming them as the writer of a record that doesn't check.
+    let person = null;
+    for (const x of records) {
+      const at = Number.isSafeInteger(x.taken) ? x.taken : now();
+      const got = await checkRecord(x.sent, { identityOf: (p) => identityState(env, p), delegationOf: async (k) => (k === key ? d : null), at });
+      if (got && got.record.key === key) { person = got.record.author; break; }
+    }
+    if (!person) continue;
     await keepKnown(env.DB, { key, person, bytes: d.bytes, proof: d.proof, expires: decode(bytes).expires });
   }
 }
@@ -260,7 +270,7 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
   let data;
   try { data = await ask(env, from, group, `/_p/items?before=${Number(before)}`); } catch (e) { return { info: null, posts: [], error: e, next: null }; }
   info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
-  await learnPeople(env, data.people, data);
+  await learnPeople(env, data.people, data, group);
   const rules = await copyRules(env, group, data);
   const rows = [];
   for (const item of Array.isArray(data.items) ? data.items.slice(0, PAGE_SIZE) : []) {
@@ -334,7 +344,7 @@ export async function groupThread(env, from, group, id, people = []) {
   const owner = String(state.current.owner);
   const host = String(group.identity);
   const me = await ownHost(env);
-  let signed = await learnPeople(env, data.people, data);
+  let signed = await learnPeople(env, data.people, data, group);
   let admins = await checkRoles(env, group, owner, data.roles, data.delegations);
   const check = (entries, from, kept = null) => checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
     entries, signedHead: data.signedHead, from, kept, lookups: lookupsWith(env, data.delegations), group: { owner, admin: (p) => admins.has(p) } });
@@ -355,7 +365,7 @@ export async function groupThread(env, from, group, id, people = []) {
     } else {
       // Doesn't follow on from where this site got to: the whole conversation, as before, to show what it is now.
       try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
-      signed = new Map([...signed, ...(await learnPeople(env, data.people, data))]);
+      signed = new Map([...signed, ...(await learnPeople(env, data.people, data, group))]);
       admins = await checkRoles(env, group, owner, data.roles, data.delegations);
     }
   }
@@ -517,7 +527,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const g = Number(group.id);
   const link = (target) => `/groups/${g}/posts/${target}`;
   if (note.kind === "item") {
-    await learnPeople(env, note.people, note);
+    await learnPeople(env, note.people, note, group);
     const kept = await keepCopy(env, { group: g, host, site: String(group.origin), rules: await copyRules(env, group, {}) }, note.item, note.delegations);
     if (!kept) return json({ error: "That isn't a post in this group." }, 400);
     await kept.statement.run();
@@ -577,7 +587,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const head = await headOf({ host, list, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  const signed = await learnPeople(env, note.people, note);
+  const signed = await learnPeople(env, note.people, note, group);
   const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
   if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== host || got.record.item !== item
     || (got.record.date ?? null) !== date) {
@@ -656,7 +666,7 @@ async function groupClosed(env, url, group, me, note) {
   const head = await headOf({ host, list: host, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list: host });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  const signed = await learnPeople(env, note.people, note);
+  const signed = await learnPeople(env, note.people, note, group);
   const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
   // Only the group's owner closes it.
   if (!got || got.fp !== entry.fp || got.record.kind !== "close" || got.record.host !== host || got.record.item !== host
@@ -706,7 +716,7 @@ export async function groupDate(env, from, group, id, date, admins = new Set()) 
   try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: busyMessage(group, error) }; }
   const mine = (await env.DB.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(dateList(id, date)).first())?.fp ?? null;
   if (data?.empty === true) return { answers: {}, off: null, seen: null, mine, problem: null };
-  await learnPeople(env, data.people, data);
+  await learnPeople(env, data.people, data, group);
   const state = await identityState(env, String(group.identity));
   if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
   const copy = await env.DB.prepare("SELECT author FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
@@ -736,7 +746,7 @@ export async function broughtPost(env, from, group, n) {
 export async function fetchGroupItem(env, from, group, id, people = []) {
   let data;
   try { data = await ask(env, from, group, `/_p/items?id=${id}`); } catch { return null; }
-  await learnPeople(env, data.people, data);
+  await learnPeople(env, data.people, data, group);
   const item = Array.isArray(data.items) ? data.items.find((i) => i?.id === id) : null;
   const kept = item && (await keepCopy(env, { group: Number(group.id), host: String(group.identity), site: String(group.origin), rules: await copyRules(env, group, data) }, item, data.delegations));
   if (kept) await kept.statement.run();

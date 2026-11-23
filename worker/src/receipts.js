@@ -16,7 +16,7 @@ import { friendThread } from "./friendcopies.js";
 import { groupThread } from "./groupcopies.js";
 import { checkProfile, identityState } from "./identities.js";
 import { ID_RE, ownHost } from "./items.js";
-import { checkHead } from "./lists.js";
+import { checkHead, headOf } from "./lists.js";
 import { keepNotice, tellMention } from "./notes.js";
 import { outbox } from "./outbox.js";
 import { checkRecord } from "./records.js";
@@ -153,10 +153,14 @@ export async function checkGroupReceipts(env, from, group, only = null) {
     const thread = threads.get(item);
     if (thread.error) continue;
     const at = thread.entries.find((e) => e.n === Number(r.n));
-    // Not in what was read (it started after that point, from a checkpoint, or stopped at a problem, which says so
-    // itself): asked again later, rather than said to be hidden.
-    if (!at && (thread.problem || Number(r.n) < (thread.entries[0]?.n ?? Infinity))) continue;
-    const state = at && at.fp === r.fp && at.head === r.head ? "ok" : "hidden";
+    // Stopped at a problem, which says so itself: asked again later.
+    if (!at && thread.problem) continue;
+    // Before what was read (the host started from a checkpoint after it): read again from the receipt itself.
+    const state = at ? (at.fp === r.fp && at.head === r.head ? "ok" : "hidden")
+      : Number(r.n) < (thread.entries[0]?.n ?? Infinity)
+        ? await stillThere(env, (n) => callFriend(env, from, String(group.origin), `/_p/items/${item}?after=${n}`, { timeout: 25_000 }), String(group.identity), item, r)
+        : "hidden";
+    if (!state) continue;
     await db.prepare("UPDATE mention_receipts SET state = ?, checked_at = ? WHERE fp = ?").bind(state, now(), r.fp).run();
     if (state === "hidden") {
       const said = await db.prepare("SELECT actor, target FROM notices WHERE kind = 'mention' AND fp = ?").bind(r.fp).first();
@@ -185,10 +189,14 @@ export async function checkReceipts(env, from, connection, only = null) {
     // The host away (or refusing the owner here: that's for its own notices): asked again later.
     if (thread.error) continue;
     const at = thread.entries.find((e) => e.n === Number(r.n));
-    // Not in what was read (it started after that point, from a checkpoint, or stopped at a problem, which says so
-    // itself): asked again later, rather than said to be hidden.
-    if (!at && (thread.problem || Number(r.n) < (thread.entries[0]?.n ?? Infinity))) continue;
-    const state = at && at.fp === r.fp && at.head === r.head ? "ok" : "hidden";
+    // Stopped at a problem, which says so itself: asked again later.
+    if (!at && thread.problem) continue;
+    // Before what was read (the host started from a checkpoint after it): read again from the receipt itself.
+    const state = at ? (at.fp === r.fp && at.head === r.head ? "ok" : "hidden")
+      : Number(r.n) < (thread.entries[0]?.n ?? Infinity) && thread.host
+        ? await stillThere(env, (n) => callFriend(env, from, String(connection.origin), `/_p/items/${item}?after=${n}`), String(thread.host), item, r)
+        : "hidden";
+    if (!state) continue;
     await db.prepare("UPDATE mention_receipts SET state = ?, checked_at = ? WHERE fp = ?").bind(state, now(), r.fp).run();
     if (state === "hidden") {
       const said = await db.prepare("SELECT actor, target FROM notices WHERE kind = 'mention' AND fp = ?").bind(r.fp).first();
@@ -196,4 +204,28 @@ export async function checkReceipts(env, from, connection, only = null) {
         actor: said?.actor ? String(said.actor) : "Someone", text: null });
     }
   }
+}
+
+/**
+ * Whether the host's list still runs on from receipt `r` (its entry `r.n`, with running fingerprint `r.head`) to the end
+ * it signs now: read from just after it, each entry's head worked out from the receipt's. Running fingerprints chain,
+ * so reaching the signed end from the receipt's head means the comment is still where the host said it took it. "ok",
+ * "hidden", or null (the host away, or the post gone: asked again later).
+ */
+async function stillThere(env, read, host, list, r) {
+  const hostState = await identityState(env, host);
+  if (!hostState) return null;
+  let data;
+  try { data = await read(Number(r.n)); } catch { return null; }
+  if (!data || data.deleted || !Array.isArray(data.entries)) return null;
+  let prev = String(r.head);
+  let n = Number(r.n);
+  for (const e of data.entries) {
+    if (!e || e.n !== n + 1 || typeof e.fp !== "string" || !Number.isSafeInteger(e.taken)) return "hidden";
+    prev = await headOf({ host, list, prev, n: e.n, fp: e.fp, taken: e.taken });
+    if (e.head !== prev) return "hidden";
+    n = e.n;
+  }
+  const signed = await checkHead(data.signedHead, { hostingKey: hostState.current.hosting, host, list });
+  return signed && signed.n === n && signed.head === prev ? "ok" : "hidden";
 }
