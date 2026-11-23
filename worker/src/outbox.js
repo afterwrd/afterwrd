@@ -48,6 +48,10 @@ function moving(request) {
   return new Response(JSON.stringify({ error: message }), { status: 503, headers: { ...headers, "Content-Type": "application/json" } });
 }
 
+
+const NOTE_BYTES = 64 * 1024; // what a site takes in a POST (calls.js bodyBytes)
+const byteLength = (text) => new TextEncoder().encode(text).length;
+
 /**
  * Each fat note's body for its recipient (a friend's connection, or in a group's site a member), and the signed call
  * that sends it: [{known, call?: {url, headers, body}, error?}], in order. `known`: the friend or member is still here
@@ -71,10 +75,17 @@ export async function prepareNotes(env, calls, group) {
     if (!friend) return { known: false };
     if (!me) return { known: true, error: "Set up signing first." };
     try {
-      const body = group ? await groupNoteFor(env, note, friend, shared) : await noteFor(env, note, friend, shared);
+      let body = group ? await groupNoteFor(env, note, friend, shared) : await noteFor(env, note, friend, shared);
       if (!body) return { known: true };
       const url = `${friend.origin}/_p/notes`;
-      const text = JSON.stringify(body);
+      let text = JSON.stringify(body);
+      // Over what a site takes (calls.js bodyBytes), a new post goes without its edits and changes (its first words);
+      // their next pull brings the rest. Anything still too big isn't sent at all: it would only be refused.
+      if (byteLength(text) > NOTE_BYTES && body.kind === "item" && Array.isArray(body.item?.records)) {
+        body = { ...body, item: { ...body.item, records: [] } };
+        text = JSON.stringify(body);
+      }
+      if (byteLength(text) > NOTE_BYTES) return { known: true };
       const headers = await signCall({ method: "POST", url, body: text, person: me.person, from: group ? groupOrigin : String(note.origin),
         privateKey: me.privateKey });
       return { known: true, call: { url, headers, body: text } };
@@ -327,9 +338,10 @@ export class Outbox extends DurableObject {
             if (!response.ok) throw Object.assign(new Error(`answered ${response.status}`), { status: response.status });
             delivered = true;
           } catch (error) {
-            // Not reached, or busy: tried again later. Anything else won't change by asking again.
+            // Not reached, busy, or moving here and not there yet (409: calls.js friendCalling): tried again later.
+            // Anything else won't change by asking again.
             const status = /** @type {any} */ (error).status;
-            again = status === 0 || status >= 500 || status === 429 || status === undefined;
+            again = status === 0 || status >= 500 || status === 429 || status === 409 || status === undefined;
           }
         }
       }

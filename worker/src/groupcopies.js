@@ -18,7 +18,7 @@ import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
-import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
+import { checkProfile, identityState, keepNewerProfile, learnIdentity, parseChain } from "./identities.js";
 import { frozenUntil, ID_RE, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
@@ -59,7 +59,7 @@ async function learnPeople(env, people) {
     const profile = info.profile && (await checkProfile(info.profile, state));
     if (profile) {
       names.set(p, profile.name);
-      await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(info.profile), p).run();
+      await keepNewerProfile(env.DB, p, info.profile, profile.at);
     }
   }
   return names;
@@ -101,7 +101,7 @@ export async function pullGroup(env, from, group) {
     const rules = await copyRules(env, group, data);
     const statements = [];
     for (const item of Array.isArray(data.items) ? data.items.slice(0, 60) : []) {
-      const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules }, item, data.delegations);
+      const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), site: String(group.origin), rules }, item, data.delegations);
       if (kept) statements.push(kept.statement);
     }
     for (const id of Array.isArray(data.gone) ? data.gone.slice(0, 500) : []) {
@@ -265,7 +265,7 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
   const rows = [];
   for (const item of Array.isArray(data.items) ? data.items.slice(0, PAGE_SIZE) : []) {
     // Checked as a copy would be, then shown from what was checked, without keeping it.
-    const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules }, item, data.delegations);
+    const kept = await keepCopy(env, { group: Number(group.id), host: String(group.identity), site: String(group.origin), rules }, item, data.delegations);
     if (!kept) continue;
     rows.push({ id: item.id, group_id: group.id, author: kept.record.author, record: JSON.stringify(item.sent), content: JSON.stringify(kept.content),
       earlier: JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []), edited_at: Number.isSafeInteger(item.edited_at) ? item.edited_at : null,
@@ -517,7 +517,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const link = (target) => `/groups/${g}/posts/${target}`;
   if (note.kind === "item") {
     await learnPeople(env, note.people);
-    const kept = await keepCopy(env, { group: g, host, rules: await copyRules(env, group, {}) }, note.item, note.delegations);
+    const kept = await keepCopy(env, { group: g, host, site: String(group.origin), rules: await copyRules(env, group, {}) }, note.item, note.delegations);
     if (!kept) return json({ error: "That isn't a post in this group." }, 400);
     await kept.statement.run();
     const id = String(note.item.id);
@@ -728,7 +728,7 @@ export async function fetchGroupItem(env, from, group, id, people = []) {
   try { data = await ask(env, from, group, `/_p/items?id=${id}`); } catch { return null; }
   await learnPeople(env, data.people);
   const item = Array.isArray(data.items) ? data.items.find((i) => i?.id === id) : null;
-  const kept = item && (await keepCopy(env, { group: Number(group.id), host: String(group.identity), rules: await copyRules(env, group, data) }, item, data.delegations));
+  const kept = item && (await keepCopy(env, { group: Number(group.id), host: String(group.identity), site: String(group.origin), rules: await copyRules(env, group, data) }, item, data.delegations));
   if (kept) await kept.statement.run();
   return kept ? groupCopy(env, group, id, people) : null;
 }

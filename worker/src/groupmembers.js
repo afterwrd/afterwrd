@@ -7,7 +7,7 @@
 //                                owner) close (step 6e: groups.js)
 //   GET  /_group/members         …with `list`: the members list as signed, for members' sites to check
 import { checkCall, signCall } from "./signedcalls.js";
-import { hostingKeyFor, identityState, checkProfile } from "./identities.js";
+import { hostingKeyFor, identityState, checkProfile, keepNewerProfile } from "./identities.js";
 import { lookupsFor, ownHost } from "./items.js";
 import { listEntries, readList, takeRecord } from "./hosted.js";
 import { MemberRules } from "./members.js";
@@ -38,7 +38,7 @@ export async function signedMember(request, env, url) {
   if (!member) return null;
   const body = request.method === "POST" ? new Uint8Array(await request.clone().arrayBuffer()) : null;
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
-    { ownOrigin: url.origin, hostingKeyOf: (person, site) => (person === member.identity && site === member.origin ? hostingKeyFor(env, person, site) : null) });
+    { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => (person === member.identity && site === member.origin ? hostingKeyFor(env, person, site, options) : null) });
   if (!caller) return null;
   // Within their allowance here today, or refused (allowances.js); not the group's owner, whose own account it is.
   if (member.role !== "owner") await admit(env, String(member.identity));
@@ -86,7 +86,7 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
   const said = await contentOf(got.record, body.sent.content, body.sent.salt);
   const named = { name: typeof said?.name === "string" && said.name.trim() ? said.name.trim().slice(0, 100) : null };
   const profile = body.profile && (await checkProfile(body.profile, got.state));
-  if (profile) await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(body.profile), caller.person).run();
+  if (profile) await keepNewerProfile(env.DB, caller.person, body.profile, profile.at);
   await env.DB.batch([
     env.DB.prepare("DELETE FROM group_members WHERE origin = ? AND approved_at IS NULL").bind(caller.from),
     env.DB.prepare(`INSERT INTO group_members (group_id, origin, name, identity, join_fp, created_at)

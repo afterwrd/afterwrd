@@ -882,19 +882,24 @@ check("…and goes from Ann's copy", sql(stateA, `SELECT COUNT(*) AS n FROM copi
   const bobPerson = sql(stateB, "SELECT person FROM own_identity")[0].person;
   const bobHosting = await crypto.subtle.importKey("pkcs8", Buffer.from(sql(stateB, "SELECT value FROM settings WHERE key = 'hosting_key'")[0].value, "base64url"),
     { name: "Ed25519" }, false, ["sign"]);
-  const profileUrl = `${A}/_p/profile`;
+  const profileUrl = `${A}/_p/items?since=0`;
   const signedByBob = await signCall({ method: "GET", url: profileUrl, person: bobPerson, from: B, privateKey: bobHosting });
   const fromBob = await fetch(profileUrl, { headers: signedByBob });
   const got = fromBob.status === 200 ? await fromBob.json() : null;
-  check("Bob's site, signing its call, gets Ann's signed profile", got?.profile && JSON.parse(Buffer.from(got.profile.bytes, "base64url").toString()).name === annName,
+  check("Bob's site, signing its call, gets Ann's signed profile with her posts", got?.profile && JSON.parse(Buffer.from(got.profile.bytes, "base64url").toString()).name === annName,
     `${fromBob.status}`);
   check("…having checked Bob's identity at his own address", sql(stateA, `SELECT origin, origin_checked_at FROM identities WHERE person = '${bobPerson}'`)[0]?.origin === B
     && sql(stateA, `SELECT origin_checked_at FROM identities WHERE person = '${bobPerson}'`)[0].origin_checked_at > 0);
   check("an unsigned call from Bob's site gets nothing", (await fetch(profileUrl, { headers: { "Afterwrd-From": B } })).status === 401);
-  check("…nor does a site that isn't Ann's friend, signed or not", (await fetch(profileUrl, { headers: { ...signedByBob, "Afterwrd-From": "http://localhost:8790" } })).status === 403
-    && (await fetch(profileUrl)).status === 403);
+  check("…nor does a site that isn't Ann's friend, signed or not", (await fetch(profileUrl, { headers: { ...signedByBob, "Afterwrd-From": "http://localhost:8790" } })).status === 401
+    && (await fetch(profileUrl)).status === 401);
   check("…nor Bob's signed call, sent again after 5 minutes", (await fetch(profileUrl, { headers: await signCall({ method: "GET", url: profileUrl, person: bobPerson, from: B,
     privateKey: bobHosting, at: Math.floor(Date.now() / 1000) - 400 }) })).status === 401);
+  // Nothing else under /_p/ is there: a plain 404, never the sign-in page (whose 401 a friend's site reads as "removed").
+  const unknown = await fetch(`${A}/_p/profile`, { method: "POST", headers: await signCall({ method: "POST", url: `${A}/_p/profile`, body: "{}", person: bobPerson, from: B,
+    privateKey: bobHosting }), body: "{}" });
+  check("a call this site doesn't have gets 404, not 401", unknown.status === 404 && (await fetch(`${A}/_p/nothing`, { redirect: "manual" })).status === 404,
+    `${unknown.status}`);
 }
 
 // Phone view of the Feed, then disconnect.

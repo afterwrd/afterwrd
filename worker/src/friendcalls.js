@@ -6,7 +6,7 @@
 //   POST /_p/check-request        their owner asks the owner here to check their site (checks.js)
 //   POST /_p/check-token          their site asks for a one-hour read-only token to check this one by itself
 //   POST /_p/check-soon           their site was just updated: check it soon (friendchecks.js)
-//   POST /_p/check-failed         {site, version, problems}: their site checked this one and found something
+//   POST /_p/check-failed         {site, version, found}: their site checked this one and found something
 //   POST /_p/checked              {site, version}: their site checked this one and found it genuine (checks.js)
 //   GET  /_p/posts?page=n         the owner's Facebook archive and albums, for their friend pages, through share.js:
 //   GET  /_p/posts/<key>            Facebook's posts (if shared), one post, albums, an album's photos, one photo;

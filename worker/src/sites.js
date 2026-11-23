@@ -45,7 +45,10 @@ export async function callSite(origin, path, { key, body, timeout = TIMEOUT_MS }
   let data = {};
   try {
     data = JSON.parse(await readLimited(response, MAX_REPLY));
-  } catch {}
+  } catch (error) {
+    // More than a site ever sends isn't an answer: as if it hadn't answered at all.
+    if (/** @type {any} */ (error)?.tooBig) throw Object.assign(new Error(`${host(origin)} sent too much.`), { status: 0 });
+  }
   // Whatever else a site answers (null, a list, a number) counts as saying nothing.
   if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
   if (!response.ok) {
@@ -56,8 +59,13 @@ export async function callSite(origin, path, { key, body, timeout = TIMEOUT_MS }
 }
 
 export async function readLimited(response, limit) {
+  return new TextDecoder().decode(await readBytesLimited(response, limit));
+}
+
+/** A reply's bytes, read a piece at a time and stopped as soon as it's over `limit` (throws, with `tooBig`). */
+export async function readBytesLimited(response, limit) {
   const reader = response.body?.getReader();
-  if (!reader) return "";
+  if (!reader) return new Uint8Array();
   const parts = [];
   let size = 0;
   for (;;) {
@@ -66,9 +74,9 @@ export async function readLimited(response, limit) {
     size += value.byteLength;
     if (size > limit) {
       await reader.cancel();
-      throw new Error("Reply too big.");
+      throw Object.assign(new Error("Reply too big."), { tooBig: true });
     }
     parts.push(value);
   }
-  return new TextDecoder().decode(await new Blob(parts).arrayBuffer());
+  return new Uint8Array(await new Blob(parts).arrayBuffer());
 }

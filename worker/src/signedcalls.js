@@ -57,7 +57,7 @@ export async function signCall({ method, url, body = null, person, from, private
  * it. `hostingKeyOf(person, from)` gives that person's current hosting key (base64url) if the receiver knows, or can
  * learn from `from`, who they are; null if not. `body` is the call's body as received (bytes), if any. Never throws.
  * @param {{ method: string, url: string, headers: Headers, body?: Uint8Array | null }} call
- * @param {{ ownOrigin: string, hostingKeyOf: (person: string, from: string) => Promise<string | null>, at?: number }} options
+ * @param {{ ownOrigin: string, hostingKeyOf: (person: string, from: string, options?: { again?: boolean }) => Promise<string | null>, at?: number }} options
  * @returns {Promise<{ person: string, from: string } | null>}
  */
 export async function checkCall({ method, url, headers, body = null }, { ownOrigin, hostingKeyOf, at = Math.floor(Date.now() / 1000) }) {
@@ -82,13 +82,19 @@ export async function checkCall({ method, url, headers, body = null }, { ownOrig
       digest = headers.get("Content-Digest") ?? "";
       if (digest !== `sha-256=:${std64(await sha256(body))}:`) return null;
     }
+    const signedBase = utf8(base({ method: method.toUpperCase(), target, from, digest, params }));
+    const verifies = async (key) => {
+      const raw = key && fromB64url(key);
+      if (!raw || raw.length !== 32) return false;
+      const publicKey = await crypto.subtle.importKey("raw", raw, ED25519, false, ["verify"]);
+      return crypto.subtle.verify(ED25519, publicKey, fromStd64(sig[1]), signedBase);
+    };
     const key = await hostingKeyOf(person, from);
-    const raw = key && fromB64url(key);
-    if (!raw || raw.length !== 32) return null;
-    const publicKey = await crypto.subtle.importKey("raw", raw, ED25519, false, ["verify"]);
-    const ok = await crypto.subtle.verify(ED25519, publicKey, fromStd64(sig[1]),
-      utf8(base({ method: method.toUpperCase(), target, from, digest, params })));
-    return ok ? { person, from } : null;
+    if (await verifies(key)) return { person, from };
+    // Their hosting key may have changed since the receiver learnt it: asked again (the receiver limits how often),
+    // and checked once more if it's another.
+    const again = key && (await hostingKeyOf(person, from, { again: true }));
+    return again && again !== key && (await verifies(again)) ? { person, from } : null;
   } catch { return null; }
 }
 

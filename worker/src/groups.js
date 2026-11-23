@@ -134,8 +134,8 @@ export async function groupObject(db, site, group, member) {
 }
 
 /**
- * Who's in the group. For an admin (`all`), requests to join too. With the members list as signed (`afterwrd:list`),
- * for the member's site to check and sign by, and each member's identity and join.
+ * Who's in the group. For an admin (`all`), requests to join too. With each member's identity and join; the members
+ * list as signed, to check and sign by, is GET /_group/members/list.
  */
 async function groupMembers(env, site, group, member, { all = false } = {}) {
   const db = env.DB;
@@ -151,7 +151,6 @@ async function groupMembers(env, site, group, member, { all = false } = {}) {
       ...(all && !m.approved_at && m.rejoined && { "afterwrd:before": true }),
       ...(m.identity && { "afterwrd:person": m.identity, "afterwrd:join": m.join_fp ?? undefined }),
     })),
-    "afterwrd:list": await signedMembers(env),
   });
 }
 

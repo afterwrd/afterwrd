@@ -18,7 +18,7 @@
 //   POST /_p/check-token    {type: "CheckToken"}: an access token for a check (a few a day; the same token, while it
 //                           has long enough left, so friends checking at once don't end each other's)
 //   POST /_p/check-soon     {type: "CheckSoon"}: their site was just updated; please check it soon
-//   POST /_p/check-failed   {type: "CheckFailed", site, version, problems}: their check of this site found something
+//   POST /_p/check-failed   {type: "CheckFailed", site, version, found}: their check of this site found something
 //                           (a pass is POST /_p/checked, as for a check by link: checks.js)
 // The checking site: runFriendChecks(), after the daily automatic-update run, has each part of a check done by a
 // request to its own address (auto.js step(), so each gets the free plan's 50 outside calls): "fc-site" (the code and

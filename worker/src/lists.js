@@ -99,6 +99,8 @@ export class Rules {
     if (record.host !== this.host) return "That belongs somewhere else.";
     if (record.kind === "item") {
       if (n !== 1 || fp !== this.list) return "That isn't this item.";
+      // Whoever the list says it's by must have written it: a reader takes `owner` from the host, the first time.
+      if (this.owner && record.author !== this.owner) return "That isn't by whoever this list says.";
       return null;
     }
     if (listOf(record, fp) !== this.list) return "That belongs to something else.";
@@ -108,7 +110,8 @@ export class Rules {
       if (record.kind !== "answer" && record.kind !== "calloff") return "That doesn't belong to one date.";
       if (this.off) return "That date's been called off.";
     }
-    if (this.closed && record.kind !== "remove") return "This is closed.";
+    // Closed: nothing new, but what's there can still go (its writer deleting it, or a removal).
+    if (this.closed && record.kind !== "remove" && record.kind !== "delete") return "This is closed.";
     // The cap stops anyone filling a list up; it never stops someone deleting what's theirs.
     // Not the item's owner's changes (inviting people to an event one by one, say, mustn't run out); their words and
     // comments are held to it like anyone's.

@@ -184,7 +184,7 @@ export async function signedGroup(request, env, url) {
   if (!group) return null;
   const body = request.method === "POST" ? new Uint8Array(await request.clone().arrayBuffer()) : null;
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
-    { ownOrigin: url.origin, hostingKeyOf: (person, site) => (person === group.identity && site === group.origin ? hostingKeyFor(env, person, site) : null) });
+    { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => (person === group.identity && site === group.origin ? hostingKeyFor(env, person, site, options) : null) });
   if (!caller) return null;
   await admit(env, String(group.identity)); // within its allowance here today, or refused (allowances.js)
   return group;

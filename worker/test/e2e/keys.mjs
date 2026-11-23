@@ -32,9 +32,9 @@ async function softPasskey(origin = A) {
   return {
     passkey: { id, key: b64url(cose), origin },
     /** Signs fingerprints in one prompt, as navigator.credentials.get would. */
-    async sign(statements, { uv = true, at = origin, n = nonce() } = {}) {
+    async sign(statements, { uv = true, at = origin, n = nonce(), framed = false } = {}) {
       const challenge = await statementsChallenge(n, statements);
-      const clientData = utf8(JSON.stringify({ type: "webauthn.get", challenge, origin: at, crossOrigin: false }));
+      const clientData = utf8(JSON.stringify({ type: "webauthn.get", challenge, origin: at, crossOrigin: framed }));
       const authData = concat(await sha256(utf8(new URL(at).hostname)), bytes([uv ? 0x05 : 0x01]), bytes([0, 0, 0, 0]));
       const raw = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, kp.privateKey, concat(authData, await sha256(clientData))));
       return { credential: id, nonce: n, statements, response: { authenticatorData: b64url(authData), clientDataJSON: b64url(clientData), signature: b64url(der(raw)) } };
@@ -102,6 +102,7 @@ check("…or for someone else", (await checkDelegation(other, await phone.sign([
 
 check("a passkey proof without checking it's you (no fingerprint or PIN) is refused", !(await checkPasskeyProof(await phone.sign([dFp], { uv: false }), phone.passkey, dFp)));
 check("…as is one made at another site", !(await checkPasskeyProof(await phone.sign([dFp], { at: "https://evil.example" }), phone.passkey, dFp)));
+check("…or in a page framed inside another site's", !(await checkPasskeyProof(await phone.sign([dFp], { framed: true }), phone.passkey, dFp)));
 const swapped = await phone.sign([dFp]);
 swapped.statements = [gFp];
 check("…or with its list of statements changed", !(await checkPasskeyProof(swapped, phone.passkey, gFp)));
@@ -210,27 +211,27 @@ check("oversized or malformed documents aren't identities", (await readIdentity(
     return { method, url, headers, body: body == null ? null : utf8(body) };
   };
   const ok = (c, opts = {}) => checkCall(c, { ownOrigin: new URL(c.url).origin, hostingKeyOf: keyOf, at: NOW, ...opts });
-  check("a signed call says who's calling", (await ok(await call("GET", `${A}/_p/profile`)))?.person === bobPerson);
+  check("a signed call says who's calling", (await ok(await call("GET", `${A}/_p/items`)))?.person === bobPerson);
   check("…with a body too", (await ok(await call("POST", `${A}/_p/records`, '{"a":1}')))?.from === B);
-  check("a call signed for one site can't be replayed to another", (await ok(await call("GET", "https://cat.example/_p/profile", null, { signedUrl: `${A}/_p/profile` }))) === null);
-  check("…nor to another address on the same site", (await ok(await call("GET", `${A}/_p/other`, null, { signedUrl: `${A}/_p/profile` }))) === null);
-  check("a call more than 5 minutes old (or ahead) is refused", (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW - CLOCK_SECONDS - 1 }))) === null
-    && (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW + CLOCK_SECONDS + 1 }))) === null
-    && (await ok(await call("GET", `${A}/_p/profile`, null, { at: NOW - CLOCK_SECONDS + 5 })))?.person === bobPerson);
+  check("a call signed for one site can't be replayed to another", (await ok(await call("GET", "https://cat.example/_p/items", null, { signedUrl: `${A}/_p/items` }))) === null);
+  check("…nor to another address on the same site", (await ok(await call("GET", `${A}/_p/other`, null, { signedUrl: `${A}/_p/items` }))) === null);
+  check("a call more than 5 minutes old (or ahead) is refused", (await ok(await call("GET", `${A}/_p/items`, null, { at: NOW - CLOCK_SECONDS - 1 }))) === null
+    && (await ok(await call("GET", `${A}/_p/items`, null, { at: NOW + CLOCK_SECONDS + 1 }))) === null
+    && (await ok(await call("GET", `${A}/_p/items`, null, { at: NOW - CLOCK_SECONDS + 5 })))?.person === bobPerson);
   const changed = await call("POST", `${A}/_p/records`, '{"a":1}');
   changed.body = utf8('{"a":2}');
   check("a changed body is refused", (await ok(changed)) === null);
   const dropped = await call("POST", `${A}/_p/records`, '{"a":1}');
   dropped.body = null;
   check("…and so is one with its body taken away", (await ok(dropped)) === null);
-  check("a call signed with another key is refused", (await ok(await call("GET", `${A}/_p/profile`, null, { key: (await newKeyPair()).privateKey }))) === null);
-  const moved = await call("GET", `${A}/_p/profile`);
+  check("a call signed with another key is refused", (await ok(await call("GET", `${A}/_p/items`, null, { key: (await newKeyPair()).privateKey }))) === null);
+  const moved = await call("GET", `${A}/_p/items`);
   moved.headers.set("Afterwrd-From", "https://evil.example");
   check("…as is one claiming to come from somewhere else", (await ok(moved)) === null);
-  check("…or from someone the receiver can't find", (await ok(await call("GET", `${A}/_p/profile`, null, { person: "c".repeat(43) }))) === null);
-  const bare = await call("GET", `${A}/_p/profile`);
+  check("…or from someone the receiver can't find", (await ok(await call("GET", `${A}/_p/items`, null, { person: "c".repeat(43) }))) === null);
+  const bare = await call("GET", `${A}/_p/items`);
   bare.headers.delete("Signature");
-  check("an unsigned call is refused", (await ok(bare)) === null && (await ok({ method: "GET", url: `${A}/_p/profile`, headers: new Headers() })) === null);
+  check("an unsigned call is refused", (await ok(bare)) === null && (await ok({ method: "GET", url: `${A}/_p/items`, headers: new Headers() })) === null);
 }
 
 // --- profiles (identities.js checkProfile) ------------------------------------------------------------------------

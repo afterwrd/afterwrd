@@ -87,6 +87,10 @@ export async function checkPasskeyProof(proof, passkey, statement) {
     if (![r.authenticatorData, r.clientDataJSON, r.signature].every((x) => typeof x === "string" && B64URL_RE.test(x))) return false;
     const key = fromB64url(passkey.key);
     if (!key) return false;
+    // Only from a page of the passkey's own site, never one framed inside another site's (the WebAuthn library checks
+    // this only when it's told the outer page).
+    const client = decode(fromB64url(r.clientDataJSON));
+    if (!client || client.crossOrigin === true || client.topOrigin !== undefined) return false;
     // The same proof of the same passkey always checks the same way, so each is checked once (a thread page by five
     // people carries five delegations fifty times: step 9c measured the WebAuthn check as most of its CPU).
     const memo = [passkey.id, passkey.key, passkey.origin, proof.nonce, proof.statements.join(","), r.authenticatorData, r.clientDataJSON, r.signature].join("\n");

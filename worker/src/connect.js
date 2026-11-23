@@ -143,7 +143,11 @@ async function ask(request, env, url) {
   const notAllowed = () => json({ error: NOT_ALLOWED }, 403);
   const via = await reasonFor(env, origin, body.via);
   if (!via) return notAllowed();
-  // Only requests with a reason are counted (in the same statement, so ones sent all at once can't slip past).
+  // With a reason, the call has earned a check of its signature (which may fetch the asker's identity, from an address
+  // that has a reason to ask). Only then is it counted, so nobody can use up another site's asks by naming it.
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller || caller.from !== origin) return notAllowed();
+  // Counted in the same statement, so ones sent all at once can't slip past.
   const at = now();
   const [, counted] = await db.batch([
     db.prepare("DELETE FROM ask_log WHERE at < ?").bind(at - 3600),
@@ -151,8 +155,6 @@ async function ask(request, env, url) {
       AND (SELECT COUNT(*) FROM ask_log WHERE origin = ?2 AND at > ?1 - ?5) < ?4 RETURNING at`).bind(at, origin, ASKS.hour, ASKS.perSite, rateWindow(3600)),
   ]);
   if (!counted.results.length) return json({ error: "Lots of people are asking to be friends just now. Try again later." }, 429);
-  const caller = await siteCalling(request, env, url, bytes);
-  if (!caller || caller.from !== origin) return notAllowed();
   // Proved: now it may hear how things stand between it and the owner here.
   const existing = await db.prepare("SELECT approved_at FROM connections WHERE origin = ? AND connected_at IS NOT NULL").bind(origin).first();
   if (existing?.approved_at) return json({ error: "You're already friends." }, 409);
@@ -228,7 +230,7 @@ export async function receiveIntroduction(env, url, peer, body) {
   // Only from a friend who has approved the owner here too (not just someone the owner asked): their site has
   // answered this one. If it never has, it's asked once now.
   if (!peer.reached_at && (await pullItems(env, url.origin, peer)) === null) {
-    return [{ error: `${await ownerName(db)} hasn't approved you as a friend yet.` }, 403];
+    return [{ error: `You haven't approved ${await ownerName(db)} as a friend yet.` }, 403];
   }
   // Already friends (or asking), turned down, or already introduced by them: nothing to do, and nothing said about which.
   const known = await db.prepare(`SELECT 1 FROM connections WHERE origin = ?1 AND connected_at IS NOT NULL

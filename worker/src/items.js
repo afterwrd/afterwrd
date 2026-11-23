@@ -224,6 +224,7 @@ export async function takePost(env, host, { sent, post, photosSent, photos, gues
       .bind(id, host.person, JSON.stringify(post.content), written, answer.entry.taken, id,
         post.record.audience ? "invited" : "friends", id, post.content.poll ? JSON.stringify({ votes: {}, ended_at: null })
           : post.content.type === "event" ? JSON.stringify({ answers: {} }) : null, frozen),
+    ...(post.record.audience ? [db.prepare("UPDATE lists SET invited = 1 WHERE id = ?").bind(id)] : []),
     ...guests.map((g) => db.prepare("INSERT INTO item_guests (item, connection_id, person, added_at) VALUES (?, ?, ?, ?)")
       .bind(id, g.connection, g.person, answer.entry.taken)),
     ...taken.flatMap((t, i) => [
@@ -248,11 +249,13 @@ export async function itemGone(env, id) {
   const db = env.DB;
   const files = (await db.prepare("SELECT hash, thumb_hash FROM media WHERE item_id = ?").bind(id).all()).results;
   await db.batch([
+    // An event for those invited: only they hear it's gone (friendhost.js `gone`), so nobody else learns it existed.
+    db.prepare("UPDATE lists SET invited = 1 WHERE id = ?1 AND EXISTS (SELECT 1 FROM items WHERE id = ?1 AND audience = 'invited')").bind(id),
+    db.prepare("INSERT OR REPLACE INTO item_uninvited (item, connection_id, at) SELECT item, connection_id, ? FROM item_guests WHERE item = ?").bind(now(), id),
     db.prepare("DELETE FROM items WHERE id = ?").bind(id),
     db.prepare("DELETE FROM media WHERE item_id = ?").bind(id),
     db.prepare("DELETE FROM item_photos WHERE photo = ?").bind(id),
     db.prepare("DELETE FROM item_guests WHERE item = ?").bind(id),
-    db.prepare("DELETE FROM item_uninvited WHERE item = ?").bind(id),
     // The "Posted on afterwrd" album goes once nothing's in it.
     db.prepare("DELETE FROM albums WHERE role = 'posts' AND NOT EXISTS (SELECT 1 FROM media m WHERE m.album_id = albums.id)"),
   ]);

@@ -9,12 +9,13 @@
 import { rateWindow } from "./limits.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
-import { answersAsAfterwrd, fetchIdentity, identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { answersAsAfterwrd, fetchIdentity, identityState, keepNewerProfile, learnIdentity, parseChain, checkProfile } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
 import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
+import { signedLink } from "./friends.js";
 import { DATE_RE, parseRecord, writtenAt } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { frozenUntil, itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
@@ -154,9 +155,8 @@ export async function pullItems(env, from, connection) {
     // Their signed name now (a rename shows on Friends: names.js).
     if (page === 0 && data.profile) {
       const state = await identityState(env, person);
-      if (state && (await checkProfile(data.profile, state))) {
-        await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(data.profile), person).run();
-      }
+      const named = state && (await checkProfile(data.profile, state));
+      if (named) await keepNewerProfile(env.DB, person, data.profile, named.at);
     }
     const statements = [noteAnswer(env.DB, connection)];
     for (const item of Array.isArray(data.items) ? data.items : []) {
@@ -184,7 +184,7 @@ export async function pullItems(env, from, connection) {
  * content} or null.
  */
 export function keepItem(env, connection, person, item, delegations) {
-  return keepCopy(env, { connection: Number(connection.id), host: person, author: person }, item, delegations);
+  return keepCopy(env, { connection: Number(connection.id), host: person, author: person, site: String(connection.origin) }, item, delegations);
 }
 
 /**
@@ -193,13 +193,13 @@ export function keepItem(env, connection, person, item, delegations) {
  * a post is worked out from what's signed (signedNow), not from what its host says it says; `rules` ({owner, admins})
  * say who may call off someone's event in a group. Returns {statement (keeping it), record, content} or null.
  */
-export async function keepCopy(env, { connection = null, group = null, host, author = null, rules = null }, item, delegations) {
+export async function keepCopy(env, { connection = null, group = null, host, author = null, rules = null, site }, item, delegations) {
   if (!ID_RE.test(item?.id ?? "")) return null;
   const got = await checkRecord(item.sent, { ...lookupsWith(env, delegations), at: Number(item.taken) });
   if (!got || got.fp !== item.id || got.record.kind !== "item" || got.record.host !== host || (author && got.record.author !== author)) return null;
   // Its words and details as its signed records make them, never as its host says: a friend's site isn't its writer's
   // browser either, and could be taken over or run by a bad release (section 10).
-  item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules })) };
+  item = { ...item, ...(await signedNow(env, got, item, delegations, { host, rules, site })) };
   // When it was written: brought over from afterwrd 1, when it first was (records.js `before`); otherwise when taken.
   const written = writtenAt(got.record, Number(item.taken));
   // A poll is as its signed first record asked it; an event is as its site says it is now (its changes are signed
@@ -211,7 +211,7 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
   const skipped = group && event?.rrule && Array.isArray(item.content.event.skipped)
     ? item.content.event.skipped.filter((d) => typeof d === "string" && hasDate(event, d)).slice(0, 60) : [];
   const content = { text: typeof item.content?.text === "string" ? item.content.text.slice(0, 5000) : "",
-    photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20).filter((p) => /^https?:\/\//.test(p?.src ?? "")),
+    photos: (Array.isArray(item.content?.photos) ? item.content.photos : []).slice(0, 20),
     ...(Array.isArray(got.content?.mentions) && { mentions: shownMentions(got.record, got.content) }),
     ...(group && got.content?.here === true && { here: true }),
     ...(got.content?.poll && !pollTrouble(got.content.poll, written) && { poll: got.content.poll }),
@@ -243,9 +243,10 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
  * checked, worked out as its host works it out (items.js itemFromList). Returns what replaces the host's own word:
  * {content (its words, photos with the host's links to them, event), earlier, edited_at}.
  */
-async function signedNow(env, got, item, delegations, { host, rules }) {
+async function signedNow(env, got, item, delegations, { host, rules, site }) {
   const entries = [{ n: 1, fp: got.fp, taken: Number(item.taken), sent: item.sent }];
-  for (const x of Array.isArray(item.records) ? item.records.slice(0, 60) : []) {
+  // The newest 60: an event's latest change is the whole event as it is now (an owner's changes aren't capped).
+  for (const x of Array.isArray(item.records) ? item.records.slice(-60) : []) {
     if (!Number.isSafeInteger(x?.taken)) continue;
     const r = await checkRecord(x.sent, { ...lookupsWith(env, delegations), at: x.taken });
     if (!r || r.record.item !== item.id || r.record.host !== host) continue;
@@ -257,11 +258,14 @@ async function signedNow(env, got, item, delegations, { host, rules }) {
   }
   const worked = itemFromList(item.id, { author: got.record.author, content: "{}", audience: "group" }, entries, null);
   const now_ = JSON.parse(worked.content);
-  // Its photos as signed, each with the group's link to its file, if the group sent one for that very photo.
+  // Its photos as signed, each with its host's links to its files, if the host sent them for that very photo, and they
+  // are exactly its own links to those files: they end up in pages (a thumbnail even in style="…").
   const links = new Map((Array.isArray(item.content?.photos) ? item.content.photos : []).map((p) => [p?.item, p]));
   const photos = (Array.isArray(now_.photos) ? now_.photos : []).flatMap((p) => {
     const l = links.get(p.item);
-    return l && l.hash === p.hash && l.thumb_hash === p.thumb_hash ? [{ ...p, src: l.src, thumbSrc: l.thumbSrc }] : [];
+    const src = l && l.hash === p.hash && l.thumb_hash === p.thumb_hash && signedLink(site, l.src, p.hash);
+    const thumbSrc = src && signedLink(site, l.thumbSrc, p.thumb_hash);
+    return thumbSrc ? [{ ...p, src, thumbSrc }] : [];
   });
   return { content: { ...now_, photos }, earlier: worked.earlier ? JSON.parse(worked.earlier) : [], edited_at: worked.edited_at };
 }
@@ -410,7 +414,7 @@ export async function friendThread(env, from, connection, id) {
       if (profile) {
         names.set(p, profile.name);
         // Kept, so pages elsewhere (a poll's voters, an event's guests) can name them too.
-        await db.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(info.profile), p).run();
+        await keepNewerProfile(db, p, info.profile, profile.at);
       }
     }
   };

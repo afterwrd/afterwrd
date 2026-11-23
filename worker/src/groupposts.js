@@ -32,7 +32,7 @@ import { signedLink } from "./friends.js";
 import { closedGroup, copyPhotos, GROUP_BYTES, groupGone, groupObject, HERE_LIMITS, isAdmin, MAX_GROUP_PHOTOS, MAX_GROUP_TEXT, PHOTO_BYTES, POST_RATE, theGroup, THUMB_BYTES } from "./groups.js";
 import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
 import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
-import { checkProfile, identityState } from "./identities.js";
+import { checkProfile, identityState, keepNewerProfile } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
 import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
 import { ownIdentity } from "./keys.js";
@@ -44,7 +44,7 @@ import { says } from "./mentions.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
 import { outbox } from "./outbox.js";
 import { DATE_RE, parseRecord } from "../public/static/records.js";
-import { fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { selfHosted } from "./hosting.js";
 import { ownUsage } from "./allowances.js";
@@ -83,9 +83,8 @@ export async function groupRules(env, self, admins) {
 export async function keepProfile(env, person, profile) {
   if (!profile) return;
   const state = await identityState(env, person);
-  if (state && (await checkProfile(profile, state))) {
-    await env.DB.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(profile), person).run();
-  }
+  const named = state && (await checkProfile(profile, state));
+  if (named) await keepNewerProfile(env.DB, person, profile, named.at);
 }
 
 export async function handleGroupItems(request, env, url) {
@@ -175,7 +174,8 @@ export async function handleGroupItems(request, env, url) {
     // ?after=: a member's site that checked up to there asks only for what's after (threads.js).
     const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
     const list = await readList(db, one[2] ? dateList(one[1], one[2]) : one[1], { host: self, after });
-    if (!list || list.owner === self.person) return json({ error: "Not found." }, 404); // not the members list: that's /_group/members
+    // Not the members list (its id is the group's own): that's /_group/members/list.
+    if (!list || one[1] === self.list) return json({ error: "Not found." }, 404);
     if (list.deleted) return json({ error: "Deleted.", deleted: true }, 410);
     const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
     const acting = [...new Set(records.filter((r) => (r.kind === "remove" || r.kind === "calloff") && r.author !== self.owner && r.author !== self.person)
@@ -226,7 +226,10 @@ async function roleProofs(env, self, people) {
     const record = e.sent && parseRecord(fromB64url(e.sent.record));
     if (!record) continue;
     if (record.kind === "join" && wanted.has(record.author)) joins.set(e.fp, { person: record.author, sent: e.sent });
-    if (record.kind === "role" && record.author === self.owner && joins.has(record.about)) {
+    // The owner's newest record making them an admin: a later one making them a member again doesn't undo what they did
+    // as an admin before it (the group checked their role at the time, role_at), so it isn't the proof sent.
+    if (record.kind === "role" && record.author === self.owner && joins.has(record.about)
+      && decode(fromB64url(e.sent.content ?? ""))?.role === "admin") {
       const j = joins.get(record.about);
       out[j.person] = { join: j.sent, role: e.sent };
     }

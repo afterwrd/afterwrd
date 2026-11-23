@@ -18,7 +18,7 @@
 import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
 import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList } from "./hosted.js";
-import { checkProfile, identityState } from "./identities.js";
+import { checkProfile, identityState, keepNewerProfile } from "./identities.js";
 import { checkDelegation } from "./identity.js";
 import { ownHost, recordOn } from "./items.js";
 import { signedFile } from "./share.js";
@@ -143,8 +143,9 @@ export async function handleFriendItems(request, env, url, work) {
       WHERE i.type = 'post' AND i.changed_at > ?2 AND ${SEES()} ORDER BY i.changed_at LIMIT ?3`).bind(caller.connection.id, since, PAGE + 1).all();
     const more = results.length > PAGE;
     const rows = results.slice(0, PAGE);
-    // Deleted since, and events this friend's invitation to was taken back from (nobody else learns they exist).
-    const { results: gone } = await db.prepare(`SELECT id FROM lists WHERE deleted_at > ?2
+    // Deleted since (an event only to those it was for), and events this friend's invitation to was taken back from, or
+    // that were deleted while they were invited: nobody else learns they existed.
+    const { results: gone } = await db.prepare(`SELECT id FROM lists WHERE deleted_at > ?2 AND invited = 0
       UNION SELECT item FROM item_uninvited WHERE connection_id = ?1 AND at > ?2`).bind(caller.connection.id, since).all();
     const items = await Promise.all(rows.map((r) => itemForFriend(env, url.origin, r, caller.connection.id)));
     // Up to the last change sent, but never this second: something changing later this second would otherwise be
@@ -206,7 +207,7 @@ export async function handleFriendItems(request, env, url, work) {
       .bind(record.key, caller.person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
     // Their signed name, kept to pass on with the thread (peopleFor), so others in it can name them.
     const named = profile && (await checkProfile(profile, state));
-    if (named) await db.prepare("UPDATE identities SET profile = ? WHERE person = ?").bind(JSON.stringify(profile), caller.person).run();
+    if (named) await keepNewerProfile(db, caller.person, profile, named.at);
     const host = await ownHost(env);
     const answer = await recordOn(env, host, record.item, sent, url.origin);
     if (answer.refused) return json({ error: answer.refused }, 409);

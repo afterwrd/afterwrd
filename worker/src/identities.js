@@ -2,15 +2,13 @@
 //   GET /.well-known/afterwrd   this site's owner's identity: every identity document, and nothing else (keys, the
 //                               site's address, a recovery key: no name or picture). Public, so anyone can check
 //                               something the owner signed, wherever they met it.
-//   GET /_p/profile             the owner's signed profile (their name), only to a signed call (signedcalls.js) from a
-//                               friend's site: until protocol 2's ties replace them, a friend is a site the owner
-//                               approved (connections), whose identity names that address.
+// Friends get the owner's signed profile (their name) with their posts (friendhost.js) and when making friends
+// (connect.js), never on its own.
 // Learning someone's identity checks every document (identity.js), notes when this site first saw each (the 7 days of
 // a slow change run from then), keeps the longest chain that reads cleanly, and freezes an identity seen in two
 // different versions: someone holding one of its keys is fighting the owner, so nothing it signs is trusted.
 import { forked, moveOf, ownerOf, readIdentity } from "./identity.js";
-import { checkCall } from "./signedcalls.js";
-import { siteOrigin } from "./sites.js";
+import { readBytesLimited, siteOrigin } from "./sites.js";
 import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { checkDelegation } from "./identity.js";
 import { json, now } from "./util.js";
@@ -33,15 +31,25 @@ export function parseChain(value) {
 
 const storedChain = (chain) => JSON.stringify(chain.map(({ bytes, sig }) => ({ bytes: b64url(bytes), sig })));
 
-/** When this site first saw each document of `chain` (noting now for any it hasn't), as a lookup. */
-async function seenTimes(db, chain) {
+/**
+ * When this site first saw each document of `chain`, as a lookup: now for any it hasn't. Nothing is noted here: only a
+ * document that has read cleanly is (noteSeen), or anyone could hand this site a change's bytes, unsigned, days before
+ * signing them, and so start its 7 days early.
+ */
+export async function seenTimes(db, chain) {
   const fps = await Promise.all(chain.map((d) => fingerprintOf("identity", d.bytes)));
   const at = now();
-  await db.batch(fps.map((fp) => db.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(fp, at)));
   const { results } = await db.prepare("SELECT fp, first_seen FROM identity_seen WHERE fp IN (SELECT value FROM json_each(?))")
     .bind(JSON.stringify(fps)).all();
   const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
   return (fp) => seen.get(fp) ?? at;
+}
+
+/** Notes now as when this site first saw each document of `chain` (one that has read cleanly), unless it saw it before. */
+export async function noteSeen(db, chain) {
+  const fps = await Promise.all(chain.map((d) => fingerprintOf("identity", d.bytes)));
+  const at = now();
+  await db.batch(fps.map((fp) => db.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(fp, at)));
 }
 
 /**
@@ -77,6 +85,7 @@ export async function learnIdentity(env, chain, { owner = null } = {}) {
   const at = now();
   const found = await cleanest(db, chain, firstSeen, at);
   if (!found) return null;
+  await noteSeen(db, found.chain);
   const { state } = found;
   const row = await db.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(state.id).first();
   const known = row && parseChain(JSON.parse(String(row.chain)));
@@ -104,8 +113,8 @@ export async function fetchIdentity(env, origin) {
   if (!site) return null;
   const response = await fetch(`${site}/.well-known/afterwrd`, { redirect: "manual", signal: AbortSignal.timeout(FETCH_MS) }).catch(() => null);
   if (!response?.ok) return null;
-  const bytes = new Uint8Array(await response.arrayBuffer().catch(() => new ArrayBuffer(0)));
-  const data = bytes.length && bytes.length <= MAX_REPLY ? decode(bytes) : null;
+  const bytes = await readBytesLimited(response, MAX_REPLY).catch(() => new Uint8Array());
+  const data = bytes.length ? decode(bytes) : null;
   const chain = parseChain(data?.chain);
   const state = chain && (await learnIdentity(env, chain, { owner: parseChain(data?.owner) }));
   if (!state || state.frozen || state.current.origin !== site) return null;
@@ -148,9 +157,19 @@ async function stateIn(db, person) {
   return state && { ...state, frozen: Boolean(row.frozen_at) };
 }
 
+const REFETCH_SECONDS = 600;
+
 /** The hosting key `person` signs calls from `from` with: from what's known, or by fetching their identity from there. */
-export async function hostingKeyFor(env, person, from) {
-  const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
+export async function hostingKeyFor(env, person, from, { again = false } = {}) {
+  const row = await env.DB.prepare("SELECT chain, frozen_at, updated_at FROM identities WHERE person = ?").bind(person).first();
+  // Asked again (a signature that didn't check with the key known): fetched afresh, but not more than every 10 minutes
+  // for anyone, so bad signatures can't make this site fetch from them over and over.
+  if (again) {
+    if (!row || row.frozen_at || Number(row.updated_at ?? 0) > now() - REFETCH_SECONDS) return null;
+    await env.DB.prepare("UPDATE identities SET updated_at = ? WHERE person = ?").bind(now(), person).run();
+    const fetched = await fetchIdentity(env, from);
+    return fetched?.id === person ? fetched.current.hosting : null;
+  }
   if (row && !row.frozen_at) {
     const chain = parseChain(JSON.parse(String(row.chain)));
     const state = chain && (await readChain(env.DB, chain, await seenTimes(env.DB, chain), now()));
@@ -175,7 +194,23 @@ export async function checkProfile(envelope, state) {
   return { name: profile.name.slice(0, 100), at: profile.at };
 }
 
-/** GET /.well-known/afterwrd and GET /_p/profile; null for anything else. */
+/**
+ * Keeps `profile` (checked: checkProfile gave `at`) as `person`'s signed name, unless the one kept is as new or newer:
+ * anyone passing on an old signed profile can't put back an old name. Whether it was kept.
+ */
+export async function keepNewerProfile(db, person, profile, at) {
+  const row = await db.prepare("SELECT profile FROM identities WHERE person = ?").bind(person).first();
+  if (!row) return false;
+  let kept = null;
+  try { kept = row.profile ? decode(fromB64url(JSON.parse(String(row.profile)).bytes))?.at : null; } catch {}
+  if (Number.isSafeInteger(kept) && kept >= at) return false;
+  // Only if no one kept another meanwhile.
+  const { meta } = await db.prepare("UPDATE identities SET profile = ? WHERE person = ? AND profile IS ?")
+    .bind(JSON.stringify(profile), person, row.profile ?? null).run();
+  return Number(meta?.changes ?? 0) > 0;
+}
+
+/** GET /.well-known/afterwrd; null for anything else. */
 export async function handleIdentity(request, env, url) {
   if (request.method !== "GET") return null;
   if (url.pathname === "/.well-known/afterwrd") {
@@ -189,17 +224,6 @@ export async function handleIdentity(request, env, url) {
     response.headers.set("Cache-Control", "public, max-age=60");
     response.headers.set("Access-Control-Allow-Origin", "*");
     return response;
-  }
-  if (url.pathname === "/_p/profile") {
-    // Only friends' sites, so a stranger can't even make this site fetch anything: their address is checked first.
-    const from = request.headers.get("Afterwrd-From") ?? "";
-    const friend = from && (await env.DB.prepare("SELECT 1 FROM connections WHERE origin = ? AND approved_at IS NOT NULL").bind(from).first());
-    if (!friend) return json({ error: "Not allowed." }, 403);
-    const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers },
-      { ownOrigin: url.origin, hostingKeyOf: (person, site) => hostingKeyFor(env, person, site) });
-    if (!caller) return json({ error: "Not signed." }, 401);
-    const row = await env.DB.prepare("SELECT profile FROM own_identity WHERE id = 1").first();
-    return row?.profile ? json({ v: 2, profile: JSON.parse(String(row.profile)) }) : json({ error: "Not found." }, 404);
   }
   return null;
 }

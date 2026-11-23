@@ -63,6 +63,8 @@ export async function makeRecord(fields, content, key) {
   if (content !== undefined) {
     const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
     const bytes = encode(content);
+    // Said here, plainly: otherwise its host would only say the signature didn't check (contentOf refuses it).
+    if (bytes.length > MAX_CONTENT) throw new Error("That's too long to send: try fewer words, or fewer photos.");
     extra = { content: b64url(bytes), salt: b64url(salt), body: await bodyOf(salt, bytes) };
   }
   const bytes = encode({ v: 2, ...fields, key: key.publicKey, ...(extra.body ? { body: extra.body } : {}), at: Math.floor(Date.now() / 1000) });
@@ -152,7 +154,9 @@ export function says(text, name) {
 
 /**
  * The salted fingerprint of an audience: who an event is for (their person ids), as its records carry it. The salt
- * (base64url, 16 random bytes) stays with the host, so nobody reading the record can work out who else is invited.
+ * (base64url, 16 random bytes) goes only to the owner's own site, which checks the guests it's given against the
+ * fingerprint once (items.js guestsFor) and doesn't keep it, so nobody reading the record can work out who else is
+ * invited. The fingerprint binds the guest list as the host took it, then.
  * @param {string} salt @param {string[]} people
  */
 export const audienceOf = (salt, people) => fingerprintOf("audience", concat(fromB64url(salt), utf8([...new Set(people)].sort().join("\n"))));

@@ -14,6 +14,7 @@
 import { Rules } from "./lists.js";
 
 export const MAX_MEMBER_ENTRIES = 20_000;
+const MEMBER_ENDINGS = 2_000; // leaves, removals and a close a full list still takes
 const MEMBER_KINDS = new Set(["join", "approve", "remove", "role", "leave", "close"]);
 const ROLES = new Set(["admin", "member"]);
 
@@ -49,7 +50,10 @@ export class MemberRules extends Rules {
   /** @param {{ record: any, fp: string, byHost?: boolean, content?: any }} got @param {number} taken @param {{ checkpointed?: number }} [options] @returns {string | null} */
   refuse({ record, fp, byHost, content }, taken, { checkpointed = 0 } = {}) {
     const n = this.n + 1;
-    if (n > MAX_MEMBER_ENTRIES) return "This group's list is as long as it gets.";
+    // Leaving, removing and closing are always possible, even on a full list: each needs someone in or asking, so
+    // they can't run on far past it.
+    const ending = ["leave", "remove", "close"].includes(record.kind);
+    if (n > MAX_MEMBER_ENTRIES + (ending ? MEMBER_ENDINGS : 0)) return "This group's list is as long as it gets.";
     if (this.byFp.has(fp)) return "duplicate";
     if (record.host !== this.host || record.item !== this.list) return "That belongs somewhere else.";
     if (!MEMBER_KINDS.has(record.kind) || byHost) return "That isn't something a group's members list holds.";
@@ -59,8 +63,9 @@ export class MemberRules extends Rules {
     const actor = this.roleOf(record.author);
     if (record.kind === "join") {
       if (actor === "owner") return "The owner is in already.";
-      if (actor === "waiting") return "You've asked already.";
-      if (actor) return "You're in already.";
+      // Asking again while still waiting replaces the earlier request (the group may have stopped showing it to its
+      // admins: a week unanswered).
+      if (actor && actor !== "waiting") return "You're in already.";
       return null;
     }
     if (record.kind === "leave") {
@@ -93,6 +98,8 @@ export class MemberRules extends Rules {
     if (!record) return head;
     const n = this.n;
     if (record.kind === "join") {
+      const earlier = this.people.get(record.author);
+      if (earlier && this.joins.get(earlier.join)?.state === "waiting") this.joins.get(earlier.join).state = "out";
       this.joins.set(fp, { person: record.author, state: "waiting", n });
       this.people.set(record.author, { join: fp, role: "member" });
       this.changedAt.set(record.author, n);

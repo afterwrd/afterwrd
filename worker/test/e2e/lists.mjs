@@ -435,9 +435,33 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("a member leaves", !(await take(await sign(cat, "leave"))) && rules.roleOf(cat.id) === null);
   check("…and can't be approved again without joining again", (await take(await sign(ann, "approve", { about: catJoin.fp }))) === "They aren't in this group, or asking.");
   check("the owner can't leave", (await take(await sign(ann, "leave"))) === "The owner can't leave: close the group instead.");
+  // Asking again while still waiting (the group stops showing a request after a week) replaces the earlier one.
+  const catAgain = await sign(cat, "join", {}, { name: "Cat" });
+  check("someone who left asks to join again, and waits", !(await take(catAgain)) && rules.roleOf(cat.id) === "waiting");
+  const catThird = await sign(cat, "join", {}, { name: "Cat E." });
+  check("…and may ask again while still waiting", !(await take(catThird)) && rules.roleOf(cat.id) === "waiting");
+  check("…which takes the place of the earlier request", (await take(await sign(ann, "approve", { about: catAgain.fp }))) === "They aren't in this group, or asking."
+    && !(await take(await sign(ann, "approve", { about: catThird.fp }))) && rules.roleOf(cat.id) === "member");
   check("…and these kinds belong only in a members list", new Rules({ host: G, list: "i".repeat(43), owner: ann.id })
     .refuse({ ...(await sign(bob, "join", {}, { name: "Bob" })).got, record: { ...(await sign(bob, "join", {}, { name: "Bob" })).got.record, item: "i".repeat(43) } }, NOW)
     === "That belongs in a group's members list.");
+}
+
+// --- an item's list: whose it is, and closing (lists.js Rules) -------------------------------------------------------
+{
+  const L = "l".repeat(43);
+  const rules = new Rules({ host: ann.id, list: L, owner: ann.id });
+  check("a list's first record must be by whoever the list says it's by", rules.refuse({ record: { kind: "item", author: bob.id, host: ann.id }, fp: L }, NOW)
+    === "That isn't by whoever this list says.");
+  await rules.add({ fp: L, taken: NOW, record: { kind: "item", author: ann.id, host: ann.id } });
+  const C = "c".repeat(43);
+  const close = { kind: "close", author: ann.id, host: ann.id, item: L, seen: { n: 1, h: rules.heads.get(1) }, prev: L };
+  check("its owner closes it", rules.refuse({ record: close, fp: C }, NOW) === null);
+  await rules.add({ fp: C, taken: NOW, record: close });
+  check("…after which nothing new is taken", rules.refuse({ record: { kind: "comment", author: bob.id, host: ann.id, item: L,
+    seen: { n: 2, h: rules.heads.get(2) }, prev: null }, fp: "d".repeat(43) }, NOW) === "This is closed.");
+  check("…but its writer can still delete what's theirs", rules.refuse({ record: { kind: "delete", author: ann.id, host: ann.id, item: L, about: L,
+    seen: { n: 2, h: rules.heads.get(2) }, prev: C }, fp: "e".repeat(43) }, NOW) === null);
 }
 
 // --- names (step 7b: src/names.js): look-alikes fold to the same ---------------------------------------------------

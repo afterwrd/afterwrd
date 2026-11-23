@@ -12,11 +12,11 @@
 // against the identity as it was (verifyLists) and takes them as they are, signing their checkpoints with its own key.
 import { checkList, CHECKPOINT, signHead } from "./lists.js";
 import { checkPasskeyProof, moveOf, readIdentity } from "./identity.js";
-import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
+import { checkProfile, identityState, learnIdentity, noteSeen, parseChain, seenTimes } from "./identities.js";
 import { hostingKey, proofFrom } from "./keys.js";
 import { readChallenge, spendChallenge, withChallenge } from "./auth.js";
 import { itemFromList } from "./items.js";
-import { siteOrigin } from "./sites.js";
+import { readBytesLimited, siteOrigin } from "./sites.js";
 import { b64url, decode, encode, fingerprintOf, fromB64url, utf8 } from "../public/static/signed.js";
 import { json, now, randomToken } from "./util.js";
 
@@ -42,17 +42,6 @@ export async function moveIn(env, url) {
   const stage = !state || state.problem ? "cancelled" : state.current.origin === url.origin ? "ready"
     : state.pending?.origin === url.origin ? "waiting" : "cancelled";
   return { ...base, stage, person: String(row.person), chain, state, at: moveOf(state)?.at ?? null };
-}
-
-/** When this site first saw each document of `chain`, noting now for any it hasn't, as a lookup. */
-async function seenTimes(db, chain) {
-  const fps = await Promise.all(chain.map((d) => fingerprintOf("identity", d.bytes)));
-  const at = now();
-  await db.batch(fps.map((fp) => db.prepare("INSERT OR IGNORE INTO identity_seen (fp, first_seen) VALUES (?, ?)").bind(fp, at)));
-  const { results } = await db.prepare("SELECT fp, first_seen FROM identity_seen WHERE fp IN (SELECT value FROM json_each(?))")
-    .bind(JSON.stringify(fps)).all();
-  const seen = new Map(results.map((r) => [String(r.fp), Number(r.first_seen)]));
-  return (fp) => seen.get(fp) ?? at;
 }
 
 export async function handleMoveIdentity(request, env, url, owner, path) {
@@ -128,10 +117,11 @@ async function fetchMove(env, url) {
   const asked = decode(fromB64url(String(row.request)));
   const response = from && (await fetch(`${from}/.well-known/afterwrd`, { redirect: "manual", signal: AbortSignal.timeout(FETCH_MS) }).catch(() => null));
   if (!response?.ok) return json({ error: `Couldn't reach ${from ? new URL(from).host : "your old site"}. Try again in a moment.` }, 502);
-  const bytes = new Uint8Array(await response.arrayBuffer().catch(() => new ArrayBuffer(0)));
-  const chain = bytes.length && bytes.length <= MAX_REPLY ? parseChain(decode(bytes)?.chain) : null;
+  const bytes = await readBytesLimited(response, MAX_REPLY).catch(() => new Uint8Array());
+  const chain = bytes.length ? parseChain(decode(bytes)?.chain) : null;
   const state = chain && (await readIdentity(chain, await seenTimes(env.DB, chain), now()));
   if (!state || state.problem) return json({ error: "Your old site's identity doesn't read cleanly, so it can't move here." }, 400);
+  await noteSeen(env.DB, chain);
   const target = state.pending?.origin === url.origin ? state.pending : state.current.origin === url.origin ? state.current : null;
   const ours = target && target.hosting === (await hostingKey(env)).publicKey
     && target.passkeys.some((p) => p.id === asked.passkey.id && p.key === asked.passkey.key && p.origin === url.origin);

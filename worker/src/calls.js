@@ -49,7 +49,10 @@ export async function callFriend(env, from, origin, path, { body = null, timeout
     throw Object.assign(new Error(`Couldn't reach ${host(origin)}.`), { status: 0 });
   }
   let data = {};
-  try { data = JSON.parse(await readLimited(response, maxReply)); } catch {}
+  try { data = JSON.parse(await readLimited(response, maxReply)); } catch (error) {
+    // More than a site ever sends isn't an answer: as if it hadn't answered at all.
+    if (/** @type {any} */ (error)?.tooBig) throw Object.assign(new Error(`${host(origin)} sent too much.`), { status: 0 });
+  }
   if (!data || typeof data !== "object" || Array.isArray(data)) data = {};
   if (!response.ok) {
     // retry: a site saying this one has had its allowance there today, and when to try again (allowances.js).
@@ -100,7 +103,7 @@ export async function friendCalling(request, env, url, body = null, { waiting = 
   }
   if (!connection) return notConnected();
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
-    { ownOrigin: url.origin, hostingKeyOf: (person, site) => (connection.identity && connection.identity !== person ? null : hostingKeyFor(env, person, site)) });
+    { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => (connection.identity && connection.identity !== person ? null : hostingKeyFor(env, person, site, options)) });
   if (!caller) return notConnected();
   if (connection.origin !== from) await switchConnection(env, /** @type {Row<"connections">} */ (/** @type {unknown} */ (connection)), from);
   if (!connection.identity) {
@@ -146,7 +149,7 @@ export async function switchConnection(env, connection, to) {
  */
 export async function siteCalling(request, env, url, body) {
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
-    { ownOrigin: url.origin, hostingKeyOf: (person, site) => hostingKeyFor(env, person, site) });
+    { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => hostingKeyFor(env, person, site, options) });
   if (caller) await admit(env, caller.person); // within their allowance here today, or refused (allowances.js)
   return caller;
 }

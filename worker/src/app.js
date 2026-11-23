@@ -145,8 +145,8 @@ async function route(request, env, work) {
   if (url.pathname.startsWith("/_auth/")) return handleAuth(request, env, url);
   // A friend's Connect link, and their site asking to be friends: signed calls (connect.js).
   if (url.pathname.startsWith("/_connect/")) return handleConnectLink(request, env, url);
-  // afterwrd 2 (identities.js): the owner's identity, public; their profile, to friends' signed calls.
-  if (url.pathname === "/.well-known/afterwrd" || url.pathname === "/_p/profile") {
+  // afterwrd 2 (identities.js): the owner's identity, public.
+  if (url.pathname === "/.well-known/afterwrd") {
     return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   }
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
@@ -158,6 +158,9 @@ async function route(request, env, work) {
   if (friendCallRoute(`${request.method} ${url.pathname}`)) return handleFriendCalls(request, env, url);
   // A group the owner's in, calling with the key this site gave it.
   if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url);
+  // Anything else another site might ask under /_p/ isn't here: a plain 404, never the sign-in page (a 401 would read
+  // to a friend's site as "they've removed you", so a call added in a later release would look like that to them).
+  if (url.pathname.startsWith("/_p/")) return json({ error: "Not found." }, 404);
   // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.
   if (url.pathname.startsWith("/_check/")) return handleCheck(request, env, url);
   const reading = request.method === "GET" || request.method === "HEAD";
