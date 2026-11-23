@@ -19,8 +19,7 @@ import { isBlocked } from "./blocks.js";
 import { friendCalling } from "./calls.js";
 import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList } from "./hosted.js";
 import { checkProfile, identityState, keepNewerProfile } from "./identities.js";
-import { checkDelegation } from "./identity.js";
-import { ownHost, recordOn } from "./items.js";
+import { ownHost, recordOn, sentDelegationOf } from "./items.js";
 import { signedFile } from "./share.js";
 import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
@@ -42,7 +41,8 @@ export async function delegationsFor(db, keys) {
     db.prepare("SELECT key, bytes, proof FROM delegations WHERE key IN (SELECT value FROM json_each(?))").bind(json),
     db.prepare("SELECT key, bytes, proof FROM known_delegations WHERE key IN (SELECT value FROM json_each(?))").bind(json),
   ]);
-  return Object.fromEntries([...own.results, ...known.results].map((r) => [String(r.key), { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) }]));
+  // The owner's own last, so they're what's sent for the owner's keys.
+  return Object.fromEntries([...known.results, ...own.results].map((r) => [String(r.key), { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) }]));
 }
 
 /**
@@ -61,7 +61,7 @@ export async function learntSince(db, keys, people, since) {
     db.prepare("SELECT person, chain, profile FROM identities WHERE updated_at > ? AND frozen_at IS NULL").bind(from),
     db.prepare("SELECT person, chain, profile FROM own_identity WHERE id = 1"),
   ]));
-  const delegations = Object.fromEntries([...own.results, ...known.results].filter((r) => wantKeys.has(String(r.key)))
+  const delegations = Object.fromEntries([...known.results, ...own.results].filter((r) => wantKeys.has(String(r.key)))
     .map((r) => [String(r.key), { bytes: String(r.bytes), proof: JSON.parse(String(r.proof)) }]));
   const out = {};
   for (const r of [...identities.results, ...self.results.filter((o) => wantPeople.has(String(o.person)))]) {
@@ -199,17 +199,14 @@ export async function handleFriendItems(request, env, url, work) {
     if (!(await mayCallerSee(db, record.item, caller.connection.id))) return json({ error: "That post isn't here any more." }, 404);
     // At most so many a day from one writer, across all the owner's posts (hosted.js).
     if (await overDailyRecords(db, caller.person, String(record.kind))) return json({ error: DAILY_RECORDS_SAID }, 429);
-    const state = await identityState(env, caller.person);
-    const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
-    if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return json({ error: "That isn't signed by them." }, 400);
-    const { expires } = JSON.parse(new TextDecoder().decode(dBytes));
-    await db.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))`)
-      .bind(record.key, caller.person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
+    const allowed = await sentDelegationOf(env, caller.person, delegation, record.key);
+    if (!allowed) return json({ error: "That isn't signed by them." }, 400);
     // Their signed name, kept to pass on with the thread (peopleFor), so others in it can name them.
-    const named = profile && (await checkProfile(profile, state));
+    const state = await identityState(env, caller.person);
+    const named = profile && state && (await checkProfile(profile, state));
     if (named) await keepNewerProfile(db, caller.person, profile, named.at);
     const host = await ownHost(env);
-    const answer = await recordOn(env, host, record.item, sent, url.origin);
+    const answer = await recordOn(env, host, record.item, sent, url.origin, { delegation: allowed });
     if (answer.refused) return json({ error: answer.refused }, 409);
     if (answer.entry) await noticeOwn(env, url.origin, work, { item: record.item, record, content: answer.content, fp: answer.entry.fp, connection: caller.connection });
     return json({ ok: true, receipt: answer.receipt ?? null, n: answer.entry?.n ?? null });

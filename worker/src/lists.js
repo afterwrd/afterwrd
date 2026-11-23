@@ -14,9 +14,9 @@
 //   gone    "deleted" or "removed": what became of it (a reader checks there's a signed record saying so)
 // A signed head ({v: 2, kind: "head", host, list, n, head}, signed by the host's hosting key) is a receipt when handed
 // to a writer, and a checkpoint every CHECKPOINT entries, so a new reader of a long list starts from one.
-import { ABOUT, DATE_RE } from "../public/static/records.js";
+import { ABOUT, DATE_RE, parseRecord } from "../public/static/records.js";
 import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, signAs, utf8 } from "../public/static/signed.js";
-import { checkRecord } from "./records.js";
+import { recordTrouble } from "./records.js";
 
 export const PAGE = 50;
 export const CHECKPOINT = 500;
@@ -60,6 +60,13 @@ export async function checkHead(signed, { hostingKey, host, list }) {
   return (await checkAs("head", hostingKey, bytes, signed.sig)) ? { n: h.n, head: h.head } : null;
 }
 
+/** Whether a record sent acts on others (deletes, edits, removes, closes, changes…): its failing would change what's shown. */
+function actsOnOthers(sent) {
+  let record = null;
+  try { record = parseRecord(fromB64url(sent.record)); } catch {}
+  return !record || ABOUT.has(record.kind) || ["close", "end", "change"].includes(record.kind);
+}
+
 /**
  * The rules a list's records follow, applied entry by entry, by its host before taking one and by readers going
  * through what the host shows them. `owner`: the item's writer (who may close it, and whose removals count, besides the
@@ -83,6 +90,7 @@ export class Rules {
     this.closed = false;
     this.ended = false; // a poll's voting, ended by its owner (`end`)
     this.n = 0;
+    this.from = 0; // the points up to here can't be checked: they were before what this reader started from
   }
 
   /**
@@ -220,7 +228,20 @@ export class Rules {
   /** A checkpoint to start from: the list was `head` at `n` (a signed head checked by the caller). */
   startAt(n, head) {
     this.n = n;
+    this.from = n;
     this.heads.set(n, head);
+  }
+
+  /**
+   * Carries on from entries this reader checked before and kept (threads.js keptThread: each with its running
+   * fingerprint), from the first or a checkpoint, so what's new is checked against all of them.
+   */
+  async carryOn(kept) {
+    const first = kept[0].n;
+    // Kept from a checkpoint: its running fingerprint wasn't kept, so a `seen` naming it can't be checked either.
+    if (first > 1) { this.n = first - 1; this.from = first; }
+    for (const e of kept) await this.add({ fp: e.fp, taken: e.taken, record: e.record ?? null, byHost: Boolean(e.byHost), head: e.head, content: e.content });
+    return this;
   }
 }
 
@@ -262,19 +283,21 @@ export class GroupRules extends Rules {
 }
 
 /**
- * Checks a list as a host shows it. `entries` run from just after `from` (a checked point: {n, head}, a checkpoint or
- * this reader's last checked point; none for the start), or after `rules` already worked out from what this reader
- * checked before, to the end; `signedHead` is the host's signature on the end.
+ * Checks a list as a host shows it. `entries` run from just after `from` (a checkpoint; none for the start), or after
+ * `rules` already worked out from what this reader checked before, or after `kept` (those entries themselves), to the
+ * end; `signedHead` is the host's signature on the end.
  * Returns {entries: [{n, fp, taken, state, record, content}], upTo, head, problem}: everything up to `upTo` checked; a
  * `problem` says why the rest isn't shown ("broken": the running fingerprint doesn't add up, or the head isn't signed;
- * "unexpected": an entry no honest host would have taken). Each entry's state is "ok", "deleted", "removed",
- * "left-out" (gone, with nothing signed saying why) or "failed" (its signature doesn't check: hidden).
+ * "unexpected": an entry no honest host would have taken or sent: one changed on the way, an act on another record
+ * without its delegation, a kind that carries words without them). Each entry's state is "ok", "deleted", "removed",
+ * "left-out" (gone, with nothing signed saying why) or "failed" (its writer can't be judged here: hidden).
  */
-export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules, group = null, rules: built = null }) {
+export async function checkList({ host, hostingKey, list, owner = null, entries, signedHead, from = null, lookups, Kind = Rules, group = null, rules: built = null, kept = null }) {
   // `built`: rules already worked out from entries this reader checked before and kept (as a members list is:
-  // groupjoin.js), carried on from where they got to.
+  // groupjoin.js), carried on from where they got to; or `kept`, those entries themselves (threads.js), to work them out.
   const rules = built ?? (group ? new GroupRules({ host, list, owner, group }) : new Kind({ host, list, owner }));
-  if (built) from = { n: built.n, head: built.heads.get(built.n) };
+  if (!built && kept?.length) await rules.carryOn(kept);
+  if (built || kept?.length) from = { n: rules.n, head: rules.heads.get(rules.n) };
   else if (from) rules.startAt(from.n, from.head);
   const shown = [];
   const checked = [];
@@ -284,9 +307,14 @@ export async function checkList({ host, hostingKey, list, owner = null, entries,
     // The record sent must be the one the list names, whether or not it checks: otherwise the host put another in.
     const sentBytes = e.sent && typeof e.sent.record === "string" ? fromB64url(e.sent.record) : null;
     if (e.sent && (!sentBytes || (await fingerprintOf("record", sentBytes)) !== e.fp)) { problem = "broken"; break; }
-    const got = e.sent ? await checkRecord(e.sent, { ...lookups, at: e.taken }) : null;
+    const answer = e.sent ? await recordTrouble(e.sent, { ...lookups, at: e.taken }) : null;
+    const got = answer?.got ?? null;
+    // Only a writer nobody here can judge (unknown, frozen or closed) leaves a record shown as failed. A record changed
+    // on the way, or an act on another (a delete, an edit, a removal…) sent without what lets it be checked, is the
+    // host's doing: otherwise it could undo a delete by spoiling it, or blank someone's words.
+    if (answer && !got && (answer.why === "bad" || (answer.why === "key" && actsOnOthers(e.sent)))) { problem = "unexpected"; break; }
     if (got) {
-      const why = rules.refuse(got, e.taken, { checkpointed: from?.n ?? 0 });
+      const why = rules.refuse(got, e.taken, { checkpointed: rules.from });
       if (why) { problem = "unexpected"; break; }
     }
     const head = await rules.add({ fp: e.fp, taken: e.taken, record: got?.record ?? null, byHost: got?.byHost ?? false, content: got?.content });

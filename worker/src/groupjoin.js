@@ -121,8 +121,7 @@ export async function checkedMembers(env, group, fetch) {
   if (kept && state?.current.owner) {
     try {
       const data = (await fetch(`/_group/members/list?after=${kept.at(-1).n}`))?.["afterwrd:list"];
-      const rules = new MemberRules({ host: person, list: person, owner: String(state.current.owner) });
-      for (const e of kept) await rules.add({ fp: e.fp, taken: e.taken, record: e.record ?? null, byHost: Boolean(e.byHost), head: e.head, content: e.content });
+      const rules = await new MemberRules({ host: person, list: person, owner: String(state.current.owner) }).carryOn(kept);
       const checked = await checkMembers(env, group, data, { rules });
       const heads = new Map((Array.isArray(data.entries) ? data.entries : []).map((e) => [e.n, e.head]));
       const fresh = checked.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));

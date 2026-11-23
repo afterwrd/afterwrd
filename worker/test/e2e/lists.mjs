@@ -3,7 +3,7 @@
 // their browsers (real browser keys, allowed by software passkeys). Then bad writers try their luck with the host, and a
 // bad host tries its luck with readers.
 import { pathToFileURL } from "node:url";
-const { signed, readIdentity, makeRecord, checkRecord, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules }
+const { signed, readIdentity, makeRecord, checkRecord, recordTrouble, Rules, checkList, signHead, checkHead, PER_AUTHOR, EDIT_SECONDS, takeRecord, readList, local, MemberRules }
   = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
@@ -217,7 +217,13 @@ check("a comment's words withheld, with nothing signed saying why, shows as left
 const reworded = structuredClone(post.entries);
 reworded[1].sent.content = b64url(encode({ text: "Bob never said this" }));
 const rew = await read(post, { entries: reworded });
-check("a comment's words changed fails its check, and is hidden", !rew.problem && rew.entries[1].state === "failed" && rew.entries[1].content === undefined, rew.problem);
+check("a comment's words changed on the way: the host's doing, so the list doesn't check from there", rew.problem === "unexpected", rew.problem);
+const stripped = structuredClone(post.entries);
+delete stripped[1].sent.content;
+check("…nor with its words stripped and the rest kept (a blank comment)", (await read(post, { entries: stripped })).problem === "unexpected");
+const strangerSays = await makeRecord({ kind: "comment", author: "z".repeat(43), host: ann.id, item: post.list, seen: seenFirst, prev: null }, { text: "who?" }, bob.browser);
+check("a comment by someone nobody here can judge is only hidden (a reader can't tell who's at fault)",
+  (await recordTrouble(strangerSays.sent, { ...lookups, at: NOW })).why === "author");
 const rebuilt = structuredClone(post.entries);
 const forged = await makeRecord({ kind: "comment", author: bob.id, host: ann.id, item: post.list, seen: seenFirst, prev: null }, { text: "forged" }, ann.browser);
 rebuilt[1].sent = forged.sent;
@@ -240,6 +246,53 @@ const lateHead = await (await import(pathToFileURL(`${process.env.OUT}/bundle.mj
 sneaked.push({ n: thread.entries.length + 1, fp: lateFp, taken: NOW, head: lateHead, sent: late.sent });
 const sneakRead = await read(thread, { entries: sneaked, signedHead: await signHead(ann.hosting.privateKey, { host: ann.id, list: thread.list, n: sneaked.length, head: lateHead }) });
 check("a comment slipped in after closing is spotted, though the host signed it", sneakRead.problem === "unexpected", sneakRead.problem);
+
+// A host spoiling a delete, or withholding what lets it be checked, so the words it deleted come back: spotted.
+{
+  const shed = new Host(ann);
+  const opener = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Bonfire?" }, ann.browser);
+  await shed.take(opener.sent);
+  writes.set(mineOn(shed, ann), opener.fp);
+  const comment = await write(bob, shed, { kind: "comment" }, { text: "Something Sam regrets" });
+  const words = structuredClone(comment.sent);
+  await shed.take(comment.sent);
+  writes.set(mineOn(shed, bob), comment.fp);
+  const unsaid = await writeAndTake(bob, shed, { kind: "delete", about: comment.fp }, undefined);
+  check("(a comment, then its writer deletes it)", !unsaid.refused && !shed.entries[1].sent);
+  // The host puts the words back, and spoils the delete so it doesn't count.
+  const revived = structuredClone(shed.entries);
+  revived[1].sent = words;
+  revived[2].sent.sig = b64url(new Uint8Array(64));
+  check("a delete whose signature the host spoiled doesn't bring its words back: spotted", (await read(shed, { entries: revived })).problem === "unexpected");
+  const withWords = structuredClone(shed.entries);
+  withWords[1].sent = words;
+  const noKey = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: shed.list, owner: ann.id, entries: withWords,
+    signedHead: await shed.signed(), lookups: { ...lookups, delegationOf: async (k) => (k === bob.browser.publicKey ? null : delegations.get(k) ?? null) } });
+  check("…nor one sent without its delegation", noKey.problem === "unexpected", noKey.problem);
+}
+
+// Reading on from what a reader kept: what's new is held to the same rules as reading from the start.
+{
+  const chat = new Host(ann);
+  const opener = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Quiz night" }, ann.browser);
+  await chat.take(opener.sent);
+  writes.set(mineOn(chat, ann), opener.fp);
+  const y = await writeAndTake(bob, chat, { kind: "comment" }, { text: "Count me in" });
+  const whole = await read(chat);
+  const kept = whole.entries.map((e, i) => ({ ...e, head: chat.entries[i].head }));
+  // A host that takes Ann's "delete" of Bob's comment, which no honest host would: only its writer deletes.
+  const hers = await write(ann, chat, { kind: "delete", about: y.fp }, undefined);
+  const hersFp = await fingerprintOf("record", fromB64url(hers.sent.record));
+  const { headOf } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+  const head = await headOf({ host: ann.id, list: chat.list, prev: chat.entries.at(-1).head, n: 3, fp: hersFp, taken: NOW });
+  const fresh = [{ n: 3, fp: hersFp, taken: NOW, head, sent: hers.sent }];
+  const signedHead = await signHead(ann.hosting.privateKey, { host: ann.id, list: chat.list, n: 3, head });
+  const onward = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: chat.list, owner: ann.id, entries: fresh, signedHead, kept, lookups });
+  check("reading on from what was kept, a delete of someone else's words is spotted", onward.problem === "unexpected", onward.problem);
+  const fromStart = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: chat.list, owner: ann.id,
+    entries: [...structuredClone(chat.entries), ...fresh], signedHead, lookups });
+  check("…as it is reading from the start", fromStart.problem === "unexpected", fromStart.problem);
+}
 
 // --- a comment from a laptop whose passkey was removed later stays the writer's -------------------------------------
 

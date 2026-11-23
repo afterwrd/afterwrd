@@ -421,13 +421,14 @@ export async function friendThread(env, from, connection, id) {
   await learn(data.people);
   const hostState = await identityState(env, person);
   if (!hostState) return { error: "Their site's identity couldn't be checked." };
-  const check = (entries, from) => checkList({ host: person, hostingKey: hostState.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? person),
-    entries, signedHead: data.signedHead, from, lookups: lookupsWith(env, data.delegations) });
+  const check = (entries, from, kept = null) => checkList({ host: person, hostingKey: hostState.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? person),
+    entries, signedHead: data.signedHead, from, kept, lookups: lookupsWith(env, data.delegations) });
   let result = null;
   let changed = false;
   if (kept) {
     const entries = Array.isArray(data.entries) ? data.entries : [];
-    const next = await check(entries, { n: Number(copy.checked_n), head: String(copy.checked_head) });
+    // Checked against what was kept, so a delete or removal of something from before is held to the same rules.
+    const next = await check(entries, null, kept);
     if (!next.problem) {
       const heads = new Map(entries.map((e) => [e.n, e.head]));
       const fresh = next.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));

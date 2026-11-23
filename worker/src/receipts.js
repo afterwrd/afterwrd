@@ -54,7 +54,7 @@ export async function receiptFor(env, fp) {
   const sent = JSON.parse(String(row.record));
   if (!sent.content) return null; // its words deleted since: nothing to tell anyone
   const record = parseRecord(fromB64url(sent.record));
-  const delegation = record && (await db.prepare("SELECT bytes, proof FROM known_delegations WHERE key = ?1 UNION ALL SELECT bytes, proof FROM delegations WHERE key = ?1 LIMIT 1")
+  const delegation = record && (await db.prepare("SELECT bytes, proof FROM delegations WHERE key = ?1 UNION ALL SELECT bytes, proof FROM known_delegations WHERE key = ?1 LIMIT 1")
     .bind(record.key).first());
   const own = await db.prepare("SELECT person, chain, profile FROM own_identity WHERE id = 1").first();
   if (!record || !delegation || !own) return null;

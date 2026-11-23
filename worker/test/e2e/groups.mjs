@@ -381,8 +381,8 @@ sql(stateG, `UPDATE list_pages SET entries = '${JSON.stringify(tampered).replace
 const freshRead = () => sql(stateA, `DELETE FROM thread_cache WHERE list = '${bobPost}'`);
 freshRead();
 await ann.goto(`${A}/groups/${annGroup}/posts/${bobPost}`);
-check("words the group changed fail their check, and aren't shown", (await ann.$$eval("article.in-group .comment.gone", (l) => l.map((c) => c.textContent)))
-  .some((t) => t.includes("didn't pass its check")) && !(await text(ann)).includes("forged words"));
+check("words the group changed are caught: the conversation says it doesn't check, and they aren't shown",
+  Boolean(await ann.$("article.in-group .notice.alert")) && !(await text(ann)).includes("forged words"));
 bobsEntry.sent.content = wasContent;
 sql(stateG, `UPDATE list_pages SET entries = '${JSON.stringify(tampered.filter((e) => e.fp !== bobsComment)).replace(/'/g, "''")}' WHERE list = '${bobPost}' AND page = 0`);
 freshRead();

@@ -8,10 +8,9 @@
 //   GET  /_group/members         …with `list`: the members list as signed, for members' sites to check
 import { checkCall, signCall } from "./signedcalls.js";
 import { hostingKeyFor, identityState, checkProfile, keepNewerProfile } from "./identities.js";
-import { lookupsFor, ownHost } from "./items.js";
+import { keepKnown, lookupsFor, ownHost, sentDelegationOf, withDelegation } from "./items.js";
 import { listEntries, readList, takeRecord } from "./hosted.js";
 import { MemberRules } from "./members.js";
-import { checkDelegation } from "./identity.js";
 import { delegationsFor, peopleFor } from "./friendhost.js";
 import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
@@ -55,17 +54,17 @@ export async function callMember(env, member, path, body) {
     headers: { ...headers, "Content-Type": "application/json" }, body: text });
 }
 
-/** A member's signed record and the delegation behind it, checked as theirs; the record, or a reason it isn't. */
+/**
+ * A member's signed record and the delegation behind it, checked as theirs: {record, state, delegation, lookups}, or a
+ * reason it isn't. `lookups` check what they sent with that delegation; it's kept (keepKnown) only once a record is taken.
+ */
 export async function theirs(env, person, { sent, delegation }) {
   const record = typeof sent?.record === "string" ? parseRecord(fromB64url(sent.record)) : null;
   if (!record || record.author !== person) return { error: "That isn't yours to send." };
   const state = await identityState(env, person);
-  const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
-  if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== record.key) return { error: "That isn't signed by you." };
-  const { expires } = JSON.parse(new TextDecoder().decode(dBytes));
-  await env.DB.prepare("INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))")
-    .bind(record.key, person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
-  return { record, state };
+  const allowed = state && (await sentDelegationOf(env, person, delegation, record.key));
+  if (!allowed) return { error: "That isn't signed by you." };
+  return { record, state, delegation: allowed, lookups: withDelegation(lookupsFor(env), allowed) };
 }
 
 /**
@@ -80,8 +79,9 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
   if (got.record.kind !== "join" || got.record.item !== self.list) return json({ error: "That isn't a request to join this group." }, 400);
   const waiting = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL").first();
   if (Number(waiting?.n ?? 0) >= maxWaiting) return json({ error: "Too many people are waiting to join this group. Try again later." }, 429);
-  const answer = await takeRecord(env.DB, { sent: body.sent, host: self, lookups: lookupsFor(env) });
+  const answer = await takeRecord(env.DB, { sent: body.sent, host: self, lookups: got.lookups });
   if (answer.refused) return json({ error: answer.refused }, 409);
+  await keepKnown(env.DB, got.delegation);
   // Their name, as they signed it into their join (and their signed profile, kept to pass on, if they sent it).
   const said = await contentOf(got.record, body.sent.content, body.sent.salt);
   const named = { name: typeof said?.name === "string" && said.name.trim() ? said.name.trim().slice(0, 100) : null };
@@ -117,8 +117,9 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
     const inGroup = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NOT NULL").first();
     if (Number(inGroup?.n ?? 0) >= maxMembers + 1) return json({ error: `The group is full: it can have up to ${maxMembers} members besides its owner.` }, 409);
   }
-  const answer = await takeRecord(env.DB, { sent: body.sent, host: self, lookups: lookupsFor(env) });
+  const answer = await takeRecord(env.DB, { sent: body.sent, host: self, lookups: got.lookups });
   if (answer.refused) return json({ error: answer.refused }, 409);
+  await keepKnown(env.DB, got.delegation);
   const db = env.DB;
   if (record.kind === "approve") await db.prepare("UPDATE group_members SET approved_at = ? WHERE id = ?").bind(now(), target.id).run();
   if (record.kind === "role") {

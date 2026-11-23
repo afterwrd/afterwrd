@@ -40,14 +40,12 @@
 //   {groupPost, sent, photos, calloffs} and {groupItem, records}.
 //   POST /_p/before (friendhost)   {ask: [old ids], all} -> {answers: [{id, item, at, seen, until} | {id, state}]}
 //                                  {records: [{id, sent}], delegation, profile} -> {ok}
-import { guestsFor, lookupsFor, ownHost, refreshItem, sentRecord, takePost } from "./items.js";
+import { guestsFor, keepIfSigned, lookupsFor, ownHost, refreshItem, sentDelegationOf, sentRecord, takePost } from "./items.js";
 import { takeRecord } from "./hosted.js";
 import { checkRecord } from "./records.js";
 import { callFriend } from "./calls.js";
-import { identityState } from "./identities.js";
-import { checkDelegation } from "./identity.js";
 import { isBlocked } from "./blocks.js";
-import { decode, fromB64url } from "../public/static/signed.js";
+import { fromB64url } from "../public/static/signed.js";
 import { nextApprovals, nextRejoin, sendRejoin } from "./beforegroups.js";
 import { nextGroupWork, sendGroupComments, sendGroupPost } from "./beforehistory.js";
 import { queueItemNote } from "./notes.js";
@@ -469,14 +467,10 @@ export async function answerBefore(env, caller, body) {
     return json({ error: why }, 409);
   };
   if (blocked) return decline("That wasn't taken.");
-  // Allowed by a delegation from their identity, kept to pass on with what they signed (as POST /_p/records does).
-  const delegation = body.delegation;
-  const state = await identityState(env, caller.person);
-  const dBytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
-  if (!state || !dBytes || (await checkDelegation(dBytes, delegation.proof, state, now())) !== first.record.key) return json({ error: "That isn't signed by them." }, 400);
-  const { expires } = decode(dBytes);
-  await db.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))`)
-    .bind(first.record.key, caller.person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
+  // Allowed by a delegation from their identity, kept to pass on with what they signed once each checks with it.
+  if (!(await keepIfSigned(env, await sentDelegationOf(env, caller.person, body.delegation, first.record.key), records))) {
+    return json({ error: "That isn't signed by them." }, 400);
+  }
   const seen = await headNow(db, item);
   if (!seen) return json({ error: "That post isn't here any more." }, 404);
   const wrong = await commentsTrouble(env, { rows, records, author: caller.person, host: host.person, item, seen, prev: null,

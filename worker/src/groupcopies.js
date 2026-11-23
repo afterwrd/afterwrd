@@ -19,7 +19,8 @@ import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDa
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { checkProfile, identityState, keepNewerProfile, learnIdentity, parseChain } from "./identities.js";
-import { frozenUntil, ID_RE, namesFor, ownHost } from "./items.js";
+import { checkDelegation } from "./identity.js";
+import { frozenUntil, ID_RE, keepKnown, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
@@ -96,8 +97,9 @@ export async function pullGroup(env, from, group) {
     if (page === 0 && data.usage) await keepGroupUsage(db, Number(group.id), data.usage).catch(() => null);
     // Anything signed as the owner here that this site never sent (sentchecks.js).
     if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
-    await fillGaps(env, from, group, data);
+    const sentKeys = await fillGaps(env, from, group, data);
     await learnPeople(env, data.people);
+    await keepSentKeys(env, sentKeys);
     const rules = await copyRules(env, group, data);
     const statements = [];
     for (const item of Array.isArray(data.items) ? data.items.slice(0, 60) : []) {
@@ -123,8 +125,8 @@ export async function pullGroup(env, from, group) {
 /**
  * After a pull (`data`), which sends only the people and delegations new to the group since this site last asked
  * (friendhost.js learntSince): the delegations this site already keeps are added in, anyone or any delegation still
- * missing is asked for (POST /_p/people), and the delegations it was sent are kept for next time. Each delegation is
- * checked against its passkey wherever it's used, so keeping one takes nothing on the group's word.
+ * missing is asked for (POST /_p/people). Returns the delegations it was sent, for keepSentKeys to keep for next time
+ * once the people in the pull are learnt.
  */
 async function fillGaps(env, from, group, data) {
   const db = env.DB;
@@ -134,7 +136,7 @@ async function fillGaps(env, from, group, data) {
   }
   for (const proof of Object.values(data.roles ?? {}).slice(0, 50)) sents.push(proof?.join, proof?.role);
   const records = sents.map((x) => (typeof x?.record === "string" ? parseRecord(fromB64url(x.record)) : null)).filter(Boolean);
-  if (!records.length) return;
+  if (!records.length) return [];
   const sent = data.delegations && typeof data.delegations === "object" ? data.delegations : {};
   data.delegations = { ...sent };
   const keys = [...new Set(records.map((r) => String(r.key)))];
@@ -158,17 +160,26 @@ async function fillGaps(env, from, group, data) {
       for (const [k, d] of Object.entries(asked)) if (keys.includes(k)) data.delegations[k] ??= d;
     }
   }
-  // Those it was sent (not those it had), kept: one row each, as people's devices sign in.
-  const statements = [];
-  for (const [key, d] of Object.entries({ ...sent, ...asked })) {
-    if (!keys.includes(key) || typeof d?.bytes !== "string") continue;
-    let delegation = null;
-    try { delegation = decode(fromB64url(d.bytes)); } catch {}
-    if (!delegation || typeof delegation.person !== "string" || !Number.isSafeInteger(delegation.expires)) continue;
-    statements.push(db.prepare(`INSERT OR IGNORE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).bind(key, delegation.person, d.bytes, JSON.stringify(d.proof ?? null), delegation.expires, now()));
+  // Those it was sent (not those it had), to keep once the people in it are learnt (keepSentKeys), each with the person
+  // who signed a record here with that key.
+  const signer = new Map(records.map((r) => [String(r.key), String(r.author)]));
+  return Object.entries({ ...sent, ...asked }).filter(([key]) => signer.has(key)).map(([key, d]) => ({ key, person: signer.get(key), d }));
+}
+
+/**
+ * Keeps the delegations a group sent (fillGaps), one row each, as people's devices sign in: only one that checks against
+ * the identity of the person who signed with that key, so a group can't have this site keep someone's key as another's.
+ */
+async function keepSentKeys(env, sentKeys) {
+  const states = new Map();
+  for (const { key, person, d } of sentKeys ?? []) {
+    const bytes = typeof d?.bytes === "string" ? fromB64url(d.bytes) : null;
+    if (!bytes) continue;
+    if (!states.has(person)) states.set(person, await identityState(env, person));
+    const state = states.get(person);
+    if (!state || state.frozen || (await checkDelegation(bytes, d.proof, state, now())) !== key) continue;
+    await keepKnown(env.DB, { key, person, bytes: d.bytes, proof: d.proof, expires: decode(bytes).expires });
   }
-  if (statements.length) await db.batch(statements);
 }
 
 /**
@@ -336,15 +347,16 @@ export async function groupThread(env, from, group, id, people = []) {
   const me = await ownHost(env);
   let signed = await learnPeople(env, data.people);
   let admins = await checkRoles(env, group, owner, data.roles, data.delegations);
-  const check = (entries, from) => checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
-    entries, signedHead: data.signedHead, from, lookups: lookupsWith(env, data.delegations), group: { owner, admin: (p) => admins.has(p) } });
+  const check = (entries, from, kept = null) => checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
+    entries, signedHead: data.signedHead, from, kept, lookups: lookupsWith(env, data.delegations), group: { owner, admin: (p) => admins.has(p) } });
   // A removal by an admin says so, worked out from the owner's signed roles while they're at hand (and kept so).
   const flagged = (list) => list.map((e) => (e.removedBy ? { ...e, removedByAdmin: Boolean(e.removedByAdmin || (e.removedBy !== owner && admins.has(e.removedBy))) } : e));
   let result = null;
   let changed = false;
   if (kept) {
     const entries = Array.isArray(data.entries) ? data.entries : [];
-    const next = await check(entries, { n: Number(copy.checked_n), head: String(copy.checked_head) });
+    // Checked against what was kept, so a delete or removal of something from before is held to the same rules.
+    const next = await check(entries, null, kept);
     if (!next.problem) {
       const heads = new Map(entries.map((e) => [e.n, e.head]));
       const fresh = next.entries.map((e) => ({ ...e, head: heads.get(e.n) ?? null }));

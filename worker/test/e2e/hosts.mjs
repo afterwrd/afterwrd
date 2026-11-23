@@ -341,7 +341,14 @@ async function madeUp(origin, name) {
     const headers = await signCall({ method: "POST", url, body: text_, person: id, from: origin, privateKey: hosting.privateKey });
     return fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: text_ });
   };
-  return { id, origin, name, chain, delegation, profile, call, sign: (fields, content) => makeRecord({ author: id, ...fields }, content, { privateKey: browserKey.privateKey, publicKey: key }) };
+  // A delegation from this made-up person for any key at all, and a record that names any key (signed by their own).
+  const delegate = async (other) => {
+    const b = encode({ v: 2, kind: "delegation", person: id, key: other, origin, expires: at + 30 * 86400 });
+    return { bytes: b64url(b), proof: await passkeySigns([await fingerprintOf("delegation", b)]) };
+  };
+  const forge = (fields, content, asKey) => makeRecord({ author: id, ...fields }, content, { privateKey: browserKey.privateKey, publicKey: asKey });
+  return { id, origin, name, chain, delegation, profile, call, delegate, forge,
+    sign: (fields, content) => makeRecord({ author: id, ...fields }, content, { privateKey: browserKey.privateKey, publicKey: key }) };
 }
 const fakes = [];
 for (const [i, name] of ["Pat Madeup", "Lee Madeup", "Sol Madeup", "Kit Madeup", "Ray Madeup"].entries()) fakes.push(await madeUp(`http://localhost:${8781 + i}`, name));
@@ -439,6 +446,19 @@ await cat.goto(`${C}/groups/${catGroup}`);
 check("…a pull sends only who's new, and her site asks for the delegation it's missing: Bob's post is kept",
   await waitFor(() => n(stateC, `copies WHERE id = ${q(coast)}`) === 1), "");
 check("…and her site keeps it again", n(stateC, `known_delegations WHERE key = ${q(bobKey)}`) === 1);
+
+// --- someone claiming another person's browser key -------------------------------------------------------------------------
+
+// Pat signs a delegation naming Ann's browser key, and sends it with a join that names that key too. Nothing Pat sends can
+// be signed by Ann's key, so the group's site mustn't start saying the key is Pat's.
+const annKey = sql(stateG, `SELECT key FROM known_delegations WHERE person = ${q(person(stateA))} LIMIT 1`)[0]?.key;
+check("(the group's site knows a browser key of Ann's)", Boolean(annKey));
+const patToken = (await inviteLink()).split("/_join/")[1];
+const patInfo = await (await fetch(`${G}/_join/${patToken}/info`)).json();
+const claimed = await fakes[0].forge({ kind: "join", host: groupPerson, item: groupPerson, seen: patInfo.members ?? null, prev: fakes[0].join }, { name: fakes[0].name }, annKey);
+const claim = await fakes[0].call(`${G}/_join/${patToken}/accept`, { sent: claimed.sent, delegation: await fakes[0].delegate(annKey), profile: fakes[0].profile });
+check("a join signed with someone else's browser key isn't taken", claim.status >= 400, String(claim.status));
+check("…and the group's site still says that key is Ann's", sql(stateG, `SELECT person FROM known_delegations WHERE key = ${q(annKey)}`)[0]?.person === person(stateA));
 
 // --- someone else's identity, given by a site that isn't theirs -----------------------------------------------------------
 

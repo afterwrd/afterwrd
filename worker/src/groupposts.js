@@ -34,7 +34,7 @@ import { groupSelf, membersNow, signedMember, theirs } from "./groupmembers.js";
 import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList, takeRecord, tombstone, tombstoneDates } from "./hosted.js";
 import { checkProfile, identityState, keepNewerProfile } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
-import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
+import { dateOver, ID_RE, itemGone, keepKnown, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord, withDelegation } from "./items.js";
 import { ownIdentity } from "./keys.js";
 import { buildIfDue } from "./before.js";
 import { tidyBefore } from "./clearout.js";
@@ -43,7 +43,7 @@ import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
 import { outbox } from "./outbox.js";
-import { DATE_RE, parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord, WITH_CONTENT } from "../public/static/records.js";
 import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { selfHosted } from "./hosting.js";
@@ -354,7 +354,7 @@ async function newPost(env, url, self, group, member, body) {
     release = here.release;
   }
   await keepProfile(env, String(member.identity), body.profile);
-  const made = await takeGroupPost(env, self, String(member.identity), { sent: body.sent, post, photosSent, photos });
+  const made = await takeGroupPost(env, self, String(member.identity), { sent: body.sent, post, photosSent, photos }, { delegation: mine.delegation });
   if (made.error) { await release(); return json({ error: made.error }, 400); }
   const id = made.id;
   // The files, copied from the member's site; if that goes wrong, the post and its photos go again.
@@ -379,11 +379,11 @@ async function newPost(env, url, self, group, member, body) {
  * item ids), undo (takes it all back again)} or {error}.
  * @param {any} env @param {any} self @param {string} author
  * @param {{ sent: any, post: any, photosSent: any[], photos: any[] }} what
- * @param {{ bringing?: boolean, frozen?: number | null }} [options]
+ * @param {{ bringing?: boolean, frozen?: number | null, delegation?: any }} [options]
  */
-export async function takeGroupPost(env, self, author, { sent, post, photosSent, photos }, { bringing = false, frozen = null } = {}) {
+export async function takeGroupPost(env, self, author, { sent, post, photosSent, photos }, { bringing = false, frozen = null, delegation = null } = {}) {
   const db = env.DB;
-  const lookups = lookupsFor(env);
+  const lookups = withDelegation(lookupsFor(env), delegation);
   const rules = await groupRules(env, self, false);
   const taken = [];
   const undo = async () => {
@@ -396,6 +396,7 @@ export async function takeGroupPost(env, self, author, { sent, post, photosSent,
   }
   const answer = await takeRecord(db, { sent, host: self, lookups, group: rules, bringing });
   if (answer.refused) { await undo(); return { error: answer.refused }; }
+  await keepKnown(db, delegation);
   const id = answer.entry.fp;
   const written = post.record.before ?? answer.entry.taken;
   const event = post.content.type === "event";
@@ -434,6 +435,7 @@ async function memberRecord(env, url, self, member, body, { shut = false } = {})
   const { record, content } = got;
   const id = String(record.item ?? "");
   if (!KINDS.has(record.kind) || !ID_RE.test(id) || record.host !== self.person) return json({ error: "That didn't work." }, 400);
+  if (WITH_CONTENT.has(record.kind) !== (content !== undefined)) return json({ error: "That didn't work." }, 400);
   if (shut && record.kind !== "delete") return json({ error: "This group has closed." }, 409);
   // At most so many a day from one member, across all the group's posts (hosted.js); never an admin's clear-up.
   if (await overDailyRecords(db, String(member.identity), String(record.kind), self.list)) return json({ error: DAILY_RECORDS_SAID }, 429);
@@ -464,11 +466,12 @@ async function memberRecord(env, url, self, member, body, { shut = false } = {})
   await keepProfile(env, String(member.identity), body.profile);
   const rules = await groupRules(env, self, record.kind === "remove" || record.kind === "calloff");
   // One date of a repeating event (step 6d): its own list, started by the first answer to it, the event's writer's.
-  const answer = await takeRecord(db, { sent: body.sent, host: self, lookups: lookupsFor(env), group: rules, owner: String(item.author) });
+  const answer = await takeRecord(db, { sent: body.sent, host: self, lookups: mine.lookups, group: rules, owner: String(item.author) });
   if (answer.refused) {
     const said = { "Someone has replied since.": "Someone has replied since, so it can't be changed now.", "That's out of order.": "Something changed meanwhile. Try again." };
     return json({ error: said[answer.refused] ?? answer.refused }, 409);
   }
+  await keepKnown(db, mine.delegation);
   if (answer.deleted) {
     // An event still to come: those going, or who might, are told it's off.
     if (now_.type === "event" && !now_.event?.cancelled && finishedAt(now_.event) > now()) {

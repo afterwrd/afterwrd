@@ -7,8 +7,10 @@
 import { checkPhotos, removeUnusedFiles, roleAlbum } from "./posts.js";
 import { hostingKey, ownIdentity, ownMove } from "./keys.js";
 import { identityState } from "./identities.js";
+import { checkDelegation } from "./identity.js";
+import { checkRecord } from "./records.js";
 import { listEntries, readList, takeRecord, tombstone } from "./hosted.js";
-import { parseRecord } from "../public/static/records.js";
+import { parseRecord, WITH_CONTENT } from "../public/static/records.js";
 import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { MAX_POST_TEXT } from "./edits.js";
 import { MAX_COMMENT } from "./archive/comments.js";
@@ -51,6 +53,54 @@ export function lookupsFor(env) {
       return mine ? { bytes: String(mine.bytes), proof: JSON.parse(String(mine.proof)) } : null;
     },
   };
+}
+
+/**
+ * A writer's delegation as their site sent it beside what they signed ({bytes, proof}): checked against their identity
+ * as allowing `key`. Returns {key, person, bytes, proof, expires}, or null. Nothing is kept: a delegation only says the
+ * person's passkey vouched for a key, not that they hold it, so it's kept (keepKnown) once something that key signed has
+ * been taken, never before.
+ */
+export async function sentDelegationOf(env, person, delegation, key) {
+  const state = await identityState(env, person);
+  const bytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
+  if (!state || !bytes || !key || (await checkDelegation(bytes, delegation.proof, state, now())) !== key) return null;
+  const { expires } = decode(bytes);
+  return { key, person, bytes: delegation.bytes, proof: delegation.proof, expires };
+}
+
+/** `lookups` that find `sent` (sentDelegationOf) for its own key before anything kept here. */
+export function withDelegation(lookups, sent) {
+  return { ...lookups, delegationOf: async (key) => (sent && key === sent.key ? { bytes: sent.bytes, proof: sent.proof } : lookups.delegationOf(key)) };
+}
+
+/**
+ * Keeps `sent` (sentDelegationOf) to pass on with what its key signed, once something it signed has been taken here:
+ * that proves its person holds the key. Never over another person's delegation for the same key.
+ * @param {D1Database} db
+ */
+export async function keepKnown(db, sent) {
+  if (!sent) return;
+  await db.prepare(`INSERT INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at)
+    VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+    ON CONFLICT(key) DO UPDATE SET bytes = excluded.bytes, proof = excluded.proof, expires_at = excluded.expires_at,
+      learnt_at = excluded.learnt_at WHERE known_delegations.person = excluded.person`)
+    .bind(sent.key, sent.person, sent.bytes, JSON.stringify(sent.proof), sent.expires).run();
+}
+
+/**
+ * Keeps `sent` (sentDelegationOf) if every one of `records` ([{sent}], kept to go into a list later) is signed with its key
+ * by its person, as taking them would check. Whether they all were.
+ */
+export async function keepIfSigned(env, sent, records) {
+  if (!sent || !records.length) return false;
+  const lookups = { ...withDelegation(lookupsFor(env), sent), at: now() };
+  for (const r of records) {
+    const got = await checkRecord(r?.sent, lookups);
+    if (!got || got.record.author !== sent.person || got.record.key !== sent.key) return false;
+  }
+  await keepKnown(env.DB, sent);
+  return true;
 }
 
 /** A record as stored in an entry ({sent}), read: {record, content} (content undefined once it's gone). */
@@ -381,12 +431,13 @@ export async function kindPlan(env, item, content, { record, content: c }, { gue
  * A record on one of the owner's own items, taken, and the item worked out again. {refused} if not; {deleted} if it
  * was its writer deleting it. With `origin` (this site), a comment is noted to those who'll want to know (notes.js).
  */
-export async function recordOn(env, host, id, sent, origin = null, { guests: guestIds = null, salt = null } = {}) {
+export async function recordOn(env, host, id, sent, origin = null, { guests: guestIds = null, salt = null, delegation = null } = {}) {
   const item = await env.DB.prepare("SELECT id, type, content, version, tally, audience FROM items WHERE id = ?").bind(id).first();
   if (!item) return { refused: "That post isn't here any more." };
   const got = sentRecord(sent);
   if (!got?.record || got.record.item !== id) return { refused: "That didn't work. Try again." };
   const { record, content } = got;
+  if (WITH_CONTENT.has(record.kind) !== (content !== undefined)) return { refused: "That didn't work. Try again." };
   const now_ = JSON.parse(String(item.content));
   if (content !== undefined) {
     const text = typeof content?.text === "string" ? content.text : "";
@@ -404,11 +455,13 @@ export async function recordOn(env, host, id, sent, origin = null, { guests: gue
   // Votes, answers, a poll's end and an event's changes (itemkinds.js).
   const plan = await kindPlan(env, item, now_, got, { guestIds, salt });
   if (plan.refused) return plan;
-  const answer = await takeRecord(env.DB, { sent, host, lookups: lookupsFor(env) });
+  const answer = await takeRecord(env.DB, { sent, host, lookups: withDelegation(lookupsFor(env), delegation) });
   if (answer.refused) {
     const said = { "Someone has replied since.": "Someone has replied since, so it can't be changed now.", "That's out of order.": "Something changed meanwhile. Try again." };
     return { refused: said[answer.refused] ?? answer.refused };
   }
+  // Taken, so its key is the writer's: kept, to pass on with it.
+  await keepKnown(env.DB, delegation);
   if (answer.deleted) {
     // An event still to come: its guests are told it's off, and their copies go (notes.js).
     if (now_.type === "event" && origin) {

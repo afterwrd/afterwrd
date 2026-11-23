@@ -49,6 +49,8 @@ export function withNew(kept, fresh) {
     if ((kind !== "delete" && kind !== "remove") || !e.record.about) continue;
     const target = byFp.get(e.record.about);
     if (!target || target.n >= e.n) continue;
+    // A delete is its writer's own (checkList held it to that); never let one empty someone else's words here.
+    if (kind === "delete" && target.by && target.by !== e.record.author) continue;
     for (const k of ["record", "content", "by"]) delete target[k];
     target.state = kind === "delete" ? "deleted" : "removed";
     if (kind === "remove") target.removedBy = e.record.author;

@@ -320,8 +320,8 @@ check("Ann's site keeps the conversation as it checked it: words Bob's site chan
 const freshRead = () => sql(stateA, `DELETE FROM thread_cache WHERE list = '${bobPostId}'`);
 freshRead();
 await ann.goto(bobsPostPage);
-check("words changed by Bob's site fail their check on Ann's, and aren't shown", (await ann.$$eval("article.from-friend .comment.gone", (l) => l.map((c) => c.textContent)))
-  .some((t) => t.includes("didn't pass its check")) && !(await ann.$eval("article.from-friend", (a) => a.textContent)).includes("Ann never said this"));
+check("words changed by Bob's site are caught on Ann's: the conversation says it doesn't check, and they aren't shown",
+  Boolean(await ann.$("article.from-friend .notice.alert")) && !(await ann.$eval("article.from-friend", (a) => a.textContent)).includes("Ann never said this"));
 annsEntry.sent.content = wasContent;
 const dropped = tampered.filter((e) => e.fp !== annsFp);
 sql(stateB, `UPDATE list_pages SET entries = '${JSON.stringify(dropped).replace(/'/g, "''")}' WHERE list = '${bobPostId}' AND page = 0`);

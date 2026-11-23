@@ -24,9 +24,8 @@
 // The writer's site, through /_admin/before (before.js): `groupPost` and `groupComments` for the owner's browser, and
 //   POST /_admin/before {groupPost: its id in group_mine, sent, photos, calloffs} | {groupItem, records: [{id, sent}]}
 import { bodyBytes, bodyJson, callFriend, siteCalling } from "./calls.js";
-import { fetchIdentity, identityState } from "./identities.js";
-import { checkDelegation } from "./identity.js";
-import { ID_RE, lookupsFor, refreshDate, sentRecord } from "./items.js";
+import { fetchIdentity } from "./identities.js";
+import { ID_RE, keepIfSigned, lookupsFor, refreshDate, sentDelegationOf, sentRecord, withDelegation } from "./items.js";
 import { takeRecord } from "./hosted.js";
 import { ASK_EVERY, MAX_ASK, SAME_TIME, commentsTrouble, headNow, keepSigned, maybeBuild, windowOf } from "./before.js";
 import { groupRules, hostOf, keepProfile, takeGroupPost } from "./groupposts.js";
@@ -35,7 +34,7 @@ import { pollTrouble } from "./itemkinds.js";
 import { MAX_GROUP_PHOTOS } from "./groups.js";
 import { removeUnusedFiles } from "./posts.js";
 import { keepSent } from "./sentchecks.js";
-import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
@@ -115,22 +114,6 @@ async function dropPost(env, id) {
     db.prepare("DELETE FROM group_comments WHERE post_id = ?").bind(id),
   ]);
   await removeUnusedFiles(env, files.flatMap((f) => [String(f.hash), String(f.thumb_hash)]));
-}
-
-/**
- * A delegation from `person`'s identity allowing `key`, as their site sent it with what they signed: checked, and kept to
- * pass on with it (as before.js answerBefore does). Whether it checked.
- */
-async function keepDelegation(env, person, delegation, key) {
-  try {
-    const state = await identityState(env, person);
-    const bytes = typeof delegation?.bytes === "string" ? fromB64url(delegation.bytes) : null;
-    if (!key || !state || !bytes || (await checkDelegation(bytes, delegation.proof, state, now())) !== key) return false;
-    const { expires } = decode(bytes);
-    await env.DB.prepare(`INSERT OR REPLACE INTO known_delegations (key, person, bytes, proof, expires_at, learnt_at) VALUES (?, ?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))`)
-      .bind(key, person, delegation.bytes, JSON.stringify(delegation.proof), expires).run();
-    return true;
-  } catch { return false; }
 }
 
 /** POST /_group/before, from a writer's site: asking about what they wrote here before afterwrd 2, or bringing it over. */
@@ -241,16 +224,17 @@ async function takeBroughtPost(env, self, caller, body, until, group) {
   const photos = photosSent.map(sentRecord);
   const calloffsSent = Array.isArray(body.calloffs) ? body.calloffs.slice(0, MAX_DATES + 1) : [];
   const calloffs = calloffsSent.map(sentRecord);
-  if (!post?.record || !(await keepDelegation(env, caller.person, body.delegation, post.record.key))) return json({ error: "That isn't signed by them." }, 400);
+  const allowed = post?.record && (await sentDelegationOf(env, caller.person, body.delegation, post.record.key));
+  if (!allowed) return json({ error: "That isn't signed by them." }, 400);
   const wrong = await postTrouble(prepared, post, photos, calloffs, caller.person, self.person);
   if (wrong) return json({ error: wrong }, 400);
   await keepProfile(env, caller.person, body.profile);
   // Commented on before: it takes nothing new until those comments are in, or the group's 30 days are up.
   const commented = await db.prepare("SELECT 1 FROM group_comments WHERE post_id = ? LIMIT 1").bind(prepared.id).first();
-  const made = await takeGroupPost(env, self, caller.person, { sent: body.sent, post, photosSent, photos }, { bringing: true, frozen: commented ? until : null });
+  const made = await takeGroupPost(env, self, caller.person, { sent: body.sent, post, photosSent, photos }, { bringing: true, frozen: commented ? until : null, delegation: allowed });
   if (made.error) return json({ error: made.error }, 400);
   // The dates called off, each starting its own list (its writer's: step 6d).
-  const lookups = lookupsFor(env);
+  const lookups = withDelegation(lookupsFor(env), allowed);
   for (let i = 0; i < calloffsSent.length; i++) {
     const answer = await takeRecord(db, { sent: calloffsSent[i], host: self, lookups, group: group.rules, owner: caller.person, bringing: true });
     if (!answer.refused) await refreshDate(db, made.id, calloffs[i].record.date);
@@ -281,7 +265,9 @@ async function takeBroughtComments(env, self, caller, body, group) {
     await maybeBuild(env, self, item, group);
     return json({ error: why }, 409);
   };
-  if (!(await keepDelegation(env, caller.person, body.delegation, first.record.key))) return json({ error: "That isn't signed by them." }, 400);
+  if (!(await keepIfSigned(env, await sentDelegationOf(env, caller.person, body.delegation, first.record.key), records))) {
+    return json({ error: "That isn't signed by them." }, 400);
+  }
   const seen = await headNow(db, item);
   const owner = await db.prepare("SELECT author, author_last FROM items WHERE id = ?").bind(item).first();
   if (!seen || !owner) return json({ error: "That post isn't here any more." }, 404);
