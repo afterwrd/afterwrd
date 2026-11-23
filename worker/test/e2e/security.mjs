@@ -274,6 +274,18 @@ for (const trick of ["/.//evil.example", "/..//evil.example", "/%2e//evil.exampl
   check(`sign-in won't send you off the site (${trick})`, new URL(next, BASE).origin === BASE && !next.startsWith("//"), next);
 }
 
+// --- a friend's or group's site still on afterwrd 1 -------------------------------------------
+// Told this site has moved (410), never sent to sign in (302) or told it's not connected (401: "they removed you").
+const oldKey = { Authorization: `Bearer ${"k".repeat(43)}` };
+const oldFeed = await fetch(`${BASE}/_peer/feed`, { headers: oldKey, redirect: "manual" });
+check("an afterwrd 1 friend's read is told this site has moved", oldFeed.status === 410
+  && (await oldFeed.json()).error?.includes("moved to afterwrd 2"));
+const oldComment = await fetch(`${BASE}/_peer/comments`, { method: "POST", headers: { ...oldKey, "Content-Type": "application/json" }, body: "{}" });
+check("…and so is a comment it sends", oldComment.status === 410);
+const oldGroup = await fetch(`${BASE}/_member/notify`, { method: "POST", headers: { ...oldKey, "Content-Type": "application/json" }, body: "{}" });
+check("an afterwrd 1 group's note is told too", oldGroup.status === 410);
+check("a call to /_member/ without a key is answered as before", (await fetch(`${BASE}/_member/notify`, { method: "POST", body: "{}" })).status === 401);
+
 // --- update page ------------------------------------------------------------------------------
 const updatePage = await (await fetch(`${BASE}/_admin/update`, { headers: { Cookie: `__Host-session=${ownerCookie}` } })).text();
 check("owner's Update page shows this version", updatePage.includes(`Your site is on afterwrd ${JSON.parse(execFileSync("cat", [`${WORKER}/package.json`], { encoding: "utf8" })).version}`));

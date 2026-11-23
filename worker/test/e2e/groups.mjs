@@ -171,6 +171,10 @@ await ann.click("#make");
 await ann.waitForSelector("#link:not([hidden])");
 const link = await ann.$eval("#link-url", (i) => i.value);
 check("invite link made, on the group's site", /^http:\/\/localhost:8790\/_join\/[\w-]{40,}$/.test(link), link.slice(0, 40));
+// A member's site still on afterwrd 1 calls with the key it was given: told the group has moved, not "Not a member".
+const oldMember = await fetch(`${G}/_group/posts`, { headers: { Authorization: `Bearer ${"k".repeat(43)}` } });
+check("a member's site still on afterwrd 1 is told the group has moved", oldMember.status === 410
+  && (await oldMember.json()).error?.includes("moved to afterwrd 2"));
 
 const stranger = await (await browser.createBrowserContext()).newPage();
 await stranger.goto(link);

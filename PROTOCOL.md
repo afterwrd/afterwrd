@@ -3839,6 +3839,11 @@ them:
 Anything that changes which bytes are signed, how a signature or fingerprint is made, or how an existing field is read,
 needs a new version number, in every tag, so that nothing signed under one version can be read as the other.
 
+A site still on afterwrd 1 calls the old way: anything under `/_peer/`, or `/_group/` and `/_member/` with
+`Authorization: Bearer` and no `Signature-Input`. Such a call is answered `410` with `{"error": "This site has moved to
+afterwrd 2. …"}` (or "This group has moved…"), so the older site shows its owner why, and forgets nothing: afterwrd 1
+reads a `401` as "they removed you". This goes once users have come over, with the rest of what's only for afterwrd 1.
+
 `GET /_version` gives which build of the code is answering, and `GET /_group/ping` gives a group's release version and
 protocol number. Neither is negotiated, and nothing about how a call is checked depends on them.
 

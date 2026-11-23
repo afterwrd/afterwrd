@@ -1,6 +1,6 @@
 {
   "name": "afterwrd-worker",
-  "version": "0.58.2",
+  "version": "2.0.0",
   "private": true,
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -29,6 +29,7 @@
     "cloudflareClientsBefore": [
       "9a89827907d5681523b116176031302e"
     ],
-    "releaseKey": "jWNP4nrIYvCKiaHm2PXOy9lx2wobn4m7FjWWZARyEK8="
+    "releaseKey": "jWNP4nrIYvCKiaHm2PXOy9lx2wobn4m7FjWWZARyEK8=",
+    "securityFix": "2.0.0"
   }
 }

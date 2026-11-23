@@ -58,6 +58,16 @@ const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_
 // identity with it), Download everything and Update; and files, live updates and the rest that aren't pages.
 const SIGNING_NOT_NEEDED = /^\/(_admin\/(keys|import\/move|export|update)|_cloudflare|_live|_push|_groups|files|static)(\/|$)/;
 
+// A friend's or group's site still on afterwrd 1 calls the old way: /_peer/ on friends, and /_group/ and /_member/
+// with the key one site gave the other (Authorization: Bearer). afterwrd 2's calls are signed (signedcalls.js) and
+// never carry one. Such a call is told plainly that this site has moved, so its owner sees why on the friend's or
+// group's page, not "answered 302" or "Not a member". A 410 because afterwrd 1 forgets nothing on it (a 401 would
+// read as "they removed you"). Upgrade-only: goes with the rest of afterwrd 1's code once users have come over.
+const SITE_MOVED = "This site has moved to afterwrd 2. Update yours, from its Update page, to see its posts again.";
+const GROUP_MOVED = "This group has moved to afterwrd 2. Update your site, from its Update page, to use it again.";
+const MEMBER_MOVED = "This site has moved to afterwrd 2.";
+const fromAfterwrd1 = (request) => /^Bearer\s/.test(request.headers.get("Authorization") ?? "") && !request.headers.has("Signature-Input");
+
 /**
  * One request, start to finish, wherever the site's database is: in this Worker (D1), or inside the site's object
  * (sqlite.js, the prototype), which calls this with env.DB its own. Each request is timed (timing.js): the signed-in
@@ -160,6 +170,9 @@ async function route(request, env, work) {
   if (url.pathname === "/_p/mention" && request.method === "POST") return receiveReceipt(request, env, url, work);
   // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
   if (friendCallRoute(`${request.method} ${url.pathname}`)) return handleFriendCalls(request, env, url);
+  // A friend's or group's site still on afterwrd 1 (SITE_MOVED).
+  if (url.pathname.startsWith("/_peer/")) return json({ error: SITE_MOVED }, 410);
+  if (url.pathname.startsWith("/_member/") && fromAfterwrd1(request)) return json({ error: MEMBER_MOVED }, 410);
   // A group the owner's in, calling with the key this site gave it.
   if (url.pathname.startsWith("/_member/")) return handleMember(request, env, url);
   // Anything else another site might ask under /_p/ isn't here: a plain 404, never the sign-in page (a 401 would read
@@ -268,6 +281,8 @@ async function routeGroup(request, env, url) {
   // afterwrd 2 (step 6a): the group's identity, public, with its owner's (identities.js, groupidentity.js).
   if (url.pathname === "/.well-known/afterwrd") return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   if (url.pathname.startsWith("/_join/")) return handleJoinLink(request, env, url);
+  // A member's site still on afterwrd 1 (SITE_MOVED).
+  if (url.pathname.startsWith("/_group/") && fromAfterwrd1(request)) return json({ error: GROUP_MOVED }, 410);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
   // afterwrd 2 (step 6c): its posts, as signed items, to members' signed calls (groupposts.js).
   if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check"
