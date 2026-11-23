@@ -1,6 +1,6 @@
 // The owner's import page. The work happens in the browser (public/static/import/main.js): the export is read
 // on this computer and only the ticked sections are uploaded.
-import { asset, favicon, ownerHeader } from "./nav.js";
+import { asset, integrity, favicon, ownerHeader } from "./nav.js";
 import { escape } from "../util.js";
 
 const SECTION_CHOICES = [
@@ -91,8 +91,8 @@ what you imported before (never what you've posted on afterwrd); the old version
   <ul id="notes"></ul>
 </section>
 </main>
-<script src="/static/vendor/zip-2.24.0.min.js"></script>
-<script type="module" src="${asset("/static/import/main.js")}"></script>
+<script src="/static/vendor/zip-2.24.0.min.js" integrity="${integrity("/static/vendor/zip-2.24.0.min.js")}"></script>
+<script type="module" src="${asset("/static/import/main.js")}" integrity="${integrity("/static/import/main.js")}"></script>
 </body>
 </html>`;
 }
@@ -202,8 +202,8 @@ other people's mouths.</p>
 </section>
 </section>` : ""}
 </main>
-<script src="/static/vendor/zip-2.24.0.min.js"></script>
-<script type="module" src="${asset("/static/import/move.js")}"></script>
+<script src="/static/vendor/zip-2.24.0.min.js" integrity="${integrity("/static/vendor/zip-2.24.0.min.js")}"></script>
+<script type="module" src="${asset("/static/import/move.js")}" integrity="${integrity("/static/import/move.js")}"></script>
 </body>
 </html>`;
 }

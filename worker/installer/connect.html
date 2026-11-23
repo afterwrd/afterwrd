@@ -1,7 +1,7 @@
 <!doctype html>
 <!-- afterwrd's Connect page (https://afterwrd.app/connect/): the one address Cloudflare sends people back to after
      they allow afterwrd to change their account for an hour. It does two things, both in the browser, with nothing
-     stored anywhere and no server behind it (this is a static page on GitHub Pages):
+     stored anywhere (the installer's Worker serves it as it is here, worker/central/site.js, never GitHub):
        1. On the way out (?to=…&state=…&challenge=…, from a site's /_cloudflare/start): remembers which site asked,
           in this tab only, and sends the browser to Cloudflare's sign-in.
        2. On the way back (?code=…&state=…, from Cloudflare): checks the state is the one this tab started with, and
@@ -13,7 +13,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
 <title>Connecting to Cloudflare · afterwrd</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20width%3D%2224%22%20height%3D%2224%22%20rx%3D%226%22%20fill%3D%22%23ff8a3d%22%2F%3E%3Cpath%20d%3D%22M12%204a8%208%200%201%201-4.7%2014.5L3.8%2020l1.2-3.6A8%208%200%200%201%2012%204z%22%20transform%3D%22translate(2.4%202.2)%20scale(0.8)%22%20fill%3D%22none%22%20stroke%3D%22%2316201b%22%20stroke-width%3D%223.6%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E">
 <style>

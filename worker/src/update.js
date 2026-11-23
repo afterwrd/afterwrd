@@ -23,7 +23,7 @@
 // Releases come from the GitHub repository in package.json (afterwrd.releases). Every file is checked against
 // the release's manifest; as with installing, trust rests on that repository.
 import pkg from "../package.json";
-import { connectedToken, tokenFor } from "./cloudflare.js";
+import { connectedToken, testingHere, tokenFor } from "./cloudflare.js";
 import { api, deployVersion, existingDatabase, FILES_AT_ONCE, findWorker, loadRelease, stageVersion, uploadAssets } from "./deploy.js";
 import { recovering } from "./recover.js";
 import { autoState, backgroundToken, chooseRelease, healthCheck, laterAuto, runningSince, setEarly, startRunNow, switchCarefully, turnOff } from "./auto.js";
@@ -50,7 +50,7 @@ export async function handleUpdate(request, env, url, owner) {
   // Self-hosted (hosting.js), the server updates by pulling a newer image: the page says what's out and how.
   if (selfHosted(env)) {
     if (request.method === "GET" && path === "") {
-      return html(selfHostedUpdatePage(pageData(env, { ...(await selfHostedData(env)), me: await headerMe(env.DB, owner) })));
+      return html(selfHostedUpdatePage(pageData(env, { ...(await selfHostedData(env, url.origin)), me: await headerMe(env.DB, owner) })));
     }
     if (request.method === "GET" && path === "/version") return json({ version: VERSION });
     return new Response("Not found", { status: 404 });
@@ -90,10 +90,14 @@ export async function handleUpdate(request, env, url, owner) {
   const body = await request.json().catch(() => ({}));
   if (path === "/group-assets" || path === "/group-deploy") return updateGroup(request, env, path, body);
   try {
+    let pinned = null;
     if (path !== "/forget") {
       if (!TAG_RE.test(body.tag ?? "")) throw new Error("Unknown release.");
       // Only ever forward: an older release could bring back problems since fixed.
       if (!newer(body.tag.slice(1), VERSION)) throw new Error("That isn't newer than this site's version.");
+      // Only a release signed with afterwrd's own key, exactly as signed, however the site is updated: GitHub alone
+      // can't put code on a site (signing.js).
+      pinned = await signedManifest(env, url.origin, body.tag.slice(1));
     }
     if (!url.hostname.endsWith(".workers.dev")) throw new Error("Updating works from the site's workers.dev address.");
     const script = url.hostname.split(".")[0];
@@ -106,10 +110,8 @@ export async function handleUpdate(request, env, url, owner) {
       await api(token, `/accounts/${account}/workers/scripts/${script}/secrets/UPDATE_TOKEN`, { method: "DELETE" });
       return json({ ok: true });
     }
-    const { token, background } = await updateToken(request, env, url);
+    const { token } = await updateToken(request, env, url);
     if (path !== "/check" && !/^[0-9a-f]{32}$/.test(body.account ?? "")) throw new Error("Unknown Cloudflare account.");
-    // With automatic updates' access, only what's signed, exactly as signed (as the automatic run does).
-    const pinned = background ? await signedManifest(env, url.origin, body.tag.slice(1)) : undefined;
     const release = () => loadRelease(`https://github.com/${REPO}/releases/download/${body.tag}`, pinned);
     if (path === "/check") return json({ account: (await findWorker(token, url.hostname)).account });
     if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, script, await release(), { most: FILES_AT_ONCE }) });
@@ -166,18 +168,26 @@ async function updateToken(request, env, url) {
   }
 }
 
-/** The signed manifest hash for `version` (signing.js), or an error saying it isn't signed yet. */
-async function signedManifest(env, origin, version) {
-  const list = await signedList(env, origin);
-  const state = await autoState(env.DB);
-  const signed = list && list.seq >= (state.listSeq ?? 0) ? list.releases.get(version) : null;
-  if (!signed) throw new Error(`afterwrd ${version} isn't signed yet, so automatic updates' access won't install it. It'll install itself once it is.`);
+/**
+ * The signed manifest hash for `version` (signing.js), or an error saying it isn't signed (yet). Every install this
+ * site makes (itself by hand, its groups, new groups) installs only that. Also for groupsites.js.
+ */
+export async function signedManifest(env, origin, version) {
+  const list = await currentList(env, origin);
+  const signed = list?.releases.get(version);
+  if (!signed) throw new Error(`afterwrd ${version} isn't signed with afterwrd's own key yet, so it can't be installed. Releases are usually signed within a day of coming out: try again then.`);
   return signed.manifestSha256;
 }
 
+/** The signed list of releases, if it's genuine and no older than one this site has already seen (auto.js keeps that). */
+async function currentList(env, origin) {
+  const list = await signedList(env, origin);
+  return list && list.seq >= ((await autoState(env.DB)).listSeq ?? 0) ? list : null;
+}
+
 /** What a self-hosted site's Update page shows: this version, the latest release, and this site's updates. */
-async function selfHostedData(env) {
-  const latest = await latestRelease(env.DB);
+async function selfHostedData(env, origin) {
+  const latest = await latestRelease(env, origin);
   return {
     version: VERSION, latest,
     available: Boolean(latest.version && newer(latest.version, VERSION)),
@@ -189,7 +199,7 @@ async function selfHostedData(env) {
 
 /** What the Update page shows: this version, the latest release, groups behind, and asking a friend for a check. */
 async function updateData(request, env, url, owner) {
-  const latest = await latestRelease(env.DB);
+  const latest = await latestRelease(env, url.origin);
   return {
     owner: owner.name, version: VERSION, latest,
     available: Boolean(latest.version && newer(latest.version, VERSION)),
@@ -220,16 +230,17 @@ async function updateData(request, env, url, owner) {
  */
 async function autoData(env, url, latest) {
   const state = await autoState(env.DB);
+  const github = latest.unsigned ?? latest.version; // GitHub's newest, signed or not
   const data = { ...state, signed: Boolean(releaseKey(env, url.origin)), running: await runningSince(env.DB), next: null };
-  if (!state.on || !latest.version || !newer(latest.version, VERSION) || !data.signed) return data;
+  if (!state.on || !github || !newer(github, VERSION) || !data.signed) return data;
   const list = await signedList(env, url.origin);
-  if (!list || list.seq < (state.listSeq ?? 0)) return { ...data, next: { version: latest.version, unsigned: true } };
+  if (!list || list.seq < (state.listSeq ?? 0)) return { ...data, next: { version: github, unsigned: true } };
   // The newest signed release (what "Install it now" installs), and when it'd install itself.
   const pick = (await chooseRelease(env, url.origin, list, [], fetch, { noWait: true, early: Boolean(state.early) })).ready;
-  if (!pick) return { ...data, next: { version: latest.version, unsigned: true } };
+  if (!pick) return { ...data, next: { version: github, unsigned: true } };
   data.next = { version: pick.version, after: pick.after, failed: (state.failed ?? []).includes(pick.version),
     // GitHub's newest isn't signed (yet), but an older one, still newer than this site, is.
-    unsigned: pick.version !== latest.version ? latest.version : null };
+    unsigned: pick.version !== github ? github : null };
   return data;
 }
 
@@ -258,10 +269,10 @@ export const groupsBehind = async (db) => (await madeGroups(db)).filter((g) => g
 async function updateGroup(request, env, path, body) {
   try {
     const url = new URL(request.url);
-    const { token, background } = await updateToken(request, env, url);
+    const { token } = await updateToken(request, env, url);
     const group = (await groupsBehind(env.DB)).find((g) => g.id === Number(body.group));
     if (!group || !/^[0-9a-f]{32}$/.test(group.account)) throw new Error("That group is already up to date, or couldn't be reached.");
-    const release = await loadRelease(GROUP_RELEASE, background ? await signedManifest(env, url.origin, VERSION) : undefined);
+    const release = await loadRelease(GROUP_RELEASE, await signedManifest(env, url.origin, VERSION));
     if (path === "/group-assets") return json({ jwt: await uploadAssets(token, group.account, group.script, release, { most: FILES_AT_ONCE }) });
     const settings = await api(token, `/accounts/${group.account}/workers/scripts/${group.script}/settings`);
     if (!isGroupWorker(settings, group)) throw new Error("That Worker isn't the group's any more, so it wasn't updated.");
@@ -272,23 +283,38 @@ async function updateGroup(request, env, path, body) {
   }
 }
 
-// The latest release's manifest names its version. It's fetched from GitHub's download links rather than its API:
-// the API allows 60 anonymous requests an hour per address, and Workers share their addresses with many others.
-// (Only the version is read here; updating downloads the release by tag and checks every file.) The answer is kept
-// in settings ('latest_release') and reused for a few minutes, or for longer if GitHub can't be reached.
-async function latestRelease(db) {
+// The newest release this site may install: GitHub's latest if it's signed with afterwrd's own key (signing.js),
+// exactly as signed; otherwise the newest that is, and GitHub's newer one only named, as waiting for its signature
+// (`unsigned`). So its notes and its "fixes a security problem" are only ever a signed release's. Manifests are
+// fetched from GitHub's download links rather than its API: the API allows 60 anonymous requests an hour per address,
+// and Workers share their addresses with many others. The answer is kept in settings ('latest_release') and reused
+// for a few minutes, or for longer if GitHub can't be reached.
+async function latestRelease(env, origin) {
+  const db = env.DB;
   const known = await knownRelease(db);
   if (known.latest && now() - known.checked < FRESH_SECONDS) return known.latest;
   let latest;
   try {
-    const response = await fetch(`https://github.com/${REPO}/releases/latest/download/manifest.json`, {
-      headers: { "User-Agent": "afterwrd" },
-    });
-    if (!response.ok) throw new Error(`GitHub said ${response.status}.`);
-    const { version, notes, security_fix: fix } = await response.json();
+    const list = await currentList(env, origin);
+    if (!list) throw new Error("couldn't read the list of signed releases");
+    // (On this computer, a test's stand-in for GitHub's releases.)
+    const standIn = testingHere(env, origin) && env.RELEASES_URL;
+    const base = standIn || `https://github.com/${REPO}/releases/download`;
+    const newest = (await manifestAt(standIn ? `${standIn}/latest/manifest.json` : `https://github.com/${REPO}/releases/latest/download/manifest.json`)).manifest;
+    let found = await signedRelease(list, newest.version, base);
+    let unsigned = null;
+    if (!found) {
+      // Not signed (yet): the newest that is.
+      const best = [...list.releases.keys()].reduce((a, b) => (!a || newer(b, a) ? b : a), null);
+      if (!best) throw new Error("no signed release yet");
+      found = await signedRelease(list, best, base);
+      if (!found) throw new Error("the newest signed release isn't on GitHub as signed");
+      if (TAG_RE.test(`v${newest.version}`) && newer(newest.version, best)) unsigned = newest.version;
+    }
+    const { version, notes, security_fix: fix } = found;
     const tag = `v${version}`;
-    if (!TAG_RE.test(tag)) throw new Error("The latest release has an unexpected version.");
     latest = { tag, version, notes: typeof notes === "string" ? notes.slice(0, 3000) : "", page: `https://github.com/${REPO}/releases/tag/${tag}` };
+    if (unsigned) latest.unsigned = unsigned;
     // The newest release that fixed a security problem (package.json afterwrd.securityFix), so a site older than it
     // can say so on Home, even if later releases fixed nothing of the kind.
     if (typeof fix === "string" && TAG_RE.test(`v${fix}`) && !newer(fix, version)) latest.securityFix = fix;
@@ -303,6 +329,26 @@ async function latestRelease(db) {
   return latest;
 }
 
+/** A release's manifest from GitHub: {manifest, sha256}. */
+async function manifestAt(address) {
+  const response = await fetch(address, { headers: { "User-Agent": "afterwrd" } });
+  if (!response.ok) throw new Error(`GitHub said ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  let manifest;
+  try { manifest = JSON.parse(new TextDecoder().decode(bytes)); } catch { throw new Error("a release's manifest isn't readable"); }
+  if (!TAG_RE.test(`v${manifest?.version}`)) throw new Error("a release has an unexpected version");
+  return { manifest, sha256 };
+}
+
+/** `version`'s manifest, if the signed list has it and GitHub's copy is exactly what was signed; else null. */
+async function signedRelease(list, version, base) {
+  const entry = list.releases.get(version);
+  if (!entry || !TAG_RE.test(`v${version}`)) return null;
+  const { manifest, sha256 } = await manifestAt(`${base}/v${version}/manifest.json`);
+  return sha256 === entry.manifestSha256 && manifest.version === version ? manifest : null;
+}
+
 const knownRelease = async (db) => {
   const row = await db.prepare("SELECT value FROM settings WHERE key = 'latest_release'").first();
   return row ? JSON.parse(row.value) : {};
@@ -315,11 +361,11 @@ const knownRelease = async (db) => {
  * next page did); if GitHub is slow, it finishes after the page is sent. An open page gets the news within 30
  * seconds from live.js asking /_live.
  */
-export async function waitingRelease(env, work) {
+export async function waitingRelease(env, work, origin) {
   const known = await knownRelease(env.DB);
   let { version } = known;
   if (!known.checked || now() - known.checked > CHECK_SECONDS) {
-    const refresh = latestRelease(env.DB).catch(() => null);
+    const refresh = latestRelease(env, origin).catch(() => null);
     if (work?.waitUntil) work.waitUntil(refresh);
     const answer = await Promise.race([refresh, new Promise((resolve) => setTimeout(resolve, REFRESH_WAIT_MS))]);
     if (typeof answer?.version === "string") version = answer.version;
@@ -327,7 +373,7 @@ export async function waitingRelease(env, work) {
   return version && TAG_RE.test(`v${version}`) && newer(version, VERSION) ? version : null;
 }
 
-export const updateWaiting = async (env, work) => Boolean(await waitingRelease(env, work));
+export const updateWaiting = async (env, work, origin) => Boolean(await waitingRelease(env, work, origin));
 
 /** The latest release this site knows of, and the newest one that fixed a security problem (for checks.js). */
 export async function knownLatest(db) {

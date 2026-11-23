@@ -167,7 +167,7 @@ export async function renderArchive(request, env, url, user, work) {
     Promise.all([
       newCount(db, user),
       first(db, "SELECT COUNT(*) AS n FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NULL"),
-      waitingRelease(env, work),
+      waitingRelease(env, work, url.origin),
       ownerName(db),
       profilePictures(db),
       friendFaces(db),

@@ -26,9 +26,18 @@ const PREFETCH_RULES = JSON.stringify({ prefetch: [{
   eagerness: "moderate",
 }] });
 
-const IMPORTS = JSON.stringify({ imports: Object.fromEntries(Object.keys(HASHES)
-  .filter((path) => path.endsWith(".js") && !path.startsWith("/static/vendor/") && !path.startsWith("/static/app/"))
-  .map((path) => [path, asset(path)])) });
+// Each script's SHA-256 too ("integrity"), so a browser runs only the release's own scripts, whatever serves them: the
+// same hashes static.js checks before sending a file, built into this code (scripts/asset-hashes.mjs).
+/** A site file's Subresource Integrity value ("sha256-…"), or "" for one the release doesn't list. */
+export const integrity = (path) => (Object.hasOwn(HASHES, path)
+  ? `sha256-${btoa(String.fromCharCode(...HASHES[path].match(/../g).map((h) => Number.parseInt(h, 16))))}` : "");
+const MODULES = Object.keys(HASHES).filter((path) => path.endsWith(".js") && !path.startsWith("/static/vendor/") && !path.startsWith("/static/app/"));
+const IMPORTS = JSON.stringify({
+  imports: Object.fromEntries(MODULES.map((path) => [path, asset(path)])),
+  integrity: Object.fromEntries(MODULES.map((path) => [asset(path), integrity(path)])),
+});
+/** The import map, for a page's head before any module script (siteHeader, and pages.js's pages). */
+export const importMap = () => `<script type="importmap" nonce="${nonce()}">${IMPORTS}</script>`;
 
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
@@ -137,11 +146,11 @@ export function siteHeader({ main, menu, current, face = {}, updateKnown = true 
     </div>
   </details>
 </div></header>
-<script type="importmap" nonce="${nonce()}">${IMPORTS}</script>
+${importMap()}
 <script type="speculationrules" nonce="${nonce()}">${PREFETCH_RULES}</script>
-<script src="${asset("/static/live.js")}" defer></script>
+<script src="${asset("/static/live.js")}" integrity="${integrity("/static/live.js")}" defer></script>
 ${UI_PRELOAD}
-<script type="module" src="${asset("/static/ui/main.js")}"></script>
+<script type="module" src="${asset("/static/ui/main.js")}" integrity="${integrity("/static/ui/main.js")}"></script>
 <script nonce="${nonce()}">
   // Close the menu when clicking anywhere else.
   document.addEventListener("click", (e) => {
@@ -176,7 +185,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
 const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app"];
-const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}">`).join("\n");
+const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}" integrity="${integrity(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */
 export const initial = (name) => [...String(name).trim()][0]?.toUpperCase() ?? "?";

@@ -110,6 +110,15 @@ export async function sentDelegation(env, url, text) {
   return row && delegationFits(bytes, url, String(row.person)) ? bytes : null;
 }
 
+/**
+ * Whether the browser asking for `bytes` (a delegation) holds the key it names: it signs the delegation itself, as
+ * "delegation", with that key (`possession`). So a passkey only ever lets sign a key the browser it's used in has.
+ */
+export async function holdsKey(bytes, possession) {
+  const key = bytes && decode(bytes)?.key;
+  return typeof key === "string" && typeof possession === "string" && checkAs("delegation", key, bytes, possession);
+}
+
 /** Whether a delegation's bytes are for `person`, at this site's address, for a browser key, for 30 days at most. */
 function delegationFits(bytes, url, person) {
   const d = bytes && decode(bytes);
@@ -191,7 +200,7 @@ async function start(env, url, owner, { recovery, browserKey }) {
     allow: passkeys.map((p) => p.id) }));
 }
 
-async function finish(request, env, url, owner, { identity: identityText, delegation: delegationText, response }) {
+async function finish(request, env, url, owner, { identity: identityText, delegation: delegationText, response, possession }) {
   const nonce = await readChallenge(request, env, "keys");
   if (!nonce) return json({ error: "That took too long. Try again." }, 400);
   const identity = typeof identityText === "string" ? fromB64url(identityText) : null;
@@ -200,7 +209,7 @@ async function finish(request, env, url, owner, { identity: identityText, delega
   // Only what start made: this site's address and hosting key, the owner's own passkeys.
   const mine = await passkeysOf(env, url, owner);
   if (!doc || doc.seq !== 0 || doc.origin !== url.origin || doc.hosting !== (await hostingKey(env)).publicKey
-    || doc.passkeys.some((p) => !mine.some((m) => m.id === p.id && m.key === p.key)) || !delegation) {
+    || doc.passkeys.some((p) => !mine.some((m) => m.id === p.id && m.key === p.key)) || !delegation || !(await holdsKey(delegation, possession))) {
     return json({ error: "That didn't work. Try again." }, 400);
   }
   const statements = [await fingerprintOf("identity", identity), await fingerprintOf("delegation", delegation)];
@@ -383,10 +392,10 @@ async function browserStart(env, url, { browserKey }) {
   return withChallenge(env, "browser", nonce, json({ nonce, delegation: b64url(delegation), allow }));
 }
 
-async function browserFinish(request, env, url, owner, { delegation: text, response }) {
+async function browserFinish(request, env, url, owner, { delegation: text, response, possession }) {
   const nonce = await readChallenge(request, env, "browser");
   const bytes = await sentDelegation(env, url, text);
-  if (!nonce || !bytes) return json({ error: "That didn't work. Try again." }, 400);
+  if (!nonce || !bytes || !(await holdsKey(bytes, possession))) return json({ error: "That didn't work. Try again." }, 400);
   const proof = proofFrom(response, nonce, [await fingerprintOf("delegation", bytes)]);
   if (!(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
   const kept = await keepDelegation(env, { bytes, proof, credentialId: proof.credential, sessionHash: owner.session_hash ?? null });

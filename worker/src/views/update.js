@@ -169,6 +169,12 @@ export function updatePage({ owner, version: VERSION, latest, available, securit
   // While automatic updates are on, they're the one way to update (signed releases only), unless a release has to be
   // installed by hand (a new kind of store): then the steps below, with their access.
   const byHand = !auto.on || !auto.next || (auto.waiting?.needsHand && auto.waiting.version === auto.next.version);
+  // What updating by hand installs: with automatic updates on, the release they picked (signed, and the one that
+  // needs installing by hand); otherwise the newest signed release.
+  const offer = auto.on && auto.next && !auto.next.unsigned && byHand ? { tag: `v${auto.next.version}`, version: auto.next.version } : latest;
+  // GitHub has a newer release than any signed one: named, but not offered until it's signed.
+  const waitingSignature = latest.unsigned ? `<p class="meta" id="unsigned">afterwrd ${escape(latest.unsigned)} is out on GitHub too. It'll be
+  offered here once it's signed with afterwrd's own key, usually within a day.</p>` : "";
   // Groups this site made that are behind it: brought up to this version, with the same connection.
   const groupsPart = groups.length && !available ? `
 <section class="card" id="groups">
@@ -196,20 +202,21 @@ export function updatePage({ owner, version: VERSION, latest, available, securit
   if (latest.error) {
     body = `<p>Couldn't look for a newer version just now (${escape(latest.error)}). It'll try again later.</p>`;
   } else if (!available) {
-    body = `<p>You have the latest version.</p>`;
+    body = `<p>You have the latest version.</p>${waitingSignature}`;
   } else {
     body = `
 <p><b>afterwrd ${escape(latest.version)} is available.</b> <a href="${escape(latest.page)}" target="_blank" rel="noopener">On GitHub</a></p>
+${waitingSignature}
 ${securityFix ? `<p class="security"><b>It fixes a security problem</b> (in ${escape(securityFix)}), so it's worth updating soon.</p>` : ""}
 ${notes}
 <p class="meta">Updating keeps everything: your posts, photos, friends and devices.</p>
 ${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your site", auto.on)}
-<p><button id="go" data-tag="${escape(latest.tag)}" data-version="${escape(latest.version)}">Update to ${escape(latest.version)}</button>
+<p><button id="go" data-tag="${escape(offer.tag)}" data-version="${escape(offer.version)}">Update to ${escape(offer.version)}</button>
   <span class="meta">Keep this page open until it says it's done. If the new version doesn't work, your site goes back to how it was.</span></p>
 <ol id="log"></ol>
 <p id="error" role="alert"></p>
 <section id="done" class="card" hidden>
-  <p><b>Updated to ${escape(latest.version)}.</b></p>
+  <p><b>Updated to ${escape(offer.version)}.</b></p>
   ${checkGrant.on ? "" : `<p class="meta">If a friend has afterwrd, it's worth <a href="#checks-more">asking them to check your site</a> now.</p>`}
   <p><a class="button" href="/_admin/update">Done</a></p>
 </section>` : autoNext(auto, auto.running)}`;
@@ -472,7 +479,8 @@ ${forget}
 export function selfHostedUpdatePage({ version: VERSION, latest, available, securityFix, history = [], problem = null, me = null }) {
   const body = latest.error ? `<p>Couldn't look for a newer version just now (${escape(latest.error)}). It'll try again later.</p>`
     : !available ? `<p>You have the latest version.</p>`
-    : `<p><b>afterwrd ${escape(latest.version)} is available.</b> <a href="${escape(latest.page)}" target="_blank" rel="noopener">On GitHub</a></p>
+    : `<p><b>afterwrd ${escape(latest.version)} is available.</b> <a href="${escape(latest.page)}" target="_blank" rel="noopener">On GitHub</a>
+  (signed with afterwrd's own key)</p>
 ${securityFix ? `<p class="security"><b>It fixes a security problem</b> (in ${escape(securityFix)}), so it's worth updating soon.</p>` : ""}
 ${latest.notes ? `<section class="card notes"><h2>What's new</h2><p>${escape(latest.notes)}</p></section>` : ""}
 <p>To update, on your server, in the folder with afterwrd's <code>compose.yaml</code>:</p>

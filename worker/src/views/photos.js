@@ -1,7 +1,7 @@
 // Adding photos to an album made here, or choosing a profile picture or cover (photos.js; the page's script is
 // public/static/add-photos.js).
 import { escape } from "../util.js";
-import { asset, favicon, ownerHeader } from "./nav.js";
+import { asset, integrity, favicon, ownerHeader } from "./nav.js";
 
 export function addPage({ albums, chosen, role, max, me = null }) {
   const title = role === "profile" ? "Choose a profile picture" : role === "cover" ? "Choose a cover photo" : "Add photos";
@@ -37,7 +37,7 @@ ${role ? `<p class="meta">Upload one here, or open any of your photos and press 
   <div class="actions"><span class="status meta" role="status"></span><button class="post">${role ? "Use this photo" : "Add photos"}</button></div>
 </form>
 </main>
-<script type="module" src="${asset("/static/add-photos.js")}"></script>
+<script type="module" src="${asset("/static/add-photos.js")}" integrity="${integrity("/static/add-photos.js")}"></script>
 </body>
 </html>`;
 }

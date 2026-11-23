@@ -10,6 +10,7 @@
 import { setUpSigning } from "./helpers.mjs";
 import puppeteer from "puppeteer-core";
 import { createServer } from "node:http";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { fileURLToPath } from "node:url";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -20,9 +21,23 @@ const results = [];
 const check = (name, ok, extra = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  [${mode}] ${name}${extra ? `  (${extra})` : ""}`); };
 const errors = [];
 
+// The signed list of releases (src/signing.js) for the "behind" site (run.sh gives it the test key): GitHub's real
+// latest release, signed with the test key, so the Update page offers it as a signed release.
+const TEST_KEY = createPrivateKey({ key: Buffer.from("MC4CAQAwBQYDK2VwBCIEIAwWlXoAziEK+W2opIfh92LiKpJBYhziPl8FbhGjYWvi", "base64"), format: "der", type: "pkcs8" });
+let signedIndex = null;
+if (mode === "behind") {
+  const bytes = Buffer.from(await (await fetch("https://github.com/afterwrd/afterwrd/releases/latest/download/manifest.json")).arrayBuffer());
+  const releases = [{ version: JSON.parse(bytes.toString()).version, manifest_sha256: createHash("sha256").update(bytes).digest("hex"), signed_at: "2026-01-01T00:00:00Z" }];
+  const list = { seq: 50, releases };
+  const text = `afterwrd releases\n${list.seq}\n${releases.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at}\n`).join("")}`;
+  const text2 = `afterwrd releases 2\n${list.seq}\n${releases.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at} -\n`).join("")}`;
+  signedIndex = JSON.stringify({ ...list, signature: sign(null, Buffer.from(text), TEST_KEY).toString("base64"), signature2: sign(null, Buffer.from(text2), TEST_KEY).toString("base64") });
+}
+
 // A stand-in for Cloudflare's token endpoint: records what the site sends, answers with an hour's token.
 const exchanges = [];
 const tokenServer = createServer(async (req, res) => {
+  if (req.url === "/signatures/index.json" && signedIndex) { res.setHeader("Content-Type", "application/json"); res.end(signedIndex); return; }
   let body = "";
   for await (const chunk of req) body += chunk;
   exchanges.push({ url: req.url, params: Object.fromEntries(new URLSearchParams(body)) });
@@ -38,7 +53,7 @@ const page = await browser.newPage();
 // the service worker (public/static/app/push-sw.js) passes a page on; it's tested in comments.mjs.
 await page.setBypassServiceWorker(true);
 page.on("pageerror", (e) => errors.push(e.message));
-page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
 page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
 // afterwrd asks in its own box (ui.js): say yes, as a person would.
 await page.evaluateOnNewDocument(() => new MutationObserver(() => document.querySelector("dialog.ask[open] .chip.danger")?.click())

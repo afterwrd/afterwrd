@@ -78,6 +78,23 @@ for (const [where, path, headers] of [["the sign-in page", "/_auth/login", {}], 
     scripts.filter((a) => !a.includes(` nonce="${nonce}"`)).join(" | "));
   check(`…and ${where} has no inline handlers (onclick and the like)`, handlers(body).length === 0, handlers(body).join(" | "));
 }
+// The site's own scripts carry their SHA-256 (integrity), so a browser runs only the release's own, whatever serves them.
+{
+  const page = await (await fetch(`${BASE}/`, { headers: { Cookie: `__Host-session=${cookie.value}` } })).text();
+  const tagged = [...page.matchAll(/<script[^>]* src="([^"]+)" integrity="(sha256-[^"]+)"/g)];
+  const map = JSON.parse(/<script type="importmap"[^>]*>([^<]+)<\/script>/.exec(page)?.[1] ?? "{}");
+  let right = tagged.length >= 2;
+  for (const [, src, value] of tagged) {
+    const bytes = Buffer.from(await (await fetch(BASE + src, { headers: { Cookie: `__Host-session=${cookie.value}` } })).arrayBuffer());
+    right &&= value === `sha256-${createHash("sha256").update(bytes).digest("base64")}`;
+  }
+  const mapped = Object.entries(map.integrity ?? {});
+  check("Home's scripts carry their SHA-256, and it's right", right, tagged.map((t) => t[1]).join(" "));
+  check("…and so do the modules they import (the import map)", mapped.length > 10 && mapped.every(([url, v]) => url.startsWith("/static/") && /^sha256-/.test(v))
+    && Object.values(map.imports ?? {}).every((url) => Object.hasOwn(map.integrity, url)));
+  const login = await (await fetch(`${BASE}/_auth/login`)).text();
+  check("…the sign-in page too, which makes this browser's key", /<script type="importmap"[^>]*>[^<]*"integrity"/.test(login));
+}
 check("each answer has its own nonce", nonceOf((await fetch(`${BASE}/_auth/login`)).headers.get("content-security-policy"))
   !== nonceOf((await fetch(`${BASE}/_auth/login`)).headers.get("content-security-policy")));
 await owner.goto(`${BASE}/`);
@@ -138,6 +155,29 @@ check("owner signs back in", Boolean(await session(owner)));
 const replay = await fetch(`${BASE}/_auth/login/verify`, { method: "POST",
   headers: { Origin: BASE, "Content-Type": "application/json", Cookie: captured.cookie }, body: captured.body });
 check("replaying that exact sign-in is refused", replay.status === 400 && !(replay.headers.get("set-cookie") ?? "").includes("__Host-session=") , `HTTP ${replay.status}`);
+check("the sign-in carried this browser's own signature of its delegation (it holds the key)", /"possession":"[\w-]{86}"/.test(captured.body ?? ""));
+// A sign-in whose browser doesn't show it holds the key the passkey would let sign is refused, whatever the passkey says.
+{
+  await owner.goto(`${BASE}/_auth/logout`);
+  await Promise.all([owner.waitForNavigation(), owner.click("form[action='/_auth/logout'] button")]);
+  await owner.setRequestInterception(true);
+  const strip = (r) => {
+    if (!r.url().endsWith("/_auth/login/verify")) return r.continue();
+    const body = JSON.parse(r.postData());
+    delete body.possession;
+    r.continue({ postData: JSON.stringify(body) });
+  };
+  owner.on("request", strip);
+  await owner.goto(`${BASE}/_auth/login`);
+  await owner.click("#go");
+  await owner.waitForFunction(() => document.getElementById("error")?.textContent, { timeout: 15000 }).catch(() => {});
+  owner.off("request", strip);
+  await owner.setRequestInterception(false);
+  check("…and without it, the sign-in is refused and nothing signs", !(await session(owner))
+    && sql("SELECT COUNT(*) AS n FROM delegations WHERE created_at > strftime('%s','now') - 20")[0].n === 0);
+  await owner.goto(`${BASE}/_auth/login`);
+  await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
+}
 const logout = await post("/_auth/logout", null, (await session(owner)).value);
 check("signing out asks the browser to clear cached photos", (logout.headers.get("clear-site-data") ?? "").includes('"cache"'));
 await owner.goto(`${BASE}/_auth/login`);

@@ -5,7 +5,7 @@
 /* global zip */
 import { MEDIA_TYPES } from "./schema.js";
 import { passkeySigns } from "../passkey.js";
-import { fingerprintOf, fromB64url } from "../signed.js";
+import { fingerprintOf, fromB64url, signAs } from "../signed.js";
 import { keyAllowed, newBrowserKey } from "../browserkey.js";
 
 const ROWS_PER_REQUEST_BYTES = 150_000;
@@ -216,7 +216,9 @@ async function run() {
       const key = await newBrowserKey();
       const start = await keysApi("/browser/start", { browserKey: key.publicKey });
       const response = await passkeySigns(start.nonce, [await fingerprintOf("delegation", fromB64url(start.delegation))], start.allow);
-      const done = await keysApi("/browser/finish", { delegation: start.delegation, response });
+      // This browser signs the delegation with its own key too, showing it holds the key it names (keys.js holdsKey).
+      const possession = await signAs("delegation", key.privateKey, fromB64url(start.delegation));
+      const done = await keysApi("/browser/finish", { delegation: start.delegation, response, possession });
       await keyAllowed(key, done.person, done.expires);
     } catch {
       $("error").textContent = "Everything has moved, but this browser can't sign for you yet: sign out and in again before you post.";

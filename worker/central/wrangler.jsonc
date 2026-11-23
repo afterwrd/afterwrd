@@ -1,5 +1,6 @@
-// afterwrd's installer at https://install.afterwrd.app (central/index.js). Deployed by hand from worker/:
-//   npx wrangler deploy -c central/wrangler.jsonc
+// afterwrd's installer at https://install.afterwrd.app (central/index.js), and afterwrd.app's own pages (central/site.js).
+// Deployed by hand from worker/, into the project's Cloudflare account:
+//   CLOUDFLARE_ACCOUNT_ID=9d5fae7c2db7305b041a5e202a9ea778 npx wrangler deploy -c central/wrangler.jsonc
 // It has no storage, secrets or bindings, and nothing is logged.
 {
 	"$schema": "../node_modules/wrangler/config-schema.json",
@@ -7,7 +8,11 @@
 	"main": "index.js",
 	"compatibility_date": "2026-10-01",
 	"compatibility_flags": ["nodejs_compat"],
-	"routes": [{ "pattern": "install.afterwrd.app", "custom_domain": true }],
+	"routes": [
+		{ "pattern": "install.afterwrd.app", "custom_domain": true },
+		{ "pattern": "afterwrd.app", "custom_domain": true },
+		{ "pattern": "www.afterwrd.app", "custom_domain": true }
+	],
 	"workers_dev": false,
 	"preview_urls": false,
 	"observability": { "enabled": false },

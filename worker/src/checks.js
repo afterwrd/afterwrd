@@ -263,7 +263,9 @@ async function finish(request, env, url, body) {
   try {
     access = (await exchangeCode(env, body.code, verifier, url.origin)).access_token;
     // With the signed list (if this site has afterwrd's key), what's serving is checked by its fingerprint too.
-    result = await checkSite(access, check.site, env, url.origin, { latest: await knownLatest(env.DB), signed: await signedList(env, url.origin) });
+    // Tied to the account at the site's address (its workers.dev name), as friends' automatic checks are, so a token
+    // for some other account, with a Worker of the same name in it, can't stand in.
+    result = await checkSite(access, check.site, env, url.origin, { latest: await knownLatest(env.DB), signed: await signedList(env, url.origin), tie: true });
   } catch (error) {
     // Nothing is kept, so the link can be used again.
     return fail(`The check couldn't finish: ${String(error.message).slice(0, 300)} Open the link to try again.`);
@@ -480,28 +482,40 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
       if (extra.length) problems.push(`It's connected to things afterwrd doesn't use: ${extra.slice(0, 8).join(", ")}.`);
       if (missing.length) problems.push(`It's missing parts afterwrd needs: ${missing.join(", ")}.`);
       // Any other Worker connected to this site's database could read and change everything in it, whatever it's
-      // called (a name like a group's included), so each one's bindings are looked at too.
-      const database = (detail.resources?.bindings ?? []).find((b) => b?.type === "d1" && b?.name === "DB");
+      // called (a name like a group's included), so each one's bindings are looked at too: a D1 binding to its
+      // database, or a binding to one of its objects (Durable Objects), which hold its database and its secrets. Another
+      // Worker can bind those by naming this one (`script_name`); Cloudflare lists the binding with the objects'
+      // namespace either way. (Groups bind only their own objects, by class alone.)
+      const own = detail.resources?.bindings ?? [];
+      const database = own.find((b) => b?.type === "d1" && b?.name === "DB");
       const databaseId = database?.id ?? database?.database_id;
       // Kept (as Cloudflare's id, nothing more), so the audit log can tell changes to the site's own database apart.
       if (typeof databaseId === "string") result.database = text(databaseId, 64);
-      if (databaseId) {
-        const sharing = [];
-        for (const other of others.slice(0, OTHER_WORKERS)) {
-          try {
-            const live = ((await getJSON(`/accounts/${account}/workers/scripts/${encodeURIComponent(other.id)}/deployments`)).result?.deployments ?? [])[0]?.versions ?? [];
-            for (const v of live) {
-              const bindings = (await getJSON(`/accounts/${account}/workers/scripts/${encodeURIComponent(other.id)}/versions/${encodeURIComponent(v.version_id)}`)).result?.resources?.bindings ?? [];
-              if (bindings.some((b) => b?.type === "d1" && (b.id ?? b.database_id) === databaseId)) { sharing.push(text(other.id, 60)); break; }
-            }
-          } catch {
-            sharing.push(`${text(other.id, 60)} (couldn't be read)`);
+      const namespaces = new Set(own.filter((b) => b?.type === "durable_object_namespace" && typeof b.namespace_id === "string").map((b) => b.namespace_id));
+      const reaches = (b) => (b?.type === "d1" && databaseId && (b.id ?? b.database_id) === databaseId)
+        || (b?.type === "durable_object_namespace" && (b.script_name === script || namespaces.has(b.namespace_id)));
+      const sharing = [];
+      for (const other of others.slice(0, OTHER_WORKERS)) {
+        try {
+          const live = ((await getJSON(`/accounts/${account}/workers/scripts/${encodeURIComponent(other.id)}/deployments`)).result?.deployments ?? [])[0]?.versions ?? [];
+          for (const v of live) {
+            const bindings = (await getJSON(`/accounts/${account}/workers/scripts/${encodeURIComponent(other.id)}/versions/${encodeURIComponent(v.version_id)}`)).result?.resources?.bindings ?? [];
+            if (bindings.some(reaches)) { sharing.push(text(other.id, 60)); break; }
           }
+        } catch {
+          sharing.push(`${text(other.id, 60)} (couldn't be read)`);
         }
-        if (sharing.length) problems.push(`Another Worker in the account is connected to its database, so it could read and change everything in it: ${sharing.join(", ")}. afterwrd never does that.`);
-        if (others.length > OTHER_WORKERS) problems.push(`The account has more Workers than this check looks at (${others.length}), so it couldn't make sure none of them is connected to its database.`);
       }
+      if (sharing.length) problems.push(`Another Worker in the account is connected to its database, so it could read and change everything in it: ${sharing.join(", ")}. afterwrd never does that.`);
+      if (others.length > OTHER_WORKERS) problems.push(`The account has more Workers than this check looks at (${others.length}), so it couldn't make sure none of them is connected to its database.`);
       const runtime = detail.resources?.script_runtime ?? {};
+      // Every request goes through its code first (run_worker_first), which checks each file it sends against the
+      // release (static.js). Otherwise Cloudflare could hand out changed files, its sign-in page's scripts included,
+      // whatever the code is, and Cloudflare's fingerprint of the code wouldn't show it.
+      if (!filesThroughCode(runtime)) {
+        problems.push(runtime.assets ? "Cloudflare sends some of its files without its code checking them first. afterwrd always has every request go through its code."
+          : "Couldn't confirm Cloudflare sends every request through its code first.");
+      }
       if (manifest && (runtime.compatibility_date !== manifest.compatibility_date
         || [...(runtime.compatibility_flags ?? [])].sort().join() !== [...(manifest.compatibility_flags ?? [])].sort().join())) {
         problems.push("Its compatibility settings aren't the release's.");
@@ -518,16 +532,20 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
   return result;
 }
 
+/** Whether a version (its script_runtime, from Cloudflare) has every request go through its code, as afterwrd sets it. */
+export const filesThroughCode = (runtime) => runtime?.assets?.raw_run_worker_first === true && runtime.assets.serve_directly !== true;
+
 /**
  * Its site files only through its code: asked for without signing in, each must get the code's sign-in redirect.
  * The ones the code hands out to anyone (static.js isPublicStatic: fonts, the home-screen app's files) are left out,
- * as they'd come back either way. Problems found, in words.
+ * as they'd come back either way. At most `most` of them: a check by link has other calls to make in the same request;
+ * friends' checks look at them in a step of their own, so at every one (FILES_AT_MOST). Problems found, in words.
  */
-export async function siteFiles(site, manifest, fetcher = fetch) {
+export async function siteFiles(site, manifest, fetcher = fetch, most = 25) {
   const paths = (manifest.assets ?? []).map((a) => a?.path).filter((p) => typeof p === "string" && /^\/static\/[\w./-]+$/.test(p)
     && !p.startsWith("/static/fonts/") && !isPublicStatic(p));
   const direct = [];
-  for (const path of paths.slice(0, 25)) {
+  for (const path of paths.slice(0, most)) {
     const response = await fetcher(site + path, { method: "HEAD", redirect: "manual" }).catch(() => null);
     if (response && response.status === 200) direct.push(path);
   }

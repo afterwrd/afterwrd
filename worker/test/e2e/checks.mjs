@@ -28,7 +28,8 @@ const MANIFEST = { version: "9.9.9", compatibility_date: "2026-10-01", compatibi
   modules: [{ name: "index.js", sha256: sha(INDEX) }, { name: "0001_schema.sql", sha256: sha(SQL) }],
   assets: [{ path: "/static/style.css" }, { path: "/static/fonts/nunito.woff2" }] };
 const BINDINGS = [{ type: "assets", name: "ASSETS" }, { type: "d1", name: "DB", id: "x" },
-  { type: "durable_object_namespace", name: "MEDIA", class_name: "MediaStore" }, { type: "durable_object_namespace", name: "OUTBOX", class_name: "Outbox" },
+  { type: "durable_object_namespace", name: "MEDIA", class_name: "MediaStore", namespace_id: "ns-media" },
+  { type: "durable_object_namespace", name: "OUTBOX", class_name: "Outbox", namespace_id: "ns-outbox" },
   { type: "secret_text", name: "SETUP_CODE" }, { type: "version_metadata", name: "VERSION" }];
 const exchanges = [];
 const asked = [];
@@ -80,6 +81,8 @@ const server = createServer(async (req, res) => {
       modified_on: token === "tok-recent" ? new Date(Date.now() - 600000).toISOString() : "2026-11-07T18:02:30Z" });
     return send(200, { success: true, result: list });
   }
+  // The account's workers.dev name (run.sh tells the site its address's is "ann"); "otheraccount" is someone else's.
+  if (api === `/accounts/${ACCOUNT}/workers/subdomain`) return send(200, { success: true, result: { subdomain: token === "tok-otheraccount" ? "someone" : "ann" } });
   if (api === `/accounts/${ACCOUNT}/workers/scripts/localhost/subdomain`) return send(200, { success: true, result: { enabled: true, previews_enabled: false } });
   if (api === `/accounts/${ACCOUNT}/workers/scripts/localhost`) {
     const form = new FormData();
@@ -96,7 +99,13 @@ const server = createServer(async (req, res) => {
     return send(200, { success: true, result: { deployments: [{ id: "d2", versions: [{ version_id: "v-other", percentage: 100 }] }] } });
   }
   if (api === `/accounts/${ACCOUNT}/workers/scripts/other/versions/v-other`) {
-    return send(200, { success: true, result: { id: "v-other", resources: { bindings: [{ type: "d1", name: "DB", id: token === "tok-backdoor" ? "x" : "its-own" }] } } });
+    // Another Worker on the site's database (backdoor), or on its objects: by naming the site's Worker, as Cloudflare
+    // allows (backdoordo), or as Cloudflare lists it, by the objects' namespace (backdoorns). Its own objects are fine.
+    const bindings = [{ type: "d1", name: "DB", id: token === "tok-backdoor" ? "x" : "its-own" },
+      { type: "durable_object_namespace", name: "MINE", class_name: "Thing", namespace_id: "ns-its-own" }];
+    if (token === "tok-backdoordo") bindings.push({ type: "durable_object_namespace", name: "SITE", class_name: "Outbox", script_name: "localhost", namespace_id: "ns-outbox" });
+    if (token === "tok-backdoorns") bindings.push({ type: "durable_object_namespace", name: "SITE", class_name: "MediaStore", namespace_id: "ns-media" });
+    return send(200, { success: true, result: { id: "v-other", resources: { bindings } } });
   }
   if (api === `/accounts/${ACCOUNT}/workers/scripts/localhost/deployments`) {
     return send(200, { success: true, result: { deployments: [{ id: "d1", versions: [{ version_id: token === "tok-elsewhere" ? "v-2" : "v-1", percentage: 100 }] }] } });
@@ -104,7 +113,10 @@ const server = createServer(async (req, res) => {
   if (api === `/accounts/${ACCOUNT}/workers/scripts/localhost/versions/v-1` || api === `/accounts/${ACCOUNT}/workers/scripts/localhost/versions/v-2`) {
     const bindings = token === "tok-setup" ? [...BINDINGS, { type: "plain_text", name: "OAUTH_TOKEN_URL", text: "https://evil.example/token" }]
       : token === "tok-noversion" ? BINDINGS.filter((b) => b.type !== "version_metadata") : BINDINGS;
-    return send(200, { success: true, result: { id: "v-1", resources: { bindings, script_runtime: { compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"] } } } });
+    // Every request through its code first, as afterwrd sets it; "direct" has a file served without it.
+    const assets = token === "tok-direct" ? { serve_directly: true, raw_run_worker_first: ["/*", "!/static/signed.js"], base_path: "/" }
+      : { serve_directly: false, raw_run_worker_first: true, base_path: "/" };
+    return send(200, { success: true, result: { id: "v-1", resources: { bindings, script_runtime: { compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"], assets } } } });
   }
   if (api === `/accounts/${ACCOUNT}/logs/audit`) {
     audits.push(Object.fromEntries(url.searchParams));
@@ -148,7 +160,7 @@ async function person(withPasskeys) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
-  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+  page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
   page.on("dialog", (d) => { errors.push(`dialog: ${d.message()}`); d.dismiss(); });
   if (withPasskeys) {
     const cdp = await page.createCDPSession();
@@ -278,6 +290,17 @@ const backdoor = await runCheck("backdoor");
 check("another Worker connected to the site's database is reported, whatever it's called", backdoor.after.includes("Another Worker in the account is connected to its database")
   && backdoor.after.includes(": other."), backdoor.after.slice(0, 600));
 
+const otherAccount = await runCheck("otheraccount");
+check("a check by link is tied to the account at the site's address", otherAccount.after.includes("isn't the one at the site's address"), otherAccount.after.slice(0, 600));
+const served = await runCheck("direct");
+check("a site whose files Cloudflare sends without its code checking them is reported", served.after.includes("sends some of its files without its code checking them first"), served.after.slice(0, 600));
+
+for (const how of ["backdoordo", "backdoorns"]) {
+  const reached = await runCheck(how);
+  check(`another Worker connected to the site's objects is reported (${how === "backdoordo" ? "by naming its Worker" : "by their namespace"})`,
+    reached.after.includes("Another Worker in the account is connected to its database") && reached.after.includes(": other."), reached.after.slice(0, 600));
+}
+
 // --- a Worker that isn't the one at the address -------------------------------------------------------------------
 const noversion = await runCheck("noversion", "http://localhost:8794");
 check("a site missing its version piece gets one plain explanation, saying how to put it back", noversion.after.includes("missing the piece Cloudflare uses")
@@ -331,7 +354,7 @@ check("…and leaves the link usable", (await fetch(`${failed.link}/start`, { me
 await owner.goto(`${BASE}/friend`);
 const listed = await owner.$$eval(".checks > li", (l) => l.map((li) => li.textContent.replace(/\s+/g, " ")));
 const count = (word) => listed.filter((t) => t.includes(word)).length;
-check("Friends lists the checks with a verdict each", count("check again later") === 1 && count("all good") === 2 && count("needs a look") === 6 && count("couldn't check") === 1,
+check("Friends lists the checks with a verdict each", count("check again later") === 1 && count("all good") === 2 && count("needs a look") === 10 && count("couldn't check") === 1,
   `${listed.length}: ${listed.map((t) => t.slice(0, 60)).join(" | ")}`);
 check("…with no image injected from Cloudflare's answers", (await owner.$$(".checks img")).length === 0);
 

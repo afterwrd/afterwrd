@@ -18,7 +18,7 @@ const errors = [];
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage();
 page.on("pageerror", (e) => errors.push(e.message));
-page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
 const cdp = await page.createCDPSession();
 await cdp.send("WebAuthn.enable");
 await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal",

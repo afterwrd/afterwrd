@@ -6,8 +6,8 @@
 // one signed list, so nothing in it can be added, dropped or restored by anyone without the key. `seq` goes up every
 // time it's signed, and a site never accepts a list with a lower `seq` than one it has seen, so an old list can't be
 // put back. Pulling a release is signing the list again without it (scripts/sign.mjs --pull). The public key is in
-// package.json (afterwrd.releaseKey, 32 bytes in base64). Updating by hand doesn't need a signature (the person chose
-// to), as before.
+// package.json (afterwrd.releaseKey, 32 bytes in base64). Every install path takes only a signed release, exactly as
+// signed: automatic updates, updating by hand (update.js), groups (groupsites.js) and the installer (central/).
 //
 // From list SIGNATURE2_FROM on, each release also carries its `etag`: Cloudflare's fingerprint of the release's code,
 // the same in every account (scripts/sign.mjs gets it by uploading the release, never live, to a Worker kept for the

@@ -28,11 +28,19 @@ export function resultHtml(r, whose = "theirs", by = null) {
     const v = r.versions;
     if (v && !v.none) {
       const since = v.from ? ` since ${escape(when(v.from))}` : "";
-      if ((v.unknown ?? []).length) {
-        say(false, `${v.unknown.length === 1 ? "One version" : `${v.unknown.length} versions`} of ${your} site's code uploaded or made live${since} ${v.unknown.length === 1 ? "wasn't" : "weren't"}
-          a signed afterwrd release (${v.unknown.map((u) => `version ${escape(String(u.number ?? "?"))}, ${escape(when(u.at))}`).join("; ")}). Something
-          other than afterwrd changed ${your} site's code, even if only for a while.`);
-      } else if (v.more) say(false, `There were more uploads to ${your} site's code${since} than one check looks at.`);
+      const which = (list) => list.map((u) => `version ${escape(String(u.number ?? "?"))}, ${escape(when(u.at))}`).join("; ");
+      const code = (v.unknown ?? []).filter((u) => !u.files);
+      const files = (v.unknown ?? []).filter((u) => u.files);
+      if (code.length) {
+        say(false, `${code.length === 1 ? "One version" : `${code.length} versions`} of ${your} site's code uploaded or made live${since} ${code.length === 1 ? "wasn't" : "weren't"}
+          a signed afterwrd release (${which(code)}). Something other than afterwrd changed ${your} site's code, even if only for a while.`);
+      }
+      if (files.length) {
+        say(false, `${files.length === 1 ? "One version" : `${files.length} versions`} of ${your} site uploaded or made live${since} let Cloudflare send
+          ${your} site's files without its code checking them first (${which(files)}). afterwrd never sets it up that way: something
+          other than afterwrd changed it, even if only for a while.`);
+      }
+      if (code.length || files.length) { /* said */ } else if (v.more) say(false, `There were more uploads to ${your} site's code${since} than one check looks at.`);
       else say(true, `Every version of ${your} site's code uploaded or made live${since} was a signed afterwrd release (${v.checked} ${v.checked === 1 ? "version" : "versions"}).`);
     }
     if (r.newer) lines.push(`<p class="meta">afterwrd ${escape(r.newer)} is out: worth updating.</p>`);

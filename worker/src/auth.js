@@ -9,7 +9,7 @@ import {
   verifyRegistrationResponse,
 } from "@simplewebauthn/server";
 import { createDeviceLink, DEVICE_LINK_SECONDS } from "./admin.js";
-import { hasIdentity, keepDelegation, loginDelegation, sentDelegation } from "./keys.js";
+import { hasIdentity, holdsKey, keepDelegation, loginDelegation, sentDelegation } from "./keys.js";
 import { handleRecover, recovering, recoveryDone } from "./recover.js";
 import { deviceLinkPage, loginPage, messagePage, setupPage, signOutPage } from "./views/pages.js";
 import { fromBase64Url, html, json, now, randomToken, sha256, toBase64Url } from "./util.js";
@@ -181,12 +181,13 @@ async function loginOptions(env, url, body = {}) {
   return withChallenge(env, "login", nonce, json({ ...options, challenge, afterwrd: { delegation: b64url(delegation) } }));
 }
 
-async function loginVerify(request, env, url, { response, delegation: sent }) {
+async function loginVerify(request, env, url, { response, delegation: sent, possession }) {
   const challenge = await readChallenge(request, env, "login");
   if (!challenge) return json({ error: "The request timed out. Try again." }, 400);
   // The delegation the options gave, if any: the passkey signed the nonce and its fingerprint together.
   const delegation = sent === undefined ? null : await sentDelegation(env, url, sent);
-  if (sent !== undefined && !delegation) return json({ error: "That didn't work. Try again." }, 400);
+  // …and only for a key this browser holds (keys.js holdsKey).
+  if (sent !== undefined && (!delegation || !(await holdsKey(delegation, possession)))) return json({ error: "That didn't work. Try again." }, 400);
   const statements = delegation ? [await fingerprintOf("delegation", delegation)] : null;
   const stored = await env.DB.prepare(
     "SELECT * FROM credentials WHERE id = ?",

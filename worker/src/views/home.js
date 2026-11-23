@@ -4,7 +4,7 @@ import { friendItemCard, itemCard } from "./items.js";
 import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
 
-import { asset, icon } from "./nav.js";
+import { asset, integrity, icon } from "./nav.js";
 import { host } from "../sites.js";
 import { html, raw } from "./html.js";
 import { askedBecause, friendFace, introductionCard } from "./friends.js";
@@ -187,7 +187,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       : "Bringing your groups from before afterwrd 2 over…"}</span>${(bringOver.posts > 0 || bringOver.comments > 0) && bringOver.until
       && html` <span class="bring-until">Comments from before that haven't come over by ${fmtDate(bringOver.until)} are left behind:
       Download everything keeps a copy until then.</span>`}</p>
-      <script type="module" src="${asset("/static/ui/bringover.js")}"></script>`}
+      <script type="module" src="${asset("/static/ui/bringover.js")}" integrity="${integrity("/static/ui/bringover.js")}"></script>`}
     ${(bringOver?.owned ?? []).map((g) => html`<p class="notice bring-group">${g.name} is from before afterwrd 2.
       <a href="/groups/${g.id}">Bring it over</a>, so its members can carry on there.</p>`)}
     ${unmoved.length > 2

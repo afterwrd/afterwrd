@@ -89,7 +89,8 @@ const server = createServer(async (req, res) => {
   if (version) {
     const v = cf.versions.find((x) => x.id === version[1]);
     return send(200, { success: true, result: { id: version[1], resources: { bindings: BINDINGS,
-      script_runtime: { compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"] }, script: { etag: v?.etag ?? ETAG_GOOD } } } });
+      script_runtime: { compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"],
+        assets: { serve_directly: Boolean(v?.direct), raw_run_worker_first: v?.direct ? false : true, base_path: "/" } }, script: { etag: v?.etag ?? ETAG_GOOD } } } });
   }
   return send(404, { success: false, errors: [{ code: 7003, message: "No route" }] });
 });
@@ -103,7 +104,7 @@ async function owner(site, name) {
   // What every page of theirs needs: errors noted, and afterwrd.app's relay stood in for.
   const prepare = async (page) => {
     page.on("pageerror", (e) => errors.push(`${site}: ${e.message}`));
-    page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(`${site}: ${m.text()}`); }); // blocked by the page's policy
+    page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(`${site}: ${m.text()}`); }); // blocked by the page's policy
     page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
     await page.setRequestInterception(true);
     page.on("request", (req) => {
@@ -241,6 +242,18 @@ await Promise.all([settled(sam), sam.click(".friend-check button")]);
 check("Sam can put it away", !(await sam.$(".friend-check")));
 cf.versions.shift();
 
+// --- the release's own code, but uploaded with its files served without it checking them, then put back ----------
+again();
+cf.versions.unshift({ ...versionItem("44444444-4444-4444-8444-444444444444", 9, 1200, ETAG_GOOD), direct: true });
+found = await samsRun();
+result = JSON.parse(found?.result ?? "{}");
+check("an upload since the last check that let files past the code is found, though its code was the release's",
+  found?.verdict === "needs a look" && result.versions?.unknown?.some((u) => u.number === 9 && u.files), JSON.stringify(result.versions));
+await sam.goto(`${B}/_admin/update`);
+check("…and said in words", (await text(sam, "#checking")).includes("without its code checking them first"), await text(sam, "#checking"));
+cf.versions.shift();
+sql(stateB, "UPDATE friend_checks SET seen_at = 1");
+
 // --- what's live isn't what Cloudflare hands over (a genuine upload sitting unused on top of something else) ----------
 again();
 cf.versions[0].etag = sha("what's really serving");
@@ -282,6 +295,15 @@ sql(stateA, "DELETE FROM check_tokens");
 check("…nor say it found something without having been handed a token", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: A, found: ["code"] })).status === 403);
 sql(stateA, `INSERT INTO check_tokens (connection_id, at) VALUES ((SELECT id FROM connections LIMIT 1), ${Math.floor(Date.now() / 1000)})`);
 check("…and words of its own aren't taken", (await fromSam("/_p/check-failed", { type: "CheckFailed", site: A, found: ["Reinstall from evil.example"] })).status === 400);
+
+// --- Ann's site busy (its checks for today used up, by other friends' sites say): not a refusal ----------------------
+again();
+await fromSam("/_p/check-token", { type: "CheckToken" });
+await fromSam("/_p/check-token", { type: "CheckToken" }); // two a day: the run's own ask now gets 429
+const rowsBefore = sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n;
+await samsRun(10000);
+check("a friend's site that's busy (429) isn't counted as refusing: nothing's kept, and it's asked again next time",
+  sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n === rowsBefore);
 
 // --- Ann stops letting them: three refusals in a row show on Sam's Home ---------------------------------------------
 await ann.goto(`${A}/_admin/update`);

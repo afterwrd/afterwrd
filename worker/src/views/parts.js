@@ -3,7 +3,7 @@
 import { aspect, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
 
 import { MAX_OPTION } from "../polls.js";
-import { asset, icon, initial } from "./nav.js";
+import { asset, integrity, icon, initial } from "./nav.js";
 import { html, raw } from "./html.js";
 import { guestsBlock, ownEventBlock } from "./events.js";
 import { notFriend } from "./friends.js";
@@ -322,7 +322,7 @@ export function composer({ action = null, max = null, placeholder = "Write somet
     <button class="post">Post</button>
   </div>
 </form>
-<script type="module" src="${asset("/static/compose.js")}"></script>`;
+<script type="module" src="${asset("/static/compose.js")}" integrity="${integrity("/static/compose.js")}"></script>`;
 }
 
 /**

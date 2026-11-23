@@ -34,6 +34,9 @@ const list = { seq: 0, forged: false, serveSeq: null, noSecond: false, forgedSec
 const signedText = ({ seq, releases: rs }) => `afterwrd releases\n${seq}\n${rs.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at}\n`).join("")}`;
 const signedText2 = ({ seq, releases: rs }) => `afterwrd releases 2\n${seq}\n${rs.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at} ${r.etag ?? "-"}\n`).join("")}`;
 const drop = (version) => { releases.delete(version); list.seq++; };
+// Releases on GitHub that aren't in the signed list (version → manifest bytes).
+const onlyOnGitHub = new Map();
+const newerThan = (a, b) => { const [x, y] = [a, b].map((v) => v.split(".").map(Number)); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false; };
 function release(version, { signedAgo, tamper = false, newStore = false, securityFix = false }) {
   const code = Buffer.from(`export default { version: "${version}" };\n`);
   files.set(sha(code), code);
@@ -102,9 +105,15 @@ const server = createServer(async (req, res) => {
     if (!list.noSecond) signed.signature2 = list.forgedSecond ? Buffer.alloc(64, 7).toString("base64") : sign(null, Buffer.from(signedText2(signed)), TEST_KEY).toString("base64");
     return send(200, signed);
   }
+  // GitHub's latest release: the newest there, signed or not.
+  if (url.pathname === "/releases/latest/manifest.json") {
+    const all = [...releases.keys(), ...onlyOnGitHub.keys()].sort((a, b) => (newerThan(a, b) ? -1 : 1));
+    return all.length ? send(200, onlyOnGitHub.get(all[0]) ?? releases.get(all[0]).manifest) : send(404, "Not found", "text/plain");
+  }
   const rel = /^\/releases\/v([\d.]+)\/(.+)$/.exec(url.pathname);
   if (rel) {
     if (rel[2] === "manifest.json" && releases.has(rel[1])) return send(200, releases.get(rel[1]).manifest);
+    if (rel[2] === "manifest.json" && onlyOnGitHub.has(rel[1])) return send(200, onlyOnGitHub.get(rel[1]));
     if (files.has(rel[2])) return send(200, files.get(rel[2]), "application/octet-stream");
     return send(404, "Not found", "text/plain");
   }
@@ -173,7 +182,7 @@ const owner = await context.newPage();
 // the service worker (public/static/app/push-sw.js) passes a page on; it's tested in comments.mjs.
 await owner.setBypassServiceWorker(true);
 owner.on("pageerror", (e) => errors.push(e.message));
-owner.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+owner.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
 owner.on("dialog", (d) => { errors.push(`dialog: ${d.message()}`); d.dismiss(); });
 const cdp = await owner.createCDPSession();
 await cdp.send("WebAuthn.enable");
@@ -307,6 +316,11 @@ release("99.0.4", { signedAgo: 5 * 86400, tamper: true });
 s = await dailyRun();
 check("a release whose manifest isn't the one signed is ignored", cf.versions.length === 0);
 drop("99.0.4");
+// Updating by hand installs only signed releases too, whatever access it has (D3).
+await owner.goto(`${BASE}/_admin/update`);
+const handUnsigned = await owner.evaluate(async () => (await fetch("/_admin/update/check", { method: "POST",
+  headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: "v99.0.8" }) })).json());
+check("updating by hand to a release that isn't signed is refused", /isn't signed/.test(handUnsigned.error ?? ""), JSON.stringify(handUnsigned));
 release("99.0.9", { signedAgo: 5 * 86400 });
 list.forged = true;
 s = await dailyRun();
@@ -449,6 +463,20 @@ check("…and says how to remove it in Cloudflare too", (await text("#auto")).in
 const refreshesBefore = token.refreshes.length;
 s = await dailyRun();
 check("once off, the run does nothing at all", token.refreshes.length === refreshesBefore && cf.versions.length === 0);
+
+// --- the Update page offers only signed releases (D3) --------------------------------------------------------------
+release("99.1.0", { signedAgo: 5 * 86400 });
+onlyOnGitHub.set("99.2.0", Buffer.from(JSON.stringify({ name: "afterwrd", version: "99.2.0", security_fix: "99.2.0",
+  notes: "Go to evil.example to update by hand" })));
+sql("DELETE FROM settings WHERE key = 'latest_release'");
+await owner.goto(`${BASE}/_admin/update`);
+const offered = await text();
+check("GitHub's newest isn't offered or quoted until it's signed: the newest signed one is, and the other's named",
+  /afterwrd 99\.1\.0 is available/.test(offered) && /99\.2\.0 is out on GitHub too/.test(offered) && !offered.includes("evil.example")
+  && !/fixes a security problem/.test(offered), offered.slice(0, 600));
+onlyOnGitHub.clear();
+drop("99.1.0");
+sql("DELETE FROM settings WHERE key = 'latest_release'");
 
 // --- what the site keeps about its updates (migrate.js) -----------------------------------------------------------
 const history = sql("SELECT version, from_version FROM updates ORDER BY id");

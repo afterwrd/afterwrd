@@ -3,7 +3,7 @@
 // releases, and on 8797 for the new site. Cloudflare's Allow page is stood in for: the test reads where the
 // installer sent the browser, and comes back the way Cloudflare would. Which account the stand-in shows depends on
 // the code Cloudflare would have sent: fresh (no workers.dev name yet), leftover (an old database), two (two accounts).
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -30,6 +30,16 @@ const MANIFEST = {
   assets_config: { html_handling: "none", not_found_handling: "none", run_worker_first: true },
   durable_objects: [{ name: "MEDIA", class_name: "MediaStore" }, { name: "OUTBOX", class_name: "Outbox" }],
   migrations: { new_tag: "v1", new_sqlite_classes: ["MediaStore", "Outbox"] },
+};
+
+// --- the signed list of releases (src/signing.js), signed with the test key run.sh gives the installer --------------
+const TEST_KEY = createPrivateKey({ key: Buffer.from("MC4CAQAwBQYDK2VwBCIEIAwWlXoAziEK+W2opIfh92LiKpJBYhziPl8FbhGjYWvi", "base64"), format: "der", type: "pkcs8" });
+const signing = { releases: [{ version: "9.9.9", manifest_sha256: sha(Buffer.from(JSON.stringify(MANIFEST))), signed_at: "2026-11-01T00:00:00Z" }] };
+const signedIndex = () => {
+  const list = { seq: 20, releases: signing.releases };
+  const text = `afterwrd releases\n${list.seq}\n${list.releases.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at}\n`).join("")}`;
+  const text2 = `afterwrd releases 2\n${list.seq}\n${list.releases.map((r) => `${r.version} ${r.manifest_sha256} ${r.signed_at} -\n`).join("")}`;
+  return { ...list, signature: sign(null, Buffer.from(text), TEST_KEY).toString("base64"), signature2: sign(null, Buffer.from(text2), TEST_KEY).toString("base64") };
 };
 
 // --- Cloudflare, stood in for -------------------------------------------------------------------------------------
@@ -107,6 +117,7 @@ const server = createServer(async (req, res) => {
     exchanges.push(params);
     return send(200, { access_token: `tok-${params.code.split(".")[0]}`, token_type: "bearer", expires_in: 3600 });
   }
+  if (url.pathname === "/signatures/index.json") { outgoing += 1; return send(200, signedIndex()); }
   if (url.pathname === "/releases/latest/download/manifest.json" || url.pathname === "/releases/download/v9.9.9/manifest.json") return send(200, MANIFEST);
   const file = /^\/releases\/download\/v9\.9\.9\/([0-9a-f]{64})$/.exec(url.pathname)?.[1];
   if (file && files.has(file)) return send(200, files.get(file), "application/octet-stream");
@@ -141,7 +152,7 @@ async function install(code, { person = "Ann Example", domains = [], account = n
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
-  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+  page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
   const startedAt = new Map();
   page.on("request", (req) => { if (req.url().startsWith(`${BASE}/step/`)) startedAt.set(req, outgoing); });
   page.on("requestfinished", (req) => {
@@ -289,6 +300,36 @@ check("with two accounts, the person chooses, and it's installed in that one", s
 const flaky = await install("flakyname");
 check("a hiccup reading the workers.dev name stops it, without setting one", flaky.error.includes("Couldn't read this account's workers.dev name")
   && !calls.some((c) => c.startsWith("tok-flakyname PUT")), flaky.error);
+
+// Only a release signed with afterwrd's own key, exactly as signed (src/signing.js): GitHub alone can't choose.
+const realSigning = signing.releases;
+signing.releases = [];
+const unsigned = await install("unsigned");
+check("with no signed release, nothing is installed", /no signed afterwrd release/.test(unsigned.error ?? "")
+  && !calls.some((c) => c.startsWith("tok-unsigned PUT") || c.startsWith("tok-unsigned POST")), unsigned.error);
+signing.releases = [{ ...realSigning[0], manifest_sha256: "0".repeat(64) }];
+const swapped = await install("swapped");
+check("a release that isn't the one signed is refused before anything's made", /doesn't match the fingerprint/.test(swapped.error ?? "")
+  && !calls.some((c) => c.startsWith("tok-swapped POST") && c.includes("/d1/")), swapped.error);
+signing.releases = realSigning;
+
+// afterwrd.app's own pages, served by this Worker too (central/site.js), never GitHub Pages.
+const sitePath = (path) => fetch(`${BASE}${path}`, { headers: { "X-Test-Site": "1" }, redirect: "manual" });
+const home = await sitePath("/");
+const homeText = await home.text();
+check("afterwrd.app's install page names the newest signed release and its fingerprint", home.status === 200
+  && homeText.includes("9.9.9") && homeText.includes(signing.releases[0].manifest_sha256.slice(0, 12)) && !/__[A-Z_]+__/.test(homeText), `${home.status}`);
+check("…and runs no scripts at all", !/script-src/.test(home.headers.get("content-security-policy") ?? "x") && /default-src 'none'/.test(home.headers.get("content-security-policy") ?? ""));
+const connectPage = await sitePath("/connect/");
+const connectText = await connectPage.text();
+const nonce = /script-src 'nonce-([\w-]+)'/.exec(connectPage.headers.get("content-security-policy") ?? "")?.[1];
+check("the Connect page's one script carries the answer's nonce, with the sign-in apps filled in", connectPage.status === 200 && Boolean(nonce)
+  && connectText.includes(`<script nonce="${nonce}">`) && !connectText.includes("__OAUTH"), connectPage.headers.get("content-security-policy"));
+check("a folder without its last slash goes to the one with it", (await sitePath("/how-it-works")).headers.get("location")?.endsWith("/how-it-works/"));
+check("anything else isn't there", (await sitePath("/wp-login.php")).status === 404);
+signing.releases = [];
+check("with no signed release to name, the install page says to try again", (await sitePath("/")).status === 503);
+signing.releases = realSigning;
 
 // Refusals.
 const denied = await (await browser.createBrowserContext()).newPage();

@@ -1,5 +1,5 @@
 // Download everything (export.js): the page; the zip is made in the browser (public/static/export/main.js).
-import { asset, favicon, ownerHeader } from "./nav.js";
+import { asset, integrity, favicon, ownerHeader } from "./nav.js";
 
 export function exportPage({ me = null } = {}) {
   return `<!doctype html>
@@ -38,8 +38,8 @@ it could read everything, or set up a copy of your site under another address.</
   <p class="error" id="error" role="alert"></p>
 </form>
 </main>
-<script src="/static/vendor/zip-2.24.0.min.js"></script>
-<script type="module" src="${asset("/static/export/main.js")}"></script>
+<script src="/static/vendor/zip-2.24.0.min.js" integrity="${integrity("/static/vendor/zip-2.24.0.min.js")}"></script>
+<script type="module" src="${asset("/static/export/main.js")}" integrity="${integrity("/static/export/main.js")}"></script>
 </body>
 </html>`;
 }

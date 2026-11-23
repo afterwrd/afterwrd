@@ -24,6 +24,7 @@ import { cleanText, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
 import { ownerName, siteOrigin } from "./sites.js";
 import { json, now, randomToken } from "./util.js";
 import { selfHosted } from "./hosting.js";
+import { signedManifest } from "./update.js";
 
 export const GROUP_RELEASE = `https://github.com/${pkg.afterwrd.releases}/releases/download/v${pkg.version}`;
 const SCRIPT_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -96,6 +97,7 @@ async function create(request, env, url, path, body) {
   if (path === "/check") {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!name) throw new Error("Give the group a name.");
+    await signedManifest(env, url.origin, pkg.version); // said before anything's made, if it isn't signed
     const { account } = await findWorker(token, url.hostname);
     // Before anything's made: the token must be able to manage databases too.
     try {
@@ -112,7 +114,9 @@ async function create(request, env, url, path, body) {
   if (!ACCOUNT_RE.test(body.account ?? "") || !SCRIPT_RE.test(body.script ?? "") || !body.script.startsWith(`${own}-`)) {
     throw new Error("Unexpected details.");
   }
-  if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, body.script, await loadRelease(GROUP_RELEASE), { most: FILES_AT_ONCE }) });
+  // This site's own release, only as signed with afterwrd's own key (update.js signedManifest).
+  const release = async () => loadRelease(GROUP_RELEASE, await signedManifest(env, url.origin, pkg.version));
+  if (path === "/assets") return json({ jwt: await uploadAssets(token, body.account, body.script, await release(), { most: FILES_AT_ONCE }) });
   if (path === "/deploy") {
     const name = typeof body.name === "string" ? body.name.trim().slice(0, MAX_GROUP_NAME) : "";
     if (!name) throw new Error("Give the group a name.");
@@ -123,7 +127,7 @@ async function create(request, env, url, path, body) {
     // Noted here straight away, so that if anything after this fails, the group can still be deleted from Groups.
     const id = await waitingRow(db, { origin: `https://${body.script}.${domain}`, setup, name, about: body.about,
       script: body.script, account: body.account, database: database.uuid });
-    await deployVersion(token, body.account, body.script, await loadRelease(GROUP_RELEASE),
+    await deployVersion(token, body.account, body.script, await release(),
       { jwt: body.jwt, databaseId: database.uuid, settings: {}, secrets: { GROUP_KEY: setup } });
     // A Worker made through the API isn't on its workers.dev address until it's switched on.
     await api(token, `/accounts/${body.account}/workers/scripts/${body.script}/subdomain`, {

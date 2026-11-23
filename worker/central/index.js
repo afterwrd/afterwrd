@@ -1,4 +1,4 @@
-// afterwrd's installer at https://install.afterwrd.app: installs afterwrd into someone's own Cloudflare account from
+// afterwrd's installer at https://install.afterwrd.app, which also serves afterwrd.app's own pages (site.js): installs afterwrd into someone's own Cloudflare account from
 // any browser, a phone's included, with no code editor and no Deploy page. It runs in Ste's Cloudflare account and is
 // deployed by hand (`npx wrangler deploy -c central/wrangler.jsonc`), never from GitHub, so no Cloudflare credential
 // is kept there. It has no storage of its own.
@@ -11,13 +11,16 @@
 //   POST /step/<name>  one step at a time with that token: accounts, name (a workers.dev name, for a new account),
 //                      check, assets, deploy; then finish, which drops the token
 //
-// What it installs is the latest release, every file checked against the release's manifest (src/deploy.js). Revoking
+// What it installs is the newest release signed with afterwrd's own key (src/signing.js), its manifest exactly as
+// signed and every file checked against that manifest (src/deploy.js), so GitHub alone can't choose what new sites get. Revoking
 // in Cloudflare doesn't end a token already given, so the hour is the real limit: "Check your install"
 // (afterwrd.app/check/) and a friend's check (src/checks.js) are the second key.
 import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, exchangeCode, pkce, readCookie, SCOPES, testingHere } from "../src/cloudflare.js";
 import { api, databaseInUse, deployVersion, FILES_AT_ONCE, findOrCreateDatabase, loadRelease, uploadAssets, useApiBase,
   workerSettings } from "../src/deploy.js";
+import { signedList } from "../src/signing.js";
+import { forSite, sitePage } from "./site.js";
 
 const REPO = pkg.afterwrd.releases;
 const HOME = "https://install.afterwrd.app";
@@ -41,7 +44,8 @@ export default {
     const here = { url, env, testing, home: testing ? url.origin : HOME };
     let response;
     try {
-      response = await route(request, here);
+      // afterwrd.app's own pages (site.js), which this Worker serves too.
+      response = forSite(request, here) ? await sitePage(request, here, () => newestSigned(here)) : await route(request, here);
     } catch (error) {
       response = Response.json({ error: error.message }, { status: 400 });
     }
@@ -239,17 +243,31 @@ const STEPS = {
   finish() {}, // handled in route: drops the token
 };
 
-// The latest release only: the version comes back from the page, so it's checked against GitHub's latest again.
+// The newest signed release only: the version comes back from the page, so it's checked against the signed list again.
 async function latestVersion(here) {
-  const latest = await fetch(`${releases(here)}/latest/download/manifest.json`, { headers: { "User-Agent": "afterwrd" } });
-  const version = latest.ok ? (await latest.json().catch(() => ({}))).version : null;
-  if (!VERSION_RE.test(version ?? "")) throw new Error("Couldn't find afterwrd's latest release on GitHub. Try again in a minute.");
-  return version;
+  return (await newestSigned(here)).version;
+}
+
+/** The newest release in the signed list: {version, manifestSha256}. */
+async function newestSigned(here) {
+  const list = await signedList(here.env, here.url.origin);
+  if (!list) throw new Error("Couldn't read the list of afterwrd's signed releases. Try again in a minute.");
+  let best = null;
+  for (const [version, entry] of list.releases) if (VERSION_RE.test(version) && (!best || newer(version, best.version))) best = { version, ...entry };
+  if (!best) throw new Error("There's no signed afterwrd release to install yet.");
+  return best;
 }
 
 async function release(here, version) {
-  if (!VERSION_RE.test(String(version ?? "")) || version !== await latestVersion(here)) throw new Error("A newer afterwrd has just come out. Start again.");
-  return loadRelease(`${releases(here)}/download/v${version}`);
+  const newest = await newestSigned(here);
+  if (!VERSION_RE.test(String(version ?? "")) || version !== newest.version) throw new Error("A newer afterwrd has just come out. Start again.");
+  return loadRelease(`${releases(here)}/download/v${version}`, newest.manifestSha256);
+}
+
+function newer(a, b) {
+  const [x, y] = [a, b].map((v) => v.split(".").map(Number));
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+  return false;
 }
 
 // The new site's address; when testing, a stand-in on this computer.

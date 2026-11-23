@@ -4,7 +4,12 @@
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const PAGE = readFileSync(new URL("../../installer/connect.html", import.meta.url), "utf8").replaceAll("__OAUTH_CLIENTS__", "new-client old-client").replaceAll("__OAUTH_CLIENT_UNSAID__", "old-client");
+// The page as afterwrd.app serves it: from the installer's Worker (central/site.js, run by run.sh on 8791), with the
+// sign-in apps package.json names.
+const { afterwrd: project } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+const NEW_CLIENT = project.cloudflareClient;
+const OLD_CLIENT = project.cloudflareClientsBefore[0];
+const served = []; // what afterwrd.app answered: {path, status, policy}
 const RELAY = "https://afterwrd.app/connect/";
 const SITE = "https://ann.example-1.workers.dev";
 const OTHER = "https://bob.example-2.workers.dev";
@@ -15,14 +20,20 @@ const errors = [];
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage();
 page.on("pageerror", (e) => errors.push(e.message));
-page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
 let cloudflare = null; // where the relay sent the browser at Cloudflare
 let backAt = null; // where it sent the browser back to
 await page.setRequestInterception(true);
 page.on("request", (req) => {
   const at = new URL(req.url());
   if (at.pathname === "/favicon.ico") return req.respond({ status: 404, body: "" });
-  if (at.origin === "https://afterwrd.app") return req.respond({ status: 200, contentType: "text/html", body: PAGE });
+  if (at.origin === "https://afterwrd.app") {
+    fetch(`http://localhost:8791${at.pathname}${at.search}`, { headers: { "X-Test-Site": "1" }, redirect: "manual" }).then(async (r) => {
+      served.push({ path: at.pathname, status: r.status, policy: r.headers.get("content-security-policy") });
+      req.respond({ status: r.status, headers: Object.fromEntries(r.headers), body: await r.text() });
+    }, () => req.respond({ status: 502, body: "" }));
+    return;
+  }
   if (at.hostname === "dash.cloudflare.com") {
     cloudflare = at;
     return req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
@@ -93,10 +104,10 @@ const askedThrough = async (extra) => {
   await Promise.all([toCloudflare(), page.click("#continue")]);
   return cloudflare?.searchParams.get("client_id");
 };
-check("a site that says which sign-in app it uses is asked through that one", (await askedThrough({ client: "new-client" })) === "new-client");
-check("…as is one that names an earlier app", (await askedThrough({ client: "old-client" })) === "old-client");
-check("a site from before 0.51.0, which doesn't say, is asked through the first app, as it was", (await askedThrough({})) === "old-client");
-check("an app the page doesn't know is never asked through", (await askedThrough({ client: "evil-client" })) === "old-client");
+check("a site that says which sign-in app it uses is asked through that one", (await askedThrough({ client: NEW_CLIENT })) === NEW_CLIENT);
+check("…as is one that names an earlier app", (await askedThrough({ client: OLD_CLIENT })) === OLD_CLIENT);
+check("a site from before 0.51.0, which doesn't say, is asked through the first app, as it was", (await askedThrough({})) === OLD_CLIENT);
+check("an app the page doesn't know is never asked through", (await askedThrough({ client: "evil-client" })) === OLD_CLIENT);
 
 // --- getting back in without a passkey (recover.js) -------------------------------------------------------------------
 cloudflare = null;
@@ -111,6 +122,9 @@ check("…and Cloudflare's answer goes back to the site's recovery page", backAt
 await page.goto(out(`${SITE}/_auth/recover/finish`));
 check("another path under it is refused", !(await shown("#ask-recover")) && (await words("#error")).length > 0);
 
+check("afterwrd.app's Connect page comes from the installer's Worker, its script allowed only by the answer's nonce",
+  served.length > 0 && served.every((p) => p.path !== "/connect/" || (p.status === 200 && /script-src 'nonce-[\w-]{24}'/.test(p.policy ?? ""))),
+  JSON.stringify(served.slice(0, 2)));
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();
 const failed = results.filter((ok) => !ok).length;

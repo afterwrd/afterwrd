@@ -29,7 +29,7 @@
 import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
-import { checkSite, cloudflareReader, siteFiles, siteIn } from "./checks.js";
+import { checkSite, filesThroughCode, cloudflareReader, siteFiles, siteIn } from "./checks.js";
 import { callFriend } from "./calls.js";
 import { signedList } from "./signing.js";
 import { onCloudflare } from "./hosting.js";
@@ -381,6 +381,9 @@ async function checkFriend(env, origin, friend) {
   try {
     token = (await callFriend(env, origin, friend.origin, "/_p/check-token", { body: { type: "CheckToken" } })).token;
   } catch (error) {
+    // Busy (429: its checks for today are used up, perhaps by other friends' sites, or it's past its day's allowance)
+    // isn't refusing: nothing's kept, and it's asked again at the next run.
+    if (error.status === 429) return;
     return refused(error.message, { off: error.status === 409 || error.status === 404 });
   }
   if (typeof token !== "string" || !CODE_RE.test(token)) return refused("It didn't hand over a token.");
@@ -453,8 +456,10 @@ export function findings(r) {
   else if (r.problem === "unreadable") words.push("Cloudflare wouldn't hand over the site's code.");
   else if (r.code === "different") words.push(`The site's code isn't the published afterwrd ${r.version}.`);
   else if (r.code && r.code !== "matches") words.push("The site's code couldn't be compared with a release.");
-  const unknown = r.versions?.unknown ?? [];
+  const unknown = (r.versions?.unknown ?? []).filter((u) => !u.files);
+  const exposed = (r.versions?.unknown ?? []).filter((u) => u.files);
   if (unknown.length) words.push(`${unknown.length === 1 ? "An upload" : `${unknown.length} uploads`} to the site's code since the last check ${unknown.length === 1 ? "wasn't" : "weren't"} a signed afterwrd release.`);
+  if (exposed.length) words.push(`${exposed.length === 1 ? "An upload" : `${exposed.length} uploads`} since the last check let Cloudflare send the site's files without its code checking them first. afterwrd never sets it up that way.`);
   if (r.versions?.more) words.push("There were too many uploads since the last check to look at them all.");
   words.push(...(r.problems ?? []));
   return words.slice(0, 5);
@@ -505,6 +510,9 @@ export const putAway = (db, id) => db.prepare("UPDATE friend_checks SET seen_at 
 
 // --- the steps, each a request of its own (auto.js handleAutoStep) --------------------------------------------------
 
+// Site files a friend's check looks at, in a request of their own (a release has about 35 that aren't public).
+const FILES_AT_MOST = 44;
+
 /** One part of checking a friend's site: "fc-site", "fc-versions" or "fc-files". */
 export async function friendCheckStep(env, origin, body) {
   const list = await signedList(env, origin);
@@ -530,7 +538,8 @@ export async function friendCheckStep(env, origin, body) {
     const response = await fetch(`${releases}/v${body.version}/manifest.json`, { headers: { "User-Agent": "afterwrd" } });
     const bytes = response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
     if (!bytes || bytes.length > 2_000_000 || (await sha256hex(bytes)) !== signed.manifestSha256) return { problems: ["Couldn't download the release to check its site files against."] };
-    return { problems: await siteFiles(site, JSON.parse(new TextDecoder().decode(bytes))) };
+    // Every one: this step's own request has room (the manifest's download, and one call a file, of the 50).
+    return { problems: await siteFiles(site, JSON.parse(new TextDecoder().decode(bytes)), fetch, FILES_AT_MOST) };
   }
   throw new Error("Unknown step.");
 }
@@ -566,8 +575,11 @@ async function uploadsSince(token, env, origin, list, account, script, since) {
   if (look.size > VERSIONS_MAX) more = true;
   const unknown = [];
   for (const [id, v] of [...look].slice(0, VERSIONS_MAX)) {
-    const etag = (await getJSON(`${at}/versions/${encodeURIComponent(id)}`)).result?.resources?.script?.etag;
-    if (!known.has(etag)) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live });
+    const resources = (await getJSON(`${at}/versions/${encodeURIComponent(id)}`)).result?.resources;
+    // Its code must be a signed release's, and every request must go through it first: Cloudflare's fingerprint of
+    // the code doesn't cover the site's files, or whether they're sent without the code checking them.
+    if (!known.has(resources?.script?.etag)) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live });
+    else if (!filesThroughCode(resources?.script_runtime)) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live, files: true });
   }
   return { checked: Math.min(look.size, VERSIONS_MAX), unknown, more, from };
 }

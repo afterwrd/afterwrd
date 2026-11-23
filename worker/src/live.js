@@ -31,6 +31,6 @@ export async function handleLive(request, env, url, user, work) {
     requests: requests.results[0].n,
     posts: posts.results[0].n,
     comments: signed.results[0].n,
-    update: await waitingRelease(env, work),
+    update: await waitingRelease(env, work, url.origin),
   }, 200);
 }

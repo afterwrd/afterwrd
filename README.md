@@ -124,8 +124,8 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
   locations*; they can show where you live.
 - **Keep it up to date.** With automatic updates on (asked when you set up, or turned on from the *Update* page, one
   *Allow*), the site installs each signed release by itself after a few days, or straight away with *Install it now*,
-  its groups following. Otherwise the *Update* page installs a newer release, keeping your passkeys, friends and
-  archive. Home says so when an update fixes a security problem. To hear about every release, *Watch* the repository
+  its groups following. Otherwise the *Update* page installs a newer signed release, keeping your passkeys, friends
+  and archive. Home says so when an update fixes a security problem. To hear about every release, *Watch* the repository
   on GitHub (*Custom* → *Releases*) or follow its [releases feed](https://github.com/afterwrd/afterwrd/releases.atom).
 - **Let your friends' sites check it.** One more *Allow* (read-only), and a few times a week a friend's afterwrd site
   checks yours is exactly a signed release, with nothing else uploaded in its place since the last check. A finding
@@ -133,8 +133,9 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
   wasn't you, remove it in *Your devices*.
 - **Lost every device you sign in with?** *Lost your device?* on the sign-in page gets you back in, as long as you
-  can still sign in to the Cloudflare account your site is in: Cloudflare is asked for an hour's read-only access, your
-  site checks it's in that account, signs every device out, and lets you make a passkey on the one you're using.
+  can still sign in to the Cloudflare account your site is in: Cloudflare is asked for an hour's access to change its
+  Workers (your site uses it only to prove it's in that account, by making its running version live again), then it
+  signs every device out and lets you make a passkey on the one you're using.
 - **Use a Cloudflare account just for afterwrd** if you use Cloudflare for anything else (see step 1).
 
 (On your own server, some of this is different: see [worker/selfhost/README.md](worker/selfhost/README.md).)

@@ -926,6 +926,12 @@ safe integer and `at` is not after it; and the proof checks against a passkey of
 as it was at `at`) or of the document in effect now. For a record, `at` is the host's "taken at" time (section 6). So a
 passkey removed since still vouches for what its keys signed before it went, and vouches for nothing after.
 
+**Holding the key.** Before the owner's site keeps a delegation from its own browser (signing in, setting up signing,
+a browser that can't sign yet), the browser signs the delegation's bytes with the browser key it names, as
+`signAs("delegation", privateKey, bytes)`, and sends that signature as `possession`. The site refuses the delegation
+unless `checkAs("delegation", key, bytes, possession)` holds (`holdsKey`), so a passkey only ever lets sign a key the
+browser it's used in has. Readers don't see or need `possession`.
+
 A site keeps every delegation of its owner's for good, so it can pass them on with what they signed. But it accepts new
 records from a browser key only while that key's delegation is live there: not expired, not signed out.
 
@@ -935,7 +941,7 @@ records from a browser key only while that key's delegation is live there: not e
 > than 30 days and 10 minutes ahead, origin this site's). Only the owner's site can prompt for a delegation, and the
 > host's "taken at" time (section 6) bounds what a key could sign before it existed.
 
-Source: `src/identity.js` `checkDelegation`; `src/keys.js` `loginDelegation`, `sentDelegation`, `keepDelegation`,
+Source: `src/identity.js` `checkDelegation`; `src/keys.js` `loginDelegation`, `sentDelegation`, `holdsKey`, `keepDelegation`,
 `DELEGATION_SECONDS`; `src/auth.js` `loginOptions`, `loginVerify`; `public/static/browserkey.js`.
 
 ### 4.11 The hosting key
@@ -3617,16 +3623,16 @@ The checking site reads Cloudflare's API (`https://api.cloudflare.com/client/v4`
 | Read | What's required |
 |---|---|
 | `/accounts` (first 5), then `/accounts/<a>/workers/scripts` in each | exactly one account has a Worker named `<script>` (otherwise the result is `missing` or `several`) |
-| `/accounts/<a>/workers/subdomain` (automatic checks only) | the account's workers.dev name is the address's second label, so a token for another account can't stand in |
+| `/accounts/<a>/workers/subdomain` | the account's workers.dev name is the address's second label, so a token for another account can't stand in |
 | `…/scripts/<script>/subdomain` | `enabled` is true |
 | `…/scripts/<script>` | the code, as `multipart/form-data`. Each part's SHA-256 must equal the manifest's `modules` entry of that name, with none extra or missing. The version is read from `index.js`, from the bundled `name: "afterwrd-worker", version: "x.y.z"`. |
 | the signed list (11.1) | that version is in it, and the downloaded manifest's SHA-256 is its `manifest_sha256`. The version isn't older than a known security fix. |
 | `…/script-settings` | no tail consumers, no Logpush, no log destinations |
 | `…/deployments` | one version serving 100% of traffic |
 | `GET <site>/_version` on the site itself (public, `{"id": <version id>}`) | equals the serving version's id, so the Worker read is the one answering at the address |
-| `…/versions/<serving id>` | `resources.script.etag` equals the signed `etag` for that version. Bindings are exactly `assets ASSETS`, `d1 DB`, `durable_object_namespace MEDIA MediaStore`, `durable_object_namespace OUTBOX Outbox`, `version_metadata VERSION`, plus, if present, the secrets `SETUP_CODE` and `UPDATE_TOKEN`. `script_runtime`'s compatibility date and flags are the manifest's. |
-| up to 8 other Workers' deployments and serving versions | none is bound to the site's D1 database |
-| `HEAD <site><path>` for up to 25 of the manifest's private site files, unsigned in, no redirects followed | none answers `200` |
+| `…/versions/<serving id>` | `resources.script.etag` equals the signed `etag` for that version. Bindings are exactly `assets ASSETS`, `d1 DB`, `durable_object_namespace MEDIA MediaStore`, `durable_object_namespace OUTBOX Outbox`, `version_metadata VERSION`, plus, if present, the secrets `SETUP_CODE` and `UPDATE_TOKEN`. `script_runtime`'s compatibility date and flags are the manifest's. `script_runtime.assets` has `raw_run_worker_first: true` and `serve_directly` not true, so every request reaches the code (Cloudflare's etag doesn't cover this setting or the site files). |
+| up to 8 other Workers' deployments and serving versions | none is bound to the site's D1 database, or to its Durable Objects: a `durable_object_namespace` binding naming the site's Worker (`script_name`) or one of its namespaces (`namespace_id`). More than 8 other Workers is reported. |
+| `HEAD <site><path>` for the manifest's private site files (up to 25 in a check by link; up to 44, in a step of its own, in an automatic check), unsigned in, no redirects followed | none answers `200` |
 
 A check by link also reads the account's audit log (11.3). An automatic check reads every upload since the last
 complete check instead (11.4).
@@ -3677,12 +3683,13 @@ never one it checked in the last day:
 
 For each friend picked:
 1. It calls `POST /_p/check-token`. A refusal, a `409 {off: true}` or a missing token is recorded as "couldn't check".
-   Three in a row after an earlier success show on the checking owner's Home.
+   Three in a row after an earlier success show on the checking owner's Home. A `429` (the site's checks for the day
+   are used up, or it is busy) is not a refusal: nothing is recorded, and the friend is asked again at the next run.
 2. It checks the code and setup (11.2), with the account tie. It doesn't read the audit log.
 3. It reads every version uploaded, and every deployment made, since the start of the last complete check of that
    friend. It looks no further back than the first release signed with an etag. It reads at most 100 listed versions,
    and looks at no more than 30. Each must have an `etag` in the signed list, otherwise it is reported as an unknown
-   upload. Putting an old upload back live makes no new version, so deployments are looked at too.
+   upload, and `script_runtime.assets` as in 11.2, otherwise it is reported as letting files past the code (`files: true`). Putting an old upload back live makes no new version, so deployments are looked at too.
 4. It checks the site files against the signed release's manifest. The manifest is downloaded again, must be at most
    2 MB, and its SHA-256 must be the signed one.
 5. It tells the friend's site the result: `POST /_p/checked` if all good, otherwise `POST /_p/check-failed` with

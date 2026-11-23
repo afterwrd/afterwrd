@@ -1,7 +1,7 @@
 // The only pages served to people who aren't signed in. Styles and script are inline because /static is
 // behind the login too (apart from the fonts, which are public: see index.js).
 import { nonce } from "../nonce.js";
-import { asset, favicon, LOGO } from "./nav.js";
+import { asset, favicon, importMap, LOGO } from "./nav.js";
 import { escape } from "../util.js";
 import { resultHtml } from "./checks.js";
 
@@ -113,6 +113,7 @@ function page(title, body, script = "") {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 ${favicon()}
+${importMap()}
 <title>${title} · afterwrd</title>
 <style>${STYLE}</style>
 </head>
@@ -154,7 +155,9 @@ Every device is signed out, and you make a new passkey here.</p></details>`
     const { afterwrd, ...options } = await post("/_auth/login/options", made ? { browserKey: made.publicKey } : {});
     const credential = await navigator.credentials.get({ publicKey: {
       ...options, challenge: dec(options.challenge), allowCredentials: ids(options.allowCredentials) } });
-    const result = await post("/_auth/login/verify", { response: credentialJSON(credential), ...(afterwrd ? { delegation: afterwrd.delegation } : {}) });
+    // This browser signs the delegation with its own key too, showing it holds the key the passkey lets sign.
+    const possession = afterwrd && made ? await (await signing())[0].signAs("delegation", made.privateKey, (await signing())[0].fromB64url(afterwrd.delegation)) : null;
+    const result = await post("/_auth/login/verify", { response: credentialJSON(credential), ...(afterwrd ? { delegation: afterwrd.delegation, possession } : {}) });
     if (result.signing && made) await (await signing())[1].keyAllowed(made, result.person, result.expires);
     // Signing isn't set up yet: on to the recovery code (keysPage), then where they were going.
     if (result.keys === "setup") return location.replace("/_admin/keys?next=" + encodeURIComponent(next));
@@ -252,7 +255,8 @@ instead, and keep your recovery code, friends and posts.</p>`, `
         [await S.fingerprintOf("identity", identity), await S.fingerprintOf("delegation", delegation)]);
       const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
         allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
-      const done = await post("/_admin/keys/finish", { identity: start.identity, delegation: start.delegation, response: credentialJSON(credential) });
+      const done = await post("/_admin/keys/finish", { identity: start.identity, delegation: start.delegation, response: credentialJSON(credential),
+        possession: await S.signAs("delegation", key.privateKey, delegation) }); // this browser holds the key it names
       await keys.keyAllowed(key, done.person, done.expires);
       if (fromSetup) afterPasskey(true); else location.replace(next);
     });
@@ -292,7 +296,8 @@ Your devices and choose <b>Let it sign for you</b>.</p>
     const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("delegation", delegation)]);
     const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
       allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
-    const done = await post("/_admin/keys/browser/finish", { delegation: start.delegation, response: credentialJSON(credential) });
+    const done = await post("/_admin/keys/browser/finish", { delegation: start.delegation, response: credentialJSON(credential),
+      possession: await S.signAs("delegation", key.privateKey, delegation) }); // this browser holds the key it names
     await keys.keyAllowed(key, done.person, done.expires);
     afterPasskey(false);
   });`);

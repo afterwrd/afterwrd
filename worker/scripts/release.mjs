@@ -5,7 +5,8 @@
 // writes release/<version>/, a flat folder so every file can be a GitHub release asset:
 //   manifest.json    the code modules and site files, each with its SHA-256, plus the Worker settings
 //   <sha256>         every file, named by its hash
-// and release/site/, the install page (with the Connect page Cloudflare's sign-in comes back to, and How it works).
+// (afterwrd.app's pages, the install page and the Connect page among them, aren't built here: the installer's Worker
+// serves them from installer/, central/site.js.)
 // Publish every file in the folder at --base unchanged; installing and updating refuse anything that doesn't match.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -167,40 +168,6 @@ const manifest = {
 const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2));
 writeFileSync(join(out, "manifest.json"), manifestBytes);
 
-// The install page (published to GitHub Pages by the release workflow).
-const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(base)?.[1];
-const site = join(worker, "release", "site");
-rmSync(site, { recursive: true, force: true });
-mkdirSync(site, { recursive: true });
-writeFileSync(join(site, "index.html"), readFileSync(join(worker, "installer", "page.html"), "utf8")
-  .replaceAll("__VERSION__", version)
-  .replaceAll("__MANIFEST_SHORT__", sha256(manifestBytes).slice(0, 12))
-  .replaceAll("__RELEASE_PAGE__", repo ? `https://github.com/${repo}/releases/tag/v${version}` : base)
-  .replaceAll("__REPO_PAGE__", repo ? `https://github.com/${repo}` : base));
-// The Connect page, at /connect/: the address Cloudflare's sign-in sends people back to (src/cloudflare.js).
-mkdirSync(join(site, "connect"), { recursive: true });
-writeFileSync(join(site, "connect", "index.html"), readFileSync(join(worker, "installer", "connect.html"), "utf8")
-  .replaceAll("__OAUTH_CLIENTS__", [project.cloudflareClient, ...(project.cloudflareClientsBefore ?? [])].join(" "))
-  .replaceAll("__OAUTH_CLIENT_UNSAID__", (project.cloudflareClientsBefore ?? [])[0] ?? project.cloudflareClient));
-// "How it works", beside it at /how-it-works/.
-mkdirSync(join(site, "how-it-works"), { recursive: true });
-writeFileSync(join(site, "how-it-works", "index.html"), readFileSync(join(worker, "installer", "how-it-works.html"), "utf8")
-  .replaceAll("__VERSION__", version)
-  .replaceAll("__RELEASE_PAGE__", repo ? `https://github.com/${repo}/releases/tag/v${version}` : base)
-  .replaceAll("__REPO_PAGE__", repo ? `https://github.com/${repo}` : base));
-// "How afterwrd is different from Facebook", at /compared/.
-mkdirSync(join(site, "compared"), { recursive: true });
-writeFileSync(join(site, "compared", "index.html"), readFileSync(join(worker, "installer", "compared.html"), "utf8")
-  .replaceAll("__VERSION__", version)
-  .replaceAll("__REPO_PAGE__", repo ? `https://github.com/${repo}` : base));
-// "Check your install", at /check/.
-mkdirSync(join(site, "check"), { recursive: true });
-writeFileSync(join(site, "check", "index.html"), readFileSync(join(worker, "installer", "check.html"), "utf8")
-  .replaceAll("__VERSION__", version)
-  .replaceAll("__REPO_PAGE__", repo ? `https://github.com/${repo}` : base));
-// GitHub Pages keeps a custom domain in a CNAME file beside the page; the release replaces the whole branch, so
-// it's written here every time or the domain would be dropped.
-if (project?.site) writeFileSync(join(site, "CNAME"), `${project.site}\n`);
 rmSync(dist, { recursive: true, force: true });
 
 const total = [...modules, ...assets].reduce((n, f) => n + f.size, 0);

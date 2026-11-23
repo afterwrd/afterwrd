@@ -67,7 +67,7 @@ async function device() {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
-  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
+  page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(m.text()); }); // blocked by the page's policy
   page.on("dialog", (d) => { errors.push(`dialog: ${d.message()}`); d.dismiss(); });
   const cdp = await page.createCDPSession();
   await cdp.send("WebAuthn.enable");

@@ -3,7 +3,7 @@
 import { nonce } from "../nonce.js";
 
 import { dateKey, datesOf, dayName, eventDay, eventDays, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
-import { asset, icon } from "./nav.js";
+import { asset, integrity, icon } from "./nav.js";
 import { html, raw } from "./html.js";
 import { groupBase, groupHead } from "./groups.js";
 import { groupItemCard } from "./items.js";
@@ -420,7 +420,7 @@ function notificationsSwitch(pushKey) {
   come through Chrome.</p>
   <p class="error" id="notify-error" role="alert"></p>
 </section>
-<script src="${asset("/static/notifications.js")}" type="module"></script>`;
+<script src="${asset("/static/notifications.js")}" integrity="${integrity("/static/notifications.js")}" type="module"></script>`;
 }
 
 /**

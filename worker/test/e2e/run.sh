@@ -87,7 +87,9 @@ run_update() {
   # Pretend to be an older version, so an update is waiting (package.json is put back afterwards).
   sed -i.bak 's/"version": "[^"]*"/"version": "0.0.1"/' "$WORKER/package.json" && rm -f "$WORKER/package.json.bak"
   # With a stand-in for Cloudflare's token endpoint (run by the test) for Connect Cloudflare.
-  fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token; suite update-ui.mjs behind; stop
+  # And the signed list of releases (signing.js), which the test makes: GitHub's latest, signed with the test key.
+  fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
+    --var SIGNATURES_URL:http://127.0.0.1:8799/signatures --var TEST_RELEASE_KEY:H1DwXVvwn1lXX22JrLZPLTs+Gh5c1QcWFyqbVDWXbe0=; suite update-ui.mjs behind; stop
   fresh --var UPDATE_TOKEN:test-token-not-real; suite update-ui.mjs remembered; stop
   cp "$OUT/package.json.saved" "$WORKER/package.json"
 }
@@ -147,15 +149,16 @@ run_central() { # the installer at install.afterwrd.app, on 8791, with stand-ins
   stop
   (cd "$WORKER" && "$WRANGLER" dev -c central/wrangler.jsonc --port 8791 --ip 127.0.0.1 --infer-origin-from-routes=false --var ALLOW_LOCAL_SITES:1 \
     --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 \
-    --var RELEASES_ROOT:http://127.0.0.1:8799/releases --var TEST_SITE_URL:http://127.0.0.1:8797 > "$OUT/central.log" 2>&1 &)
+    --var RELEASES_ROOT:http://127.0.0.1:8799/releases --var TEST_SITE_URL:http://127.0.0.1:8797 \
+    --var SIGNATURES_URL:http://127.0.0.1:8799/signatures --var TEST_RELEASE_KEY:H1DwXVvwn1lXX22JrLZPLTs+Gh5c1QcWFyqbVDWXbe0= > "$OUT/central.log" 2>&1 &)
   wait_for 8791
   suite central.mjs
+  suite relay.mjs # afterwrd.app's Connect page, served by the installer's Worker, everything around it stood in for
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 1
-  suite relay.mjs # afterwrd.app's Connect page, everything around it stood in for
 }
 run_checks() { # one site, with stand-ins for Cloudflare and GitHub on 8799 (checks.mjs runs them)
   fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
-    --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var RELEASES_URL:http://127.0.0.1:8799/releases
+    --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var RELEASES_URL:http://127.0.0.1:8799/releases --var TEST_SUBDOMAIN:ann
   suite checks.mjs; stop
 }
 run_recover() { # getting back in without a passkey (recover.js): one site, a stand-in for Cloudflare on 8799 (recover.mjs runs it)
