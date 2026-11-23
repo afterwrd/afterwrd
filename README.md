@@ -37,8 +37,9 @@ A friend's page, read from their site; a group with its events; and on a phone, 
 
 ## How sites talk to each other
 
-Each site is its own: friends' and groups' sites ask it for what their owner may see, with a key for that one
-friendship. To keep Home quick, a site keeps a short-lived copy of each friend's newest posts; everything else is read
+Each site is its own: friends' and groups' sites ask it for what their owner may see, in calls their own site signs.
+Everything anyone writes is signed in their own browser, and the site that keeps a conversation signs where it's up
+to, so no site can change, invent or quietly drop what someone else said. To keep Home quick, a site keeps a short-lived copy of each friend's newest posts; everything else is read
 when you look. [PROTOCOL.md](PROTOCOL.md) describes the requests and what's sent,
 for anyone curious or wanting to build something that talks to afterwrd.
 
@@ -197,16 +198,16 @@ Once it's installed, nothing needs the terminal:
   and their new site asks them to confirm as soon as they've made their passkey. Then you approve their request. Connections are mutual, and make you friends: *Home* shows the newest posts written
   on each friend's site, and either of you can read the other's posts and photos (everything they've published)
   without leaving your own site: press their name. Comments you make are stored on your friend's site, with a
-  copy kept on yours. Their photos and videos load straight from their site through links it signs, which last
-  an hour or two. Sites exchange posts and comments as ActivityStreams too. Friends see what you've
+  copy kept on yours. Their photos and videos load straight from their site through links it makes for your site alone,
+  which last a day or two and stop working if either of you removes the other. Friends see what you've
   written on afterwrd, plus any parts of your Facebook download you chose to publish when importing. Either of you can press *Remove friend* on the other's page,
   which ends it all at once. If a friend's site stops answering for a day, Home stops mentioning it and *Friends*
   says so instead, so you can remove them. Two sites in the same Cloudflare account can connect too.
 - **Groups.** Each group is its own small site: *Groups → Start a group* makes it a Worker of its own, with its own
   database, in your Cloudflare account (you *Connect Cloudflare* and *Allow*, for an hour; on your own server, a command
   there makes it). It runs afterwrd in group mode: it holds the group and nothing else, and no one signs in to it.
-  You and its members use it from your own sites, so being in a group isn't being friends, and a group's keys open
-  nothing on anyone's site. Make an invite link on its *Members* page and send it round: anyone with an afterwrd site
+  You and its members use it from your own sites, so being in a group isn't being friends, and a group can do nothing
+  on its members' sites but send them notes about the group and say when they've been removed. Make an invite link on its *Members* page and send it round: anyone with an afterwrd site
   can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 40 besides its
   owner). The owner can make members admins, and admins can remove people and delete anything in the group.
   Members read the group from their own sites when they open it, and can post (with up to 8 photos, which are copied

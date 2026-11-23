@@ -2,12 +2,6 @@
 // name, groups until step 6). Calls between friends' sites are signed (calls.js).
 const TIMEOUT_MS = 8000;
 const MAX_REPLY = 2_000_000;
-// The keys groups and their members' sites call each other with (groups.js, membership.js), until groups are signed
-// too (docs/signed-conversations.md, step 6).
-export const KEY_RE = /^[\w-]{40,100}$/;
-// The version of the protocol between sites (PROTOCOL.md), sent in the hello and ping answers. Adding things doesn't
-// change it; anything an older site would misread does.
-export const PROTOCOL = 1;
 
 /** An https site address as an origin, or null. http on this computer only when testing (ALLOW_LOCAL_SITES). */
 export function siteOrigin(text, env) {
