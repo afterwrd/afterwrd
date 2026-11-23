@@ -2,7 +2,7 @@
 // the Facebook download's pages, the Memories tabs. Views only draw: they read nothing and change nothing.
 
 
-import { asset, FAVICON, initial, ownerMain, ownerMenu, siteHeader } from "./nav.js";
+import { asset, favicon, initial, ownerMain, ownerMenu, siteHeader } from "./nav.js";
 import { html, raw } from "./html.js";
 
 // Memories: everything from the Facebook download, each shown if the owner published that section.
@@ -46,7 +46,7 @@ export function layout(ctx, { title, bodyClass = "", main }) {
   <meta name="theme-color" content="#16201b">
   <title>${title} · afterwrd</title>
   <link rel="stylesheet" href="${asset("/static/style.css")}">
-  ${raw(FAVICON)}
+  ${raw(favicon())}
 </head>
 <body class="${bodyClass}">
   ${raw(header(ctx))}

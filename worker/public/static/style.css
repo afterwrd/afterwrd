@@ -36,7 +36,7 @@
 }
 
 /* The light look ("Campfire by day"), chosen behind your picture: warm paper, forest-green words, and the same ember for
-   the logo, the page you're on and what's new. nav.js's LOOK sets data-look before anything shows; pages.js has the
+   the logo, the page you're on and what's new. nav.js's look() sets data-look before anything shows; pages.js has the
    same colours for the sign-in pages. Photos keep their dark stage in both. */
 :root[data-look="light"] {
   --bg: #f6f1e8;

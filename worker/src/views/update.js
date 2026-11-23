@@ -1,10 +1,11 @@
 // The owner's Update page (update.js): this version, the latest release and its notes, bringing groups up to date,
 // and asking a friend to check the site.
+import { nonce } from "../nonce.js";
 import { connectLink } from "../cloudflare.js";
 import { TOKENS_PAGE } from "../update.js";
 import { escape } from "../util.js";
 import { checkedWords, resultHtml } from "./checks.js";
-import { asset, FAVICON, ownerHeader } from "./nav.js";
+import { asset, favicon, ownerHeader } from "./nav.js";
 
 /** The Connect button for a step, or a note that it's done. */
 function connectPart(connected, back, what, background = false) {
@@ -220,7 +221,7 @@ ${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Update · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 <style>
   .button, #go, #groups-go, button.go { display: inline-block; padding: 0.5rem 1rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button);
     font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
@@ -281,7 +282,7 @@ ${historyPart(history)}
 ${groupsPart}
 ${forget}
 </main>
-<script>
+<script nonce="${nonce()}">
   // A link to something folded away (Home's "See what it found", say) opens the fold it's in.
   const openFold = () => {
     let target = null;
@@ -485,7 +486,7 @@ docker compose up -d</pre>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Update · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 <style>
   .security { padding: 0.6rem 0.9rem; border-left: 3px solid var(--danger); border-radius: 10px; background: var(--tint-4); }
   .notes h2, #check h2 { margin: 0 0 0.4rem; font-size: 1rem; }

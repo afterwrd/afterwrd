@@ -15,6 +15,7 @@ const errors = [];
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
 const page = await browser.newPage();
 page.on("pageerror", (e) => errors.push(e.message));
+page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
 let cloudflare = null; // where the relay sent the browser at Cloudflare
 let backAt = null; // where it sent the browser back to
 await page.setRequestInterception(true);

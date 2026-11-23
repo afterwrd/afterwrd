@@ -1,7 +1,8 @@
 // Adding and introducing friends (connect.js): Add a friend, confirming a friend link, and introductions.
+import { nonce } from "../nonce.js";
 import { host } from "../sites.js";
 import { escape } from "../util.js";
-import { asset, FAVICON, ownerHeader } from "./nav.js";
+import { asset, favicon, ownerHeader } from "./nav.js";
 
 function shell(me, title, body, script = "") {
   return `<!doctype html>
@@ -11,14 +12,14 @@ function shell(me, title, body, script = "") {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escape(title)} · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 </head>
 <body>
 ${ownerHeader("connections", me)}
 <main class="connections">
 ${body}
 </main>
-${script ? `<script>${script}</script>` : ""}
+${script ? `<script nonce="${nonce()}">${script}</script>` : ""}
 </body>
 </html>`;
 }

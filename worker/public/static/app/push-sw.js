@@ -40,9 +40,11 @@ sw.addEventListener("fetch", (event) => {
 /**
  * Said when a page can't be reached at all, with its own words and colours (the site's stylesheet may not be on the
  * device), in the look (dark or light) chosen on the site. It tries again by itself until the site answers.
- * Its colours copy style.css's :root and its look script nav.js LOOK: change them together.
+ * Its colours copy style.css's :root and its look script nav.js look(): change them together.
  */
 function offlinePage() {
+  // Its script runs by a nonce made for this one page, as the site's own pages' do (src/nonce.js).
+  const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18)))).replace(/\+/g, "-").replace(/\//g, "_");
   const page = `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -50,7 +52,7 @@ function offlinePage() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#16201b">
 <title>You're offline · afterwrd</title>
-<script>
+<script nonce="${nonce}">
 (() => {
   let choice = null;
   try { choice = localStorage.getItem("afterwrd-look"); } catch {}
@@ -62,6 +64,7 @@ function offlinePage() {
   const retry = () => fetch("/static/app/manifest.webmanifest", { cache: "no-store" }).then(() => location.reload(), () => {});
   addEventListener("online", retry);
   setInterval(() => { if (document.visibilityState === "visible") retry(); }, 5000);
+  document.addEventListener("DOMContentLoaded", () => document.getElementById("again").addEventListener("click", () => location.reload()));
 })();
 </script>
 <style>
@@ -86,13 +89,13 @@ button { font: 800 1rem "Nunito", system-ui, sans-serif; background: var(--butto
 <span class="wordmark" aria-label="afterwrd">afterw<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4a8 8 0 1 1-4.7 14.5L3.8 20l1.2-3.6A8 8 0 0 1 12 4z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>rd</span>
 <h1>You're offline</h1>
 <p>Check you've got signal or Wi-Fi. This page will load by itself once you're connected.</p>
-<button type="button" onclick="location.reload()">Try again</button>
+<button type="button" id="again">Try again</button>
 </main>
 </body>
 </html>`;
   // The same protections as the site's own pages (src/index.js), as this one never passes through it.
   return new Response(page, { status: 503, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-    "Content-Security-Policy": "connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+    "Content-Security-Policy": `script-src 'self' 'nonce-${nonce}'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'`,
     "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin" } });
 }
 

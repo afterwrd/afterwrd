@@ -1,5 +1,6 @@
 // Events (events.js, calendar.js): an event on a post, its answers and guests, the form, and the calendars (Events,
 // and a group's). Views only draw: they read nothing and change nothing.
+import { nonce } from "../nonce.js";
 
 import { dateKey, datesOf, dayName, eventDay, eventDays, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
 import { asset, icon } from "./nav.js";
@@ -74,7 +75,7 @@ export function guestPicker(friends, { none = "" } = {}) {
   <div class="guest-options">${friends.map((f) => html`<label><input type="checkbox" name="guest" value="${f.id}"><span>${f.name}</span></label>`)}</div>
   <p class="meta">Only the friends you invite see the event. Everyone invited sees who's going and who might.</p>
 </fieldset>
-<script>
+<script nonce="${nonce()}">
   for (const box of document.querySelectorAll(".guest-filter")) {
     box.addEventListener("input", () => {
       const want = box.value.trim().toLowerCase();
@@ -199,7 +200,7 @@ export function eventForm({ action, back, values = {}, text = "", submit, guests
   ${guests}
   <div class="actions-row"><button class="chip primary">${submit}</button></div>
 </form>
-<script>
+<script nonce="${nonce()}">
   for (const input of document.querySelectorAll("input[data-zone]")) {
     try { input.value ||= Intl.DateTimeFormat().resolvedOptions().timeZone; } catch {}
   }
@@ -391,7 +392,7 @@ ${view === "month" ? html`${calendarGrid(ctx, items, { month, day, base: "/event
     guests: guestPicker(friends, { none: "You have no friends on afterwrd to invite yet. You can still make it, and invite people later." }) })}
 </details>
 ${notificationsSwitch(pushKey)}
-<script>
+<script nonce="${nonce()}">
   // "Make an event" opens the form.
   if (location.hash === "#make") document.getElementById("make").open = true;
   document.querySelector('a[href="#make"]').addEventListener("click", () => { document.getElementById("make").open = true; });

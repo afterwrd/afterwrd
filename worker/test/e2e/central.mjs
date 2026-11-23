@@ -141,6 +141,7 @@ async function install(code, { person = "Ann Example", domains = [], account = n
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
   const startedAt = new Map();
   page.on("request", (req) => { if (req.url().startsWith(`${BASE}/step/`)) startedAt.set(req, outgoing); });
   page.on("requestfinished", (req) => {

@@ -16,6 +16,7 @@ const browser = await puppeteer.launch({ executablePath: CHROME, headless: true 
 async function person(start) {
   const page = await (await browser.createBrowserContext()).newPage();
   page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
   page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
   // afterwrd asks in its own box (ui.js): say yes, as a person would.
   await page.evaluateOnNewDocument(() => new MutationObserver(() => document.querySelector("dialog.ask[open] .chip.danger")?.click())

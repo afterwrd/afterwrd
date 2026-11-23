@@ -2,7 +2,7 @@
 // for Cloudflare's runtime) into $OUT/bundle.mjs. (Friends' signed posts and comments are checked against their
 // signatures and lists: lists.mjs, and between real sites in feed.mjs.)
 import { pathToFileURL } from "node:url";
-const { linkify, callSite, icsFile, loadRelease, parseEvent, parseMedia, readEventForm, serveStatic, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+const { linkify, callSite, icsFile, loadRelease, parseEvent, parseMedia, readEventForm, serveStatic, signedLink, siteOrigin, findOrCreateDatabase, findWorker, CLIENT_ID, EARLIER_CLIENTS, grantClient } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
 const B = "https://bob.example";
 const A = "https://ann.example";
 const hash = "a".repeat(64);
@@ -14,6 +14,10 @@ check("a proper signed link is accepted", parseMedia(media(`${B}/files/${hash}?e
 check("a link with styling tacked on is refused", parseMedia(media(`${B}/files/${hash}?exp=1'); position:fixed; inset:0; background:url('https://evil.example/x.png`), B) === null);
 check("a link with anything after the signature is refused", parseMedia(media(`${B}/files/${hash}?exp=1800000000&sig=${"x".repeat(43)}&x=')`), B) === null);
 check("a link to another site is refused", parseMedia(media(`https://evil.example/files/${hash}?exp=1&sig=${"x".repeat(43)}`), B) === null);
+// A file's hash comes from what they sent too, and ends up in style="…" with the link (a thumbnail): only a hash.
+const tacked = "x');position:fixed;inset:0";
+check("a signed link whose \"hash\" carries styling is refused", signedLink(B, `${B}/files/${tacked}?exp=1&sig=${"x".repeat(43)}`, tacked) === null);
+check("…while one with a real hash is taken", signedLink(B, `${B}/files/${hash}?exp=1&sig=${"x".repeat(43)}`, hash) !== null);
 
 // Mentions: only names listed are highlighted, escaped.
 check("highlighting escapes names, and only highlights those listed", String(linkify("<b>@Bob & co</b> @Ann", [{ name: "Bob & co" }]))

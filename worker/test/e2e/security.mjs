@@ -63,6 +63,35 @@ check("session cookie is __Host-, HttpOnly, Secure", Boolean(cookie && cookie.ht
 const csp = (await fetch(`${BASE}/_auth/login`)).headers.get("content-security-policy") ?? "";
 check("CSP blocks plugins, <base> and foreign form posts", ["object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"].every((d) => csp.includes(d)), csp);
 check("CSP lets pages call only this site", csp.includes("connect-src 'self'"), csp);
+// Scripts: only from the site's files, or the page's own, carrying the nonce made for that answer (nonce.js).
+const nonceOf = (policy) => /^script-src 'self' 'nonce-([\w-]{24})';/.exec(policy ?? "")?.[1];
+const inlineScripts = (body) => [...body.matchAll(/<script\b([^>]*)>/g)].map((m) => m[1]).filter((a) => !/\bsrc=|application\/json/.test(a));
+const handlers = (body) => body.replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, "").match(/<[a-z][^>]*\son[a-z]+\s*=/gi) ?? [];
+for (const [where, path, headers] of [["the sign-in page", "/_auth/login", {}], ["Home", "/", { Cookie: `__Host-session=${cookie.value}` }],
+  ["Friends", "/friend", { Cookie: `__Host-session=${cookie.value}` }], ["Your devices", "/_admin", { Cookie: `__Host-session=${cookie.value}` }]]) {
+  const res = await fetch(BASE + path, { headers });
+  const policy = res.headers.get("content-security-policy");
+  const nonce = nonceOf(policy), body = await res.text(), scripts = inlineScripts(body);
+  check(`${where}: scripts run only from the site's files or with the answer's nonce`, res.status === 200 && Boolean(nonce)
+    && !policy.includes("unsafe"), `${res.status} ${policy}`);
+  check(`…every inline script on ${where} carries it`, scripts.length > 0 && scripts.every((a) => a.includes(` nonce="${nonce}"`)),
+    scripts.filter((a) => !a.includes(` nonce="${nonce}"`)).join(" | "));
+  check(`…and ${where} has no inline handlers (onclick and the like)`, handlers(body).length === 0, handlers(body).join(" | "));
+}
+check("each answer has its own nonce", nonceOf((await fetch(`${BASE}/_auth/login`)).headers.get("content-security-policy"))
+  !== nonceOf((await fetch(`${BASE}/_auth/login`)).headers.get("content-security-policy")));
+await owner.goto(`${BASE}/`);
+const ran = await owner.evaluate(async () => {
+  const script = document.createElement("script");
+  script.textContent = "window.injected = 1";
+  document.body.append(script);
+  document.body.insertAdjacentHTML("beforeend", '<img src="/static/not-there.png" onerror="window.handler = 1" alt="">');
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  // @ts-ignore
+  return { injected: window.injected, handler: window.handler, look: document.documentElement.dataset.look };
+});
+check("in the browser, a script put in a page without its nonce doesn't run, nor an inline handler", !ran.injected && !ran.handler, JSON.stringify(ran));
+check("…while the page's own scripts do (its look is set)", ["dark", "light"].includes(ran.look), JSON.stringify(ran));
 const version = await fetch(`${BASE}/_version`);
 const said = await version.json().catch(() => null);
 check("the site says which uploaded version it is, without signing in", version.status === 200 && said && "id" in said, JSON.stringify(said));

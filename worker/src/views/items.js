@@ -3,6 +3,7 @@
 // behind a button: "Comments" when there are some, "Comment" when there are none. Every form that changes something
 // is signed in the browser before it's sent (ui/sign.js, from the form's data-sign-* attributes): the comment box, Edit
 // and Delete on a comment, and Edit and Delete on the post itself.
+import { nonce } from "../nonce.js";
 import { MAX_COMMENT } from "../archive/comments.js";
 import { frozenSaid } from "../hosted.js";
 import { MAX_POST_TEXT } from "../edits.js";
@@ -228,7 +229,7 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
     <h2>Posted with</h2>${friendItemCard(ctx, item, { back })}
   </aside>
 </main>
-<script>
+<script nonce="${nonce()}">
   document.addEventListener('keydown', e => {
     if (e.target.matches('input, textarea, select') || e.metaKey || e.ctrlKey) return;
     const link = document.getElementById({ ArrowLeft: 'prev', ArrowRight: 'next', Escape: 'close' }[e.key]);
@@ -381,7 +382,7 @@ export function signedGroupPhoto(ctx, { membership: g, group: info, item, index,
     <h2>Posted with</h2>${groupItemCard(ctx, g, item, { back, ownerPerson })}
   </aside>
 </main>
-<script>
+<script nonce="${nonce()}">
   document.addEventListener('keydown', e => {
     if (e.target.matches('input, textarea, select') || e.metaKey || e.ctrlKey) return;
     const link = document.getElementById({ ArrowLeft: 'prev', ArrowRight: 'next', Escape: 'close' }[e.key]);

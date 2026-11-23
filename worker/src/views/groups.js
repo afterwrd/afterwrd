@@ -1,5 +1,6 @@
 // Groups, each its own Worker, read from there (membership.js, groupcopies.js): a group's posts, photos and members,
 // making, joining and closing one. Views only draw: they read nothing and change nothing.
+import { nonce } from "../nonce.js";
 import { connectLink } from "../cloudflare.js";
 import { closedGroup } from "../groups.js";
 import { fmtDate, fmtDatetime } from "./format.js";
@@ -37,7 +38,7 @@ export function groupsIndexPage(ctx, { groups, unfinished = [], connected = fals
   <button type="button" class="chip" id="join-paste" hidden>Paste</button>
   <button>Join</button>
 </form>
-<script>
+<script nonce="${nonce()}">
   // Paste in one tap where the browser allows reading what was copied (it may ask first).
   const joinPaste = document.getElementById("join-paste");
   if (navigator.clipboard?.readText) {
@@ -74,7 +75,7 @@ ${unfinished.length > 0 && html`<section class="card" id="unfinished">
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
 </section>
-<script>${raw(STEP_SCRIPT)}
+<script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   document.getElementById("unfinished").addEventListener("click", async (e) => {
     const button = e.target.closest("button[data-finish], button[data-delete]");
     if (!button || (button.dataset.delete && !(await askFirst("Delete this group's Worker and database from your Cloudflare account?", { ok: "Delete" })))) return;
@@ -152,7 +153,7 @@ ${domain ? html`<form class="card stack" id="start">
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
 </form>
-<script>${raw(STEP_SCRIPT)}
+<script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   const form = document.getElementById("start");
   // Connect takes a page away and back: what's typed is kept for the return.
   const kept = "afterwrd-group-start";
@@ -221,7 +222,7 @@ which are kept on the group's site.</p>
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
 </form>
-<script>${raw(STEP_SCRIPT)}
+<script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   const form = document.getElementById("start");
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -330,7 +331,7 @@ ${g.role === "owner" && g.origin && html`<section class="card stack" id="bring-g
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
 </section>
-<script>${raw(STEP_SCRIPT)}
+<script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   document.getElementById("bring").addEventListener("click", async (e) => {
     e.target.disabled = true;
     error.textContent = "";
@@ -504,7 +505,7 @@ ${owner && !shut ? html`<section class="card" id="close">
 </section>` : !owner && gone ? html`<form method="post" action="/_groups/${g.id}/forget"><button class="chip">Take it off your list</button></form>`
   : !owner && !shut ? html`<p id="error" role="alert"></p><div class="actions-row"><button class="chip" data-group-record="leave" data-group="${g.id}"
   data-ask="Leave this group? What you posted in it stays there." data-ask-ok="Leave">Leave the group</button></div>` : ""}
-<script>${raw(STEP_SCRIPT)}
+<script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   const linkUrl = document.getElementById("link-url");
   document.getElementById("make")?.addEventListener("click", async () => {
     const problem = document.getElementById("invite-error");

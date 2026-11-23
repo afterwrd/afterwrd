@@ -1,5 +1,5 @@
 // Drop-downs you can type into. A <select data-search> becomes a box that narrows its list as you type; the select
-// itself stays (hidden) in the form, so what's sent, and any onchange, are as before.
+// itself stays (hidden) in the form, so what's sent, and data-autosubmit, are as before.
 
 let made = 0;
 function searchable(select) {

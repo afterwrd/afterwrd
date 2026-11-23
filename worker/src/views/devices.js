@@ -1,6 +1,7 @@
 // Your devices (admin.js): the owner's passkeys, adding a device with a one-hour link, and signing out everywhere.
+import { nonce } from "../nonce.js";
 import { escape } from "../util.js";
-import { asset, FAVICON, ownerHeader } from "./nav.js";
+import { asset, favicon, ownerHeader } from "./nav.js";
 
 function day(ts) {
   return ts ? new Date(ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -39,7 +40,7 @@ export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Your devices · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 <style>
   .devices { list-style: none; margin: 0 0 1.25rem; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
   .devices li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
@@ -110,7 +111,7 @@ ${notifying.length ? `<ul class="devices" id="notifying">
     <form method="post" action="/_admin/notifications/${Number(d.id)}/forget" data-confirm="Turn off notifications on this device?" data-confirm-ok="Turn off"><button class="chip danger">Turn off</button></form></li>`).join("")}
 </ul>` : '<p id="notifying">None.</p>'}
 </main>
-<script>
+<script nonce="${nonce()}">
   const error = document.getElementById("error");
   const linkUrl = document.getElementById("link-url");
   async function post(path, body) {
@@ -157,7 +158,7 @@ ${notifying.length ? `<ul class="devices" id="notifying">
   }
 </script>
 ${identity ? `<script type="application/json" id="signing-data">${JSON.stringify({ identity, thisSigns, passkeys: passkeys.map((k) => k.id) }).replace(/</g, "\\u003c")}</script>
-<script type="module">
+<script type="module" nonce="${nonce()}">
   // Changing the owner's identity (keys.js): a passkey that signs for them, or their recovery code, signs each change.
   import * as S from ${JSON.stringify(asset("/static/signed.js"))};
   import { passkeySigns } from ${JSON.stringify(asset("/static/passkey.js"))};

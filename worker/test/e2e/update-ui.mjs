@@ -38,6 +38,7 @@ const page = await browser.newPage();
 // the service worker (public/static/app/push-sw.js) passes a page on; it's tested in comments.mjs.
 await page.setBypassServiceWorker(true);
 page.on("pageerror", (e) => errors.push(e.message));
+page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
 page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
 // afterwrd asks in its own box (ui.js): say yes, as a person would.
 await page.evaluateOnNewDocument(() => new MutationObserver(() => document.querySelector("dialog.ask[open] .chip.danger")?.click())

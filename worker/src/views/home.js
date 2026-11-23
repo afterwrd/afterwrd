@@ -1,4 +1,5 @@
 // Home, Memories and Add to home screen. Views only draw: they read nothing and change nothing.
+import { nonce } from "../nonce.js";
 import { friendItemCard, itemCard } from "./items.js";
 import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
@@ -141,7 +142,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
         <button class="chip" data-copy>Copy the link</button></span>
       <span class="error" role="alert"></span>
     </div>`)}
-    ${checkRequests.length > 0 && html`<script>
+    ${checkRequests.length > 0 && html`<script nonce="${nonce()}">
       // A friend asked for a check: make the link here, then hand it to the phone's share sheet (or copy it).
       document.addEventListener("click", async (e) => {
         const card = e.target.closest(".check-request");

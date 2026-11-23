@@ -173,6 +173,7 @@ const owner = await context.newPage();
 // the service worker (public/static/app/push-sw.js) passes a page on; it's tested in comments.mjs.
 await owner.setBypassServiceWorker(true);
 owner.on("pageerror", (e) => errors.push(e.message));
+owner.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
 owner.on("dialog", (d) => { errors.push(`dialog: ${d.message()}`); d.dismiss(); });
 const cdp = await owner.createCDPSession();
 await cdp.send("WebAuthn.enable");

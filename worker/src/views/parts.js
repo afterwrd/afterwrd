@@ -287,7 +287,7 @@ export function options(values, selected, label = null) {
 }
 
 export function yearSelect(years, year, label = "All years") {
-  return html`<select name="year" onchange="this.form.submit()" data-search="Type a year" aria-label="Year">
+  return html`<select name="year" data-autosubmit data-search="Type a year" aria-label="Year">
   <option value="">${label}</option>
   ${options(years, year)}
 </select>`;

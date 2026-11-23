@@ -1,5 +1,5 @@
 // Download everything (export.js): the page; the zip is made in the browser (public/static/export/main.js).
-import { asset, FAVICON, ownerHeader } from "./nav.js";
+import { asset, favicon, ownerHeader } from "./nav.js";
 
 export function exportPage({ me = null } = {}) {
   return `<!doctype html>
@@ -9,7 +9,7 @@ export function exportPage({ me = null } = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Download everything · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 </head>
 <body>
 ${ownerHeader("export", me)}

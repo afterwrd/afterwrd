@@ -13,8 +13,11 @@ const count = (n) => (Number.isSafeInteger(n) && n > 0 ? n : null);
 /** A path on their site after `prefix`, or null. */
 const own = (site, url, prefix) => (typeof url === "string" && url.startsWith(site + prefix) ? url.slice(site.length + prefix.length) : null);
 
-/** Their signed link for a file, if it's exactly that and nothing more (it ends up in pages, even in style="…"). */
-export const signedLink = (site, link, hash) => (typeof link === "string" && link.startsWith(`${site}/files/${hash}?`)
+/**
+ * Their signed link for a file, if it's exactly that and nothing more (it ends up in pages, even in style="…"): `hash`
+ * too, which comes from what they sent, must be a file's hash and nothing else.
+ */
+export const signedLink = (site, link, hash) => (typeof link === "string" && HASH_RE.test(hash ?? "") && link.startsWith(`${site}/files/${hash}?`)
   && /^\?exp=\d{1,12}&sig=[\w-]{43}$/.test(link.slice(`${site}/files/${hash}`.length)) ? link : null);
 
 export function parseMedia(m, site) {

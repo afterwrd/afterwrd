@@ -8,6 +8,7 @@
 //   inplace.js   comments, edits, deletes, answers and notices sent without a new page
 //   arriving.js  a page opened at something (#c12) showing it below the header
 //   search.js    drop-downs you can type into
+//   autosubmit.js lists that send their form when one's picked
 //   mentions.js  @ in a post or comment box: picking someone to mention
 //   app.js       the home-screen app: the service worker, and Add to home screen
 //   groupsign.js a group's signed members list: joining, letting in, removing, admins, leaving
@@ -18,6 +19,7 @@ import "./drafts.js";
 import "./inplace.js";
 import "./arriving.js";
 import "./search.js";
+import "./autosubmit.js";
 import "./mentions.js";
 import "./app.js";
 import "./threads.js";

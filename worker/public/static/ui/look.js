@@ -1,4 +1,4 @@
-// The look: the Dark / Light / Auto switch behind your picture, kept in this browser (nav.js LOOK applies it).
+// The look: the Dark / Light / Auto switch behind your picture, kept in this browser (nav.js look() applies it).
 
 const looks = /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('input[name="look"]'));
 const showChoice = () => looks.forEach((r) => { r.checked = r.value === document.documentElement.dataset.lookChoice; });

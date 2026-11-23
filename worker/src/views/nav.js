@@ -1,6 +1,7 @@
 // The site header shared by every signed-in page: the logo, the main menu (Home, Photos, Friends, Groups, Notifications),
 // and the person's picture, behind which sits everything else (profile, Memories, the owner's tools, Sign out).
 // Icons are inline SVG so nothing is fetched.
+import { nonce } from "../nonce.js";
 import pkg from "../../package.json";
 import HASHES from "../../generated/asset-hashes.json";
 import { escape, now } from "../util.js";
@@ -20,14 +21,14 @@ export const asset = (path) => `${path}?v=${Object.hasOwn(HASHES, path) ? HASHES
 // pages, Notifications (opening it marks things seen), or anything under /_ (actions, sign-in).
 const OWN_PAGES = ["/posts", "/posts/*", "/photos", "/photos/*", "/memories", "/friend", "/timeline", "/overview",
   "/comments", "/likes", "/friends", "/people/*"];
-const PREFETCH = `<script type="speculationrules">${JSON.stringify({ prefetch: [{
+const PREFETCH_RULES = JSON.stringify({ prefetch: [{
   where: { and: [{ or: OWN_PAGES.map((page) => ({ href_matches: page })) }, { not: { href_matches: "/*.ics" } }] },
   eagerness: "moderate",
-}] })}</script>`;
+}] });
 
-const IMPORT_MAP = `<script type="importmap">${JSON.stringify({ imports: Object.fromEntries(Object.keys(HASHES)
+const IMPORTS = JSON.stringify({ imports: Object.fromEntries(Object.keys(HASHES)
   .filter((path) => path.endsWith(".js") && !path.startsWith("/static/vendor/") && !path.startsWith("/static/app/"))
-  .map((path) => [path, asset(path)])) })}</script>`;
+  .map((path) => [path, asset(path)])) });
 
 const ICONS = {
   home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
@@ -68,7 +69,7 @@ export const LOGO = `<span class="wordmark">afterw<svg class="o" viewBox="0 0 24
 // Dark or light. The choice (Dark, Light, or Auto: as this device is set) is kept in this browser, and set on the page
 // before anything shows, so a light page never flashes dark. ui.js changes it from the switch behind your picture
 // and sends "afterwrd-look"; another tab changing it, or the device switching, applies at once too.
-export const LOOK = `<script>
+export const look = () => `<script nonce="${nonce()}">
 (() => {
   const root = document.documentElement, light = matchMedia("(prefers-color-scheme: light)");
   const apply = () => {
@@ -90,8 +91,9 @@ export const LOOK = `<script>
 </script>`;
 
 // The icon in the browser's tab, and the home-screen app's manifest and icon (public/static/app/), for every page;
-// with them, the look (LOOK), as every page's head has this.
-export const FAVICON = `${LOOK}
+// with them, the look (look()), as every page's head has this. Drawn for each page, as the look script carries the
+// page's nonce (nonce.js).
+export const favicon = () => `${look()}
 <link rel="manifest" href="/static/app/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/app/icon-180.png">
 <meta name="apple-mobile-web-app-title" content="afterwrd">
@@ -135,12 +137,12 @@ export function siteHeader({ main, menu, current, face = {}, updateKnown = true 
     </div>
   </details>
 </div></header>
-${IMPORT_MAP}
-${PREFETCH}
+<script type="importmap" nonce="${nonce()}">${IMPORTS}</script>
+<script type="speculationrules" nonce="${nonce()}">${PREFETCH_RULES}</script>
 <script src="${asset("/static/live.js")}" defer></script>
 ${UI_PRELOAD}
 <script type="module" src="${asset("/static/ui/main.js")}"></script>
-<script>
+<script nonce="${nonce()}">
   // Close the menu when clicking anywhere else.
   document.addEventListener("click", (e) => {
     const menu = document.querySelector("details.me[open]");
@@ -173,7 +175,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // The parts public/static/ui/main.js imports, fetched alongside it rather than after it (a slow phone network would
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
-const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "mentions", "app"];
+const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app"];
 const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */
@@ -187,5 +189,5 @@ export function ownerHeader(current, me = null) {
   return siteHeader({ main: ownerMain(), menu: ownerMenu(), current, updateKnown: false,
     face: me ? { initial: initial(me.name), picture: me.picture } : {} })
     // The owner's profile, signed by this browser's key in the background when it needs it (keys.js profileToSign).
-    + (me?.signProfile ? `\n<script type="module">import(${JSON.stringify(asset("/static/signprofile.js"))}).then((m) => m.signProfile(${JSON.stringify(me.signProfile)})).catch(() => {});</script>` : "");
+    + (me?.signProfile ? `\n<script type="module" nonce="${nonce()}">import(${JSON.stringify(asset("/static/signprofile.js"))}).then((m) => m.signProfile(${JSON.stringify(me.signProfile)})).catch(() => {});</script>` : "");
 }

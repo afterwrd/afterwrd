@@ -62,10 +62,11 @@ to show its owner, and the status as what the other site said. Status `0` means 
 all (a network failure or a timeout).
 
 Every reply a site makes carries these headers (`src/app.js` `HEADERS`, set in `handle`), apart from `GET /_version`,
-which the front Worker answers itself:
+which the front Worker answers itself. `<nonce>` is made fresh for each reply (`src/nonce.js`): a page's own inline
+scripts carry it, so nothing else inline runs.
 
 ```http
-Content-Security-Policy: connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'
+Content-Security-Policy: script-src 'self' 'nonce-<nonce>'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'
 Referrer-Policy: same-origin
 X-Content-Type-Options: nosniff
 X-Robots-Tag: noindex, nofollow

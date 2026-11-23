@@ -28,6 +28,7 @@ async function owner(site, name, { signing = true } = {}) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(`${site}: ${e.message}`));
+  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(`${site}: ${m.text()}`); }); // blocked by the page's policy
   page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
   await page.evaluateOnNewDocument(() => new MutationObserver(() => document.querySelector("dialog.ask[open] .chip.danger")?.click())
     .observe(document, { childList: true, subtree: true }));

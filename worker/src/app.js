@@ -7,6 +7,7 @@
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
 import { withWork } from "./later.js";
+import { contentSecurityPolicy, newNonce, withNonce } from "./nonce.js";
 import { BRINGING_BYTES } from "./before.js";
 import { receiveNotes } from "./notes.js";
 import { receiveReceipt } from "./receipts.js";
@@ -39,11 +40,9 @@ import { selfHosted } from "./hosting.js";
 import { measure, measured, showTiming, testDelays, timingHeader } from "./timing.js";
 
 export const HEADERS = {
-  // No framing, plugins, <base> tricks or forms posting elsewhere. (Scripts aren't restricted: the pages use
-  // small inline scripts, and everything interpolated into a page is escaped.) Pages' own calls (fetch) go only to
-  // this site, so a library running in the page, such as zip.js reading a Facebook download, can't send what it
-  // reads anywhere else that way. Calls to Cloudflare, GitHub and friends' sites are made by the Worker, not the page.
-  "Content-Security-Policy": "connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'",
+  // Scripts only from this site's files, plus (set per answer in handle) the page's own, which carry its nonce
+  // (nonce.js). The rest of the policy is there too.
+  "Content-Security-Policy": contentSecurityPolicy(""),
   // Other sites never learn where a visitor came from. (Not "no-referrer": that makes browsers send
   // "Origin: null" on this site's own forms, which the cross-site check then refuses.)
   "Referrer-Policy": "same-origin",
@@ -72,20 +71,22 @@ export const handle = (request, env, work) => measure(async () => {
   if (env.ALLOW_LOCAL_SITES && env.TEST_CLOSE_SECONDS) testCloseSeconds(Number(env.TEST_CLOSE_SECONDS));
   testLimits(env);
   countRequest(); // today's usage (limits.js), for the busy-account warning
+  const nonce = newNonce(); // for this answer's page, if it's one (nonce.js)
   let response;
   try {
-    response = await withWork(work, () => route(request, env, work));
+    response = await withNonce(nonce, () => withWork(work, () => route(request, env, work)));
   } catch (error) {
     // A site past its allowance here today (allowances.js): refused until the day ends, and told when that is.
     if (error instanceof OverAllowance) response = json({ error: error.message, ...error.more }, 429);
     // A newer version may have changed the database under this one (migrate.js): say so, rather than fail.
     else if (!(await checkNewer(env))) throw error;
-    else response = beingUpdated(request);
+    else response = withNonce(nonce, () => beingUpdated(request));
   }
   // The rows this request read, charged to whoever it was from; counts saved now and then (allowances.js).
   await settle(env).catch((error) => console.error("Counting:", error.message));
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(HEADERS)) headers.set(name, value);
+  headers.set("Content-Security-Policy", contentSecurityPolicy(nonce));
   const timing = timingHeader();
   if (timing) headers.set("Server-Timing", timing);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });

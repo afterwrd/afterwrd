@@ -1,7 +1,7 @@
 // Adding photos to an album made here, or choosing a profile picture or cover (photos.js; the page's script is
 // public/static/add-photos.js).
 import { escape } from "../util.js";
-import { asset, FAVICON, ownerHeader } from "./nav.js";
+import { asset, favicon, ownerHeader } from "./nav.js";
 
 export function addPage({ albums, chosen, role, max, me = null }) {
   const title = role === "profile" ? "Choose a profile picture" : role === "cover" ? "Choose a cover photo" : "Add photos";
@@ -12,7 +12,7 @@ export function addPage({ albums, chosen, role, max, me = null }) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · afterwrd</title>
 <link rel="stylesheet" href="${asset("/static/style.css")}">
-${FAVICON}
+${favicon()}
 </head>
 <body>
 ${ownerHeader("photos", me)}

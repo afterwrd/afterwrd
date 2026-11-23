@@ -14,6 +14,7 @@
 //                                        the PKCE secret), keeps the token in a cookie, and says where to go back to
 //   POST /_cloudflare/disconnect         drops the token early
 // A site in group mode serves none of this (index.js); only the owner reaches it on their own site.
+import { nonce } from "./nonce.js";
 import pkg from "../package.json";
 import { html, json } from "./util.js";
 
@@ -185,7 +186,7 @@ export function donePage(finishPath, { carryOn = null } = {}) {
 <p id="error" role="alert"></p>
 <p id="carry-on" hidden><a href="${carryOn ?? "/"}">Carry on to your site</a>. You can turn this on later on its Update page.</p>
 </main>
-<script>
+<script nonce="${nonce()}">
   const carryOn = () => {
     document.body.classList.remove("passing");
     if (${JSON.stringify(Boolean(carryOn))}) document.getElementById("carry-on").hidden = false;

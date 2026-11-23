@@ -1,5 +1,5 @@
 // What forged.mjs tests, for run.sh to bundle.
-export { parseMedia } from "../../src/friends.js";
+export { parseMedia, signedLink } from "../../src/friends.js";
 export { callSite, siteOrigin } from "../../src/sites.js";
 export { icsFile, parseEvent, readEventForm } from "../../src/calendar.js";
 export { findOrCreateDatabase, findWorker, loadRelease } from "../../src/deploy.js";

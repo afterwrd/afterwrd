@@ -1,6 +1,7 @@
 // The only pages served to people who aren't signed in. Styles and script are inline because /static is
 // behind the login too (apart from the fonts, which are public: see index.js).
-import { asset, FAVICON, LOGO } from "./nav.js";
+import { nonce } from "../nonce.js";
+import { asset, favicon, LOGO } from "./nav.js";
 import { escape } from "../util.js";
 import { resultHtml } from "./checks.js";
 
@@ -11,7 +12,7 @@ const STYLE = `
           --accent: #ff8a3d; --accent-strong: #ffab73; --on-accent: #16201b; --button: #ede6da; --button-hover: #ffffff;
           --on-button: #16201b; --moss: #a8d49a; --danger: #ff8070; color-scheme: dark;
           --round: "Nunito", ui-rounded, system-ui, sans-serif; }
-  /* The light look, as in style.css (nav.js LOOK picks it). */
+  /* The light look, as in style.css (nav.js look() picks it). */
   :root[data-look="light"] { --bg: #f6f1e8; --surface: #fffdf8; --sunken: #f1ebe0; --text: #1f2a24; --muted: #6b6458; --border: #e0d6c6;
           --accent-strong: #a8480c; --button: #24332b; --button-hover: #16201b; --on-button: #fffdf8; --moss: #3f7334; --danger: #b3352b;
           color-scheme: light; }
@@ -111,7 +112,7 @@ function page(title, body, script = "") {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-${FAVICON}
+${favicon()}
 <title>${title} · afterwrd</title>
 <style>${STYLE}</style>
 </head>
@@ -120,7 +121,7 @@ ${FAVICON}
 <p class="brand" aria-label="afterwrd">${LOGO}</p>
 ${body}
 </main>
-${script && `<script>${CLIENT}\n${SIGNING}\n${script}</script>`}
+${script && `<script nonce="${nonce()}">${CLIENT}\n${SIGNING}\n${script}</script>`}
 </body>
 </html>`;
 }

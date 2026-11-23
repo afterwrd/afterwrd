@@ -1,5 +1,6 @@
 // A friend's page (their signed posts, and the Facebook archive and albums they share: friendcopies.js, friends.js), and
 // Friends. Views only draw: they read nothing and change nothing.
+import { nonce } from "../nonce.js";
 import { friendItemCard } from "./items.js";
 import { verdict } from "../checks.js";
 import { resultHtml } from "./checks.js";
@@ -173,7 +174,7 @@ button that makes the link to send back to them. If someone asks by message inst
 address, here. They open the link and allow read-only access in Cloudflare, and your site checks theirs is exactly the
 published afterwrd, with nothing else done in their account. You both see what it found. The link goes back by message,
 not between the sites, so a site that had been tampered with couldn't swap it for a fake.</p>
-<form class="check-form" onsubmit="return false">
+<form class="check-form" id="check-form">
   <input id="check-site" placeholder="Their message, or their site's address" aria-label="Their message, or their site's address">
   <button class="chip" data-check="">Make a check link</button>
 </form>
@@ -194,8 +195,10 @@ ${checks.length > 0 && html`<ul class="friend-list checks">
     <form method="post" action="/_admin/checks/${k.id}/delete"><button class="link">Forget</button></form>
   </li>`)}
 </ul>`}
-<script>
+<script nonce="${nonce()}">
   // Check a friend's site: make a one-time link (for that friend, or for whoever it's sent to) and a message to send.
+  // The form is never sent: Enter presses its button, which does it here.
+  document.getElementById("check-form").addEventListener("submit", (e) => e.preventDefault());
   const checkPanel = document.getElementById("check-panel");
   document.addEventListener("click", async (e) => {
     const button = e.target.closest("button[data-check]");
@@ -230,7 +233,7 @@ ${checks.length > 0 && html`<ul class="friend-list checks">
 
 ${facebook.length > 0 && html`
 <h2>From your Facebook download</h2>
-<form class="filters" onsubmit="return false">
+<form class="filters" id="fb-filter-form">
   <input type="search" id="fb-filter" placeholder="Search names" aria-label="Search names">
 </form>
 <table class="numbers people" id="fb-people">
@@ -257,7 +260,8 @@ ${facebook.length > 0 && html`
   <p class="error" id="invite-error" role="alert"></p>
 </section>
 <datalist id="fb-names">${facebook.map((p) => html`<option value="${p.name}">`)}</datalist>
-<script>
+<script nonce="${nonce()}">
+  document.getElementById("fb-filter-form").addEventListener("submit", (e) => e.preventDefault()); // narrows as you type
   document.getElementById("fb-filter").addEventListener("input", (e) => {
     const q = e.target.value.trim().toLowerCase();
     for (const row of document.querySelectorAll("#fb-people tbody tr")) row.hidden = q && !row.cells[0].textContent.toLowerCase().includes(q);
@@ -404,7 +408,7 @@ export function friendPhotoPage(ctx, { friend: c, photo: m }) {
     ${m.post && html`<h2>Posted with</h2>${remoteCard(ctx, c, m.post, { back: m.inPost?.back ?? `${friendBase(c)}/posts#f${c.id}-${m.post.key}` })}`}
   </aside>
 </main>
-<script>
+<script nonce="${nonce()}">
   document.addEventListener('keydown', e => {
     if (e.target.matches('input, textarea, select') || e.metaKey || e.ctrlKey) return;
     const link = document.getElementById({ ArrowLeft: 'prev', ArrowRight: 'next', Escape: 'close' }[e.key]);

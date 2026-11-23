@@ -3,6 +3,7 @@
 // this: home.js, friends.js, groups.js, events.js; layout.js and parts.js are what they share. Each view is given `ctx`,
 // the page's frame (routes.js frame(): who's signed in, the request URL, their picture, the published sections and the
 // menu's counts), and the data its loader gathered. Views only draw: they read nothing and change nothing.
+import { nonce } from "../nonce.js";
 import { itemCard, itemThread, photoDelete } from "./items.js";
 import {
   dateRange, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
@@ -116,7 +117,7 @@ ${fresh && profileHeader(ctx)}
 ${fresh && composer()}
 <form class="filters">
   <input type="search" name="q" value="${q}" placeholder="Search posts">
-  <select name="kind" onchange="this.form.submit()">
+  <select name="kind" data-autosubmit>
     <option value="">All kinds</option>
     ${options(kinds, kind, (k) => (k === "afterwrd" ? "Written on afterwrd" : k))}
   </select>
@@ -133,7 +134,7 @@ export function commentsPage(ctx, { comments, paging, q, year, kind, years, kind
 <p class="meta">Everything you've commented, including on other people's posts and photos that aren't in this export.</p>
 <form class="filters">
   <input type="search" name="q" value="${q}" placeholder="Search text, people or groups">
-  <select name="kind" onchange="this.form.submit()">
+  <select name="kind" data-autosubmit>
     <option value="">On anything</option>
     ${options(kinds, kind, (k) => `On a ${k}`)}
   </select>
@@ -149,7 +150,7 @@ export function likesPage(ctx, { reactions, paging, q, year, reaction, years, re
 <h1>Likes &amp; reactions</h1>
 <form class="filters">
   <input type="search" name="q" value="${q}" placeholder="Search people or groups">
-  <select name="reaction" onchange="this.form.submit()">
+  <select name="reaction" data-autosubmit>
     <option value="">All reactions</option>
     ${options(reactionTypes, reaction, (r) => `${EMOJI[r] ?? ""} ${r}`)}
   </select>
@@ -299,7 +300,7 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
 </main>
 
 ${[next, prev].filter((n) => n && n.kind === "photo").map((n) => html`<link rel="prefetch" href="${mediaUrl(n)}">`)}
-<script>
+<script nonce="${nonce()}">
   document.addEventListener('keydown', e => {
     if (e.target.matches('input, textarea, select') || e.metaKey || e.ctrlKey) return;
     const link = document.getElementById({ ArrowLeft: 'prev', ArrowRight: 'next', Escape: 'close' }[e.key]);
@@ -314,11 +315,11 @@ export function friendsPage(ctx, { people, q, show, sort }) {
 <h1>Friends</h1>
 <form class="filters">
   <input type="search" name="q" value="${q}" placeholder="Search names">
-  <select name="show" onchange="this.form.submit()">
+  <select name="show" data-autosubmit>
     ${[["friends", "Current friends"], ["removed", "Removed friends"], ["everyone", "Everyone you've interacted with"]]
       .map(([v, label]) => html`<option value="${v}" ${v === show && raw("selected")}>${label}</option>`)}
   </select>
-  <select name="sort" onchange="this.form.submit()">
+  <select name="sort" data-autosubmit>
     ${[["name", "By name"], ["since", "By friends since"], ["activity", "By interactions"]]
       .map(([v, label]) => html`<option value="${v}" ${v === sort && raw("selected")}>${label}</option>`)}
   </select>

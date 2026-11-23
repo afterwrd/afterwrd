@@ -25,6 +25,7 @@ async function person(link) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => { if (m.text().includes("Content Security Policy")) errors.push(m.text()); }); // blocked by the page's policy
   page.on("dialog", (d) => { errors.push(`a browser dialog: ${d.message()}`); d.dismiss(); });
   // afterwrd asks in its own box (ui.js): say yes, as a person would.
   await page.evaluateOnNewDocument(() => new MutationObserver(() => document.querySelector("dialog.ask[open] .chip.danger")?.click())
@@ -315,6 +316,13 @@ await owner.goto(`${BASE}/activity`);
 await owner.screenshot({ path: `${OUT}/activity.png`, fullPage: true });
 await owner.goto(BASE + photoHref);
 await owner.screenshot({ path: `${OUT}/photo-comments.png` });
+
+// Filters send themselves when a choice is picked (ui/autosubmit.js: no inline onchange under the pages' policy).
+await owner.goto(`${BASE}/posts`);
+const pick = await owner.$$eval("select[data-autosubmit]", (all) => all.map((s) => ({ name: s.name, value: [...s.options].map((o) => o.value).find(Boolean) }))
+  .find((p) => p.value) ?? null);
+if (pick) await Promise.all([owner.waitForNavigation(), owner.select(`select[name=${pick.name}]`, pick.value)]);
+check("picking in a filter's list sends it", Boolean(pick) && new URL(owner.url()).searchParams.get(pick.name) === pick.value, `${JSON.stringify(pick)} ${owner.url()}`);
 
 // Words kept on the device go on Sign out (it may be a shared phone).
 await owner.goto(`${BASE}/posts`);
