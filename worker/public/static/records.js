@@ -99,6 +99,9 @@ export function parseRecord(bytes) {
   if (r.mentions !== undefined && (!Array.isArray(r.mentions) || r.mentions.length > 10 || r.mentions.some((m) => !ID_RE.test(m)))) return null;
   if (r.audience !== undefined && (!["item", "change"].includes(r.kind) || r.audience?.kind !== "invited" || !ID_RE.test(r.audience.fp ?? ""))) return null;
   if (r.before !== undefined && (!BROUGHT.has(r.kind) || !Number.isSafeInteger(r.before) || r.before <= 0 || r.before >= r.at)) return null;
+  // A group post brought over from afterwrd 1 names its number there, so comments made on it before can be sure they go
+  // back on it and nowhere else.
+  if (r.old !== undefined && (r.kind !== "item" || r.before === undefined || !Number.isSafeInteger(r.old) || r.old <= 0)) return null;
   return r;
 }
 

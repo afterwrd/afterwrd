@@ -41,7 +41,7 @@
 //   POST /_p/before (friendhost)   {ask: [old ids], all} -> {answers: [{id, item, at, seen, until} | {id, state}]}
 //                                  {records: [{id, sent}], delegation, profile} -> {ok}
 import { guestsFor, keepIfSigned, lookupsFor, ownHost, refreshItem, sentDelegationOf, sentRecord, takePost } from "./items.js";
-import { takeRecord } from "./hosted.js";
+import { listEntries, takeRecord } from "./hosted.js";
 import { checkRecord } from "./records.js";
 import { callFriend } from "./calls.js";
 import { isBlocked } from "./blocks.js";
@@ -51,7 +51,9 @@ import { nextGroupWork, sendGroupComments, sendGroupPost } from "./beforehistory
 import { queueItemNote } from "./notes.js";
 import { pollTrouble } from "./itemkinds.js";
 import { cleanEvent, EVENT_FIELDS, finishedAt } from "./calendar.js";
-import { says } from "../public/static/records.js";
+import { parseRecord, says } from "../public/static/records.js";
+import { delegationsFor } from "./friendhost.js";
+import { lookupsWith } from "./friendcopies.js";
 import { fingerprintOf } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 
@@ -253,6 +255,16 @@ async function mismatch(env, host, prepared, post, photos, body) {
 const ASK_SITES = 3; // friends' sites asked about the owner's old comments at one go
 export const ASK_EVERY = 3600; // how often one is asked again, while it hasn't said
 export const MAX_ASK = 500; // old comments asked about in one call
+/**
+ * A host's answer that nothing more can come over (too late, gone, declined, not theirs): marked `final`, so the writer's
+ * site lets go of its copies. Any other refusal (busy, not moved yet, too big…) is asked again later.
+ */
+export const finalAnswer = (error, status) => json({ error, final: true }, status);
+
+/** Whether a call's error (callFriend's) is a host's final answer (finalAnswer). */
+export const isFinal = (error) => error?.final === true;
+
+export const BRINGING_BYTES = 1_000_000; // a call bringing things over: an item's comments from before go together
 export const SAME_TIME = 86400; // how far apart the host's time for a comment and this site's may be, to sign it
 
 /** An item's list now: {n, h}, the point a comment signed for it sees. */
@@ -303,7 +315,7 @@ async function askHosts(env, from) {
     JOIN connections c ON c.id = e.connection_id AND c.approved_at IS NOT NULL AND c.identity IS NOT NULL
     WHERE e.item IS NULL AND COALESCE(e.asked_at, 0) < ? LIMIT ?`).bind(now() - ASK_EVERY, ASK_SITES).all();
   for (const site of sites) {
-    const { results: rows } = await db.prepare("SELECT id, remote_id, created_at FROM comments_elsewhere WHERE connection_id = ? LIMIT ?")
+    const { results: rows } = await db.prepare("SELECT id, remote_id, created_at, target FROM comments_elsewhere WHERE connection_id = ? LIMIT ?")
       .bind(Number(site.id), MAX_ASK + 1).all();
     const asked = rows.slice(0, MAX_ASK);
     await db.prepare("UPDATE comments_elsewhere SET asked_at = ? WHERE connection_id = ?").bind(now(), Number(site.id)).run();
@@ -311,25 +323,45 @@ async function askHosts(env, from) {
     try {
       data = await callFriend(env, from, String(site.origin), "/_p/before", { body: { ask: asked.map((r) => Number(r.remote_id)), all: rows.length <= MAX_ASK } });
     } catch (error) {
-      // Its 30 days are over (10f): nothing more can come over there.
-      if (error?.status === 410) await db.batch(elsewhereGone(db, Number(site.id)));
+      // Its 30 days are over (10f): nothing more can come over there. (Not a friend who's moved, busy, or the like.)
+      if (isFinal(error)) await db.batch(elsewhereGone(db, Number(site.id)));
       continue; // otherwise still on afterwrd 1, or away: asked again in an hour
     }
     const answers = new Map((Array.isArray(data?.answers) ? data.answers : []).map((a) => [Number(a?.id), a]));
+    const friend = await db.prepare("SELECT identity FROM connections WHERE id = ?").bind(Number(site.id)).first();
     const statements = [];
     for (const r of asked) {
       const a = answers.get(Number(r.remote_id));
       if (!a || a.state === "later") continue; // its post hasn't come over yet
       const fits = a.item && /^[A-Za-z0-9_-]{43}$/.test(a.item) && Number.isSafeInteger(a.at) && Math.abs(a.at - Number(r.created_at)) <= SAME_TIME
-        && Number.isSafeInteger(a.seen?.n) && typeof a.seen?.h === "string";
+        && Number.isSafeInteger(a.seen?.n) && typeof a.seen?.h === "string"
+        && (await sameOldPost(env, String(friend?.identity ?? ""), String(r.target), a.item, data));
+      // Somewhere that isn't where it was (or not the same comment): kept, and asked about again later.
+      if (!fits && a.item) continue;
       statements.push(fits
         ? db.prepare("UPDATE comments_elsewhere SET item = ?, host_at = ?, seen = ?, until = ? WHERE id = ?")
           .bind(a.item, a.at, JSON.stringify({ n: a.seen.n, h: a.seen.h }), Number.isSafeInteger(a.until) ? a.until : null, Number(r.id))
-        // Gone there, taken already, or not the same comment: nothing to bring over.
+        // Gone there, or taken already: nothing to bring over.
         : db.prepare("DELETE FROM comments_elsewhere WHERE id = ?").bind(Number(r.id)));
     }
     if (statements.length) await db.batch(statements);
   }
+}
+
+/**
+ * Whether `item`, on the friend's site `friend`, is the old post (or photo) `target` became there: its first record, as
+ * the friend signed it and their site sent it (`data.items`), is theirs, and was first written when `target` says (a
+ * post: "post-<time>-…"), or is that photo ("photo-<sha256>"). So their site can't move a comment onto another post.
+ */
+async function sameOldPost(env, friend, target, item, data) {
+  const first = data?.items?.[item];
+  if (!friend || !first) return false;
+  const got = await checkRecord(first.sent, { ...lookupsWith(env, data.delegations), at: Number(first.taken) });
+  if (!got || got.fp !== item || got.record.kind !== "item" || got.record.author !== friend || got.record.host !== friend) return false;
+  const post = /^post-(\d+)-/.exec(target);
+  if (post) return got.record.before === Number(post[1]);
+  const photo = /^photo-([0-9a-f]{64})$/.exec(target);
+  return Boolean(photo) && got.content?.type === "photo" && got.content.hash === photo[1];
 }
 
 /** The owner's copies of what they said on a friend's site before (by connection), gone. */
@@ -393,7 +425,7 @@ async function takeComments(env, host, from, body) {
   } catch (error) { failed = error; }
   // Away: asked again later. Refused: their site won't take them (it doesn't agree they're as written), so they stay
   // only in this site's download, as before.
-  if (failed && !(failed.status >= 400 && failed.status < 500)) {
+  if (failed && !isFinal(failed)) {
     await db.prepare("UPDATE comments_elsewhere SET item = NULL, asked_at = ? WHERE connection_id = ? AND item = ?").bind(now(), Number(connection.id), item).run();
     return json({ error: failed.message }, 502);
   }
@@ -430,7 +462,7 @@ export async function answerBefore(env, caller, body) {
   const host = await ownHost(env);
   if (!host) return json({ error: "Not found." }, 404);
   // Its 30 days are over (10f): the caller's site drops its copies.
-  if (now() >= (await broughtUntil(env))) return json({ error: "It's too late to bring anything from before afterwrd 2 over here." }, 410);
+  if (now() >= (await broughtUntil(env))) return finalAnswer("It's too late to bring anything from before afterwrd 2 over here.", 410);
   const origin = String(caller.connection.origin);
   // Someone the owner's blocked: what they wrote before doesn't come over, with no more said than "gone".
   const blocked = await isBlocked(db, caller.person);
@@ -452,7 +484,15 @@ export async function answerBefore(env, caller, body) {
       } else if (row) answers.push({ id, state: row.state === "signed" ? "taken" : "gone" });
       else answers.push({ id, state: (await db.prepare("SELECT 1 FROM comments WHERE id = ? AND origin = ?").bind(id, origin).first()) ? "later" : "gone" });
     }
-    return json({ answers });
+    // Each post they're on, as its owner signed it (when it was first written, or its photo), so their site can see a
+    // comment goes back where it was, not on some other post.
+    const items = {};
+    for (const item of new Set(answers.filter((a) => a.item).map((a) => a.item))) {
+      const first = (await listEntries(db, item))[0];
+      if (first?.n === 1 && first.sent) items[item] = { sent: { record: first.sent.record, sig: first.sent.sig, content: first.sent.content, salt: first.sent.salt }, taken: first.taken };
+    }
+    const keys = Object.values(items).map((i) => parseRecord(fromB64url(i.sent.record))?.key).filter(Boolean);
+    return json({ answers, items, delegations: await delegationsFor(db, keys) });
   }
   const records = Array.isArray(body?.records) ? body.records.slice(0, MAX_ASK) : [];
   const first = records[0] && sentRecord(records[0].sent);
@@ -460,11 +500,11 @@ export async function answerBefore(env, caller, body) {
   if (!item || typeof item !== "string") return json({ error: "That didn't work." }, 400);
   const { results: rows } = await db.prepare(`SELECT b.id, b.at, c.text FROM before_comments b JOIN comments c ON c.id = b.id
     WHERE b.item = ? AND b.origin = ? AND b.state = 'waiting' ORDER BY b.at, b.id`).bind(item, origin).all();
-  if (!rows.length) return json({ error: "Those have come over already, or aren't here." }, 404);
+  if (!rows.length) return finalAnswer("Those have come over already, or aren't here.", 404);
   const decline = async (why) => {
     await db.prepare("UPDATE before_comments SET state = 'declined' WHERE item = ? AND origin = ? AND state = 'waiting'").bind(item, origin).run();
     await maybeBuild(env, host, item);
-    return json({ error: why }, 409);
+    return finalAnswer(why, 409);
   };
   if (blocked) return decline("That wasn't taken.");
   // Allowed by a delegation from their identity, kept to pass on with what they signed once each checks with it.
@@ -472,7 +512,7 @@ export async function answerBefore(env, caller, body) {
     return json({ error: "That isn't signed by them." }, 400);
   }
   const seen = await headNow(db, item);
-  if (!seen) return json({ error: "That post isn't here any more." }, 404);
+  if (!seen) return finalAnswer("That post isn't here any more.", 404);
   const wrong = await commentsTrouble(env, { rows, records, author: caller.person, host: host.person, item, seen, prev: null,
     texts: new Map(rows.map((r) => [Number(r.id), String(r.text)])) });
   if (wrong) return decline(wrong);

@@ -7,6 +7,7 @@
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
 import { withWork } from "./later.js";
+import { BRINGING_BYTES } from "./before.js";
 import { receiveNotes } from "./notes.js";
 import { receiveReceipt } from "./receipts.js";
 import { handleIdentity } from "./identities.js";
@@ -124,9 +125,10 @@ async function route(request, env, work) {
   // stylesheet and fonts for the page saying so.
   if (url.pathname !== "/_version" && !/^\/(_auto|static)\//.test(url.pathname) && await databaseIsNewer(env)) return beingUpdated(request);
   // Other sites' calls (friends', members', groups'): bodies of 64 KB at most, refused before anything is read or
-  // checked (T31). Read once here, so what follows can read it again.
+  // checked (T31), but 1 MB for bringing things over from afterwrd 1, where an item's comments from before go together.
+  // Read once here, so what follows can read it again.
   if (request.method === "POST" && /^\/_(p|member|group)\//.test(url.pathname)) {
-    const bytes = await bodyBytes(request);
+    const bytes = await bodyBytes(request, url.pathname === "/_p/before" || url.pathname === "/_group/before" ? BRINGING_BYTES : undefined);
     if (!bytes) return json({ error: "That's too big." }, 413);
     request = new Request(request, { body: bytes });
   }

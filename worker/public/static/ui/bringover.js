@@ -96,7 +96,7 @@ async function bringGroupPost(key, g) {
   for (const content of g.photos) photos.push(await makeRecord(own, content, key));
   const post = g.post;
   if (post.photos) post.photos.forEach((/** @type {any} */ photo, /** @type {number} */ i) => { photo.item = photos[i].fp; });
-  const made = await makeRecord(own, post, key);
+  const made = await makeRecord({ ...own, old: g.old }, post, key);
   const calloffs = [];
   for (const date of g.calloffs) {
     calloffs.push((await makeRecord({ kind: "calloff", author: key.person, host: g.host, item: made.fp, about: made.fp, date, seen: null, prev: null }, undefined, key)).sent);

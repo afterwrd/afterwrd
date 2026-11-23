@@ -26,8 +26,12 @@
 import { bodyBytes, bodyJson, callFriend, siteCalling } from "./calls.js";
 import { fetchIdentity } from "./identities.js";
 import { ID_RE, keepIfSigned, lookupsFor, refreshDate, sentDelegationOf, sentRecord, withDelegation } from "./items.js";
-import { takeRecord } from "./hosted.js";
-import { ASK_EVERY, MAX_ASK, SAME_TIME, commentsTrouble, headNow, keepSigned, maybeBuild, windowOf } from "./before.js";
+import { listEntries, takeRecord } from "./hosted.js";
+import { checkRecord } from "./records.js";
+import { parseRecord } from "../public/static/records.js";
+import { delegationsFor } from "./friendhost.js";
+import { lookupsWith } from "./friendcopies.js";
+import { ASK_EVERY, BRINGING_BYTES, finalAnswer, isFinal, MAX_ASK, SAME_TIME, commentsTrouble, headNow, keepSigned, maybeBuild, windowOf } from "./before.js";
 import { groupRules, hostOf, keepProfile, takeGroupPost } from "./groupposts.js";
 import { cleanEvent, EVENT_FIELDS, hasDate } from "./calendar.js";
 import { pollTrouble } from "./itemkinds.js";
@@ -40,7 +44,6 @@ import { json, now } from "./util.js";
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
 const ASK_GROUPS = 3; // groups' sites asked about the owner's words there at one go
 const MAX_DATES = 60; // dates of a repeating event called off, brought over with it
-const BODY_LIMIT = 1_000_000; // a call to bring things over: an item's comments may be many
 
 /** Words as both sides keep them, compared: line endings as the browser sends them, no space at either end. */
 const words = (t) => String(t ?? "").replace(/\r\n?/g, "\n").trim();
@@ -118,22 +121,22 @@ async function dropPost(env, id) {
 
 /** POST /_group/before, from a writer's site: asking about what they wrote here before afterwrd 2, or bringing it over. */
 export async function answerGroupBefore(request, env, url) {
-  const bytes = await bodyBytes(request, BODY_LIMIT);
+  const bytes = await bodyBytes(request, BRINGING_BYTES);
   if (!bytes) return json({ error: "That's too much at once." }, 413);
   const self = await hostOf(env);
   if (!self) return json({ error: "This group hasn't come over to afterwrd 2 yet." }, 409);
   const until = await groupUntil(env);
-  if (now() >= until) return json({ error: "It's too late to bring anything from before afterwrd 2 over here." }, 410);
+  if (now() >= until) return finalAnswer("It's too late to bring anything from before afterwrd 2 over here.", 410);
   const db = env.DB;
   // Only someone who wrote here before is ever looked into: a stranger's call doesn't make this site fetch anything.
   const has = await db.prepare("SELECT EXISTS (SELECT 1 FROM group_posts WHERE origin = ?1) OR EXISTS (SELECT 1 FROM group_comments WHERE origin = ?1) AS n")
     .bind(request.headers.get("Afterwrd-From") ?? "").first();
-  if (!Number(has?.n)) return json({ error: "Nothing you wrote before afterwrd 2 is here." }, 403);
+  if (!Number(has?.n)) return finalAnswer("Nothing you wrote before afterwrd 2 is here.", 403);
   const caller = await siteCalling(request, env, url, bytes);
   if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
   const body = bodyJson(bytes);
   const group = { rules: await groupRules(env, self, false), table: "group_comments" };
-  if (Array.isArray(body.ask)) return json({ answers: await answerAsk(env, self, caller, body, group) });
+  if (Array.isArray(body.ask)) return json(await answerAsk(env, self, caller, body, group));
   if (body.post !== undefined) return takeBroughtPost(env, self, caller, body, until, group);
   if (Array.isArray(body.records)) return takeBroughtComments(env, self, caller, body, group);
   return json({ error: "That didn't work." }, 400);
@@ -188,7 +191,15 @@ async function answerAsk(env, self, caller, body, group) {
       answers.push({ kind: "comment", id, state: waiting ? "later" : "gone" });
     }
   }
-  return answers;
+  // Each post the comments go on, as its writer signed it (naming its number here before), so the writer's site can see
+  // their comment goes back on the post it was on.
+  const items = {};
+  for (const item of new Set(answers.filter((a) => a.kind === "comment" && a.item).map((a) => a.item))) {
+    const first = (await listEntries(db, item))[0];
+    if (first?.n === 1 && first.sent) items[item] = { sent: { record: first.sent.record, sig: first.sent.sig, content: first.sent.content, salt: first.sent.salt }, taken: first.taken };
+  }
+  const keys = Object.values(items).map((i) => parseRecord(fromB64url(i.sent.record))?.key).filter(Boolean);
+  return { answers, items, delegations: await delegationsFor(db, keys) };
 }
 
 /**
@@ -198,7 +209,10 @@ async function answerAsk(env, self, caller, body, group) {
 async function postTrouble(prepared, post, photos, calloffs, author, host) {
   const ours = (r) => r?.record?.kind === "item" && r.record.author === author && r.record.host === host && r.record.before === prepared.before
     && !r.record.audience && !r.record.mentions;
-  if (!ours(post) || photos.length !== prepared.photos.length || photos.some((p) => !ours(p))) return "That isn't the post from before.";
+  // The post names its number here before, so comments made on it before go back on it (beforehistory askGroups).
+  if (!ours(post) || post.record.old !== prepared.id || photos.length !== prepared.photos.length || photos.some((p) => !ours(p) || p.record.old !== undefined)) {
+    return "That isn't the post from before.";
+  }
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   for (let i = 0; i < photos.length; i++) if (!same(photos[i].content, prepared.photos[i])) return "Those aren't the photos from before.";
   const filled = structuredClone(prepared.post);
@@ -218,7 +232,7 @@ async function postTrouble(prepared, post, photos, calloffs, author, host) {
 async function takeBroughtPost(env, self, caller, body, until, group) {
   const db = env.DB;
   const row = await db.prepare("SELECT * FROM group_posts WHERE id = ? AND origin = ?").bind(Number(body.post), caller.from).first();
-  if (!row) return json({ error: "That post has come over already, or isn't here." }, 404);
+  if (!row) return finalAnswer("That post has come over already, or isn't here.", 404);
   const prepared = await prepare(env, row);
   const post = sentRecord(body.sent);
   const photosSent = Array.isArray(body.photos) ? body.photos.slice(0, MAX_GROUP_PHOTOS + 1) : [];
@@ -228,7 +242,7 @@ async function takeBroughtPost(env, self, caller, body, until, group) {
   const allowed = post?.record && (await sentDelegationOf(env, caller.person, body.delegation, post.record.key));
   if (!allowed) return json({ error: "That isn't signed by them." }, 400);
   const wrong = await postTrouble(prepared, post, photos, calloffs, caller.person, self.person);
-  if (wrong) return json({ error: wrong }, 400);
+  if (wrong) return finalAnswer(wrong, 400);
   await keepProfile(env, caller.person, body.profile);
   // Commented on before: it takes nothing new until those comments are in, or the group's 30 days are up.
   const commented = await db.prepare("SELECT 1 FROM group_comments WHERE post_id = ? LIMIT 1").bind(prepared.id).first();
@@ -260,18 +274,18 @@ async function takeBroughtComments(env, self, caller, body, group) {
   if (!item || typeof item !== "string" || !ID_RE.test(item)) return json({ error: "That didn't work." }, 400);
   const { results: rows } = await db.prepare(`SELECT b.id, b.at, c.text FROM before_comments b JOIN group_comments c ON c.id = b.id
     WHERE b.item = ? AND b.origin = ? AND b.state = 'waiting' ORDER BY b.at, b.id`).bind(item, caller.from).all();
-  if (!rows.length) return json({ error: "Those have come over already, or aren't here." }, 404);
+  if (!rows.length) return finalAnswer("Those have come over already, or aren't here.", 404);
   const decline = async (why) => {
     await db.prepare("UPDATE before_comments SET state = 'declined' WHERE item = ? AND origin = ? AND state = 'waiting'").bind(item, caller.from).run();
     await maybeBuild(env, self, item, group);
-    return json({ error: why }, 409);
+    return finalAnswer(why, 409);
   };
   if (!(await keepIfSigned(env, await sentDelegationOf(env, caller.person, body.delegation, first.record.key), records))) {
     return json({ error: "That isn't signed by them." }, 400);
   }
   const seen = await headNow(db, item);
   const owner = await db.prepare("SELECT author, author_last FROM items WHERE id = ?").bind(item).first();
-  if (!seen || !owner) return json({ error: "That post isn't here any more." }, 404);
+  if (!seen || !owner) return finalAnswer("That post isn't here any more.", 404);
   const wrong = await commentsTrouble(env, { rows, records, author: caller.person, host: self.person, item, seen,
     prev: String(owner.author) === caller.person ? String(owner.author_last) : null, texts: new Map(rows.map((r) => [Number(r.id), String(r.text)])) });
   if (wrong) return decline(wrong);
@@ -298,7 +312,7 @@ const norm = (v) => (v === undefined || v === "" ? null : v);
  * event or some of its dates called off. Returns what the owner's browser is to sign ({host, before, post, photos,
  * calloffs}), or null.
  */
-function offerFits(row, a, host) {
+function offerFits(row, a, host, thumbs = new Map()) {
   const o = a?.offer;
   if (!o || typeof o !== "object" || !Number.isSafeInteger(a.at) || Math.abs(a.at - Number(row.created_at)) > SAME_TIME) return null;
   const post = o.post;
@@ -315,6 +329,8 @@ function offerFits(row, a, host) {
       const size = (n) => Number.isSafeInteger(n) && n > 0;
       if (!p || Object.keys(p).length !== 6 || p.type !== "photo" || p.hash !== hashes[i] || !/^[0-9a-f]{64}$/.test(p.thumb_hash ?? "")
         || !size(p.width) || !size(p.height) || !size(p.size)) return null;
+      // Its thumbnail, as this site made it, while it still has the photo: the group can't choose another to be signed.
+      if (thumbs.has(p.hash) && thumbs.get(p.hash) !== p.thumb_hash) return null;
       if (!l || l.item !== null || Object.keys(l).length !== 6 || PHOTO_FIELDS.some((f) => l[f] !== p[f])) return null;
     }
     const asked = parsed(row.poll);
@@ -362,30 +378,36 @@ async function askGroups(env, from) {
         body: { ask: asked.map((r) => ({ kind: String(r.kind), id: Number(r.remote_id) })), all: rows.length <= MAX_ASK }, timeout: 25_000 });
     } catch (error) {
       // Its 30 days are over, or it has nothing of the owner's: nothing more can come over from there.
-      if (error?.status === 410 || error?.status === 403) {
+      if (isFinal(error)) {
         const { results: all } = await db.prepare("SELECT id FROM group_mine WHERE site = ?").bind(String(site)).all();
         await db.batch(mineGone(db, all.map((r) => Number(r.id))));
       }
       continue;
     }
     const answers = new Map((Array.isArray(data?.answers) ? data.answers : []).map((a) => [`${a?.kind}:${Number(a?.id)}`, a]));
+    const hashes = asked.flatMap((r) => (r.kind === "post" ? parsed(r.photos) ?? [] : []));
+    const { results: media } = hashes.length ? await db.prepare("SELECT hash, thumb_hash FROM media WHERE hash IN (SELECT value FROM json_each(?)) AND thumb_hash IS NOT NULL")
+      .bind(JSON.stringify(hashes)).all() : { results: [] };
+    const thumbs = new Map(media.map((m) => [String(m.hash), String(m.thumb_hash)]));
     const statements = [];
     const gone = [];
     for (const r of asked) {
       const a = answers.get(`${r.kind}:${Number(r.remote_id)}`);
       if (!a || a.state === "later") continue;
       if (r.kind === "post") {
-        const offer = a.state === "ready" ? offerFits(r, a, identity.id) : null;
+        const offer = a.state === "ready" ? offerFits(r, a, identity.id, thumbs) : null;
         if (offer) statements.push(db.prepare("UPDATE group_mine SET offer = ?, host = ?, host_at = ? WHERE id = ?").bind(JSON.stringify(offer), identity.id, a.at, Number(r.id)));
+        // Gone, taken, or not as this site has it (the group changed it since): not the owner's to bring over.
         else gone.push(Number(r.id));
         continue;
       }
       const fits = a.state === "ready" && ID_RE.test(a.item ?? "") && Number.isSafeInteger(a.at) && Math.abs(a.at - Number(r.created_at)) <= SAME_TIME
-        && Number.isSafeInteger(a.seen?.n) && typeof a.seen?.h === "string" && (a.prev === null || ID_RE.test(a.prev ?? ""));
+        && Number.isSafeInteger(a.seen?.n) && typeof a.seen?.h === "string" && (a.prev === null || ID_RE.test(a.prev ?? ""))
+        && (await onOldPost(env, identity.id, Number(r.post_id), a.item, data));
       if (fits) {
         statements.push(db.prepare("UPDATE group_mine SET item = ?, host = ?, host_at = ?, seen = ?, prev = ?, until = ? WHERE id = ?")
           .bind(a.item, identity.id, a.at, JSON.stringify({ n: a.seen.n, h: a.seen.h }), a.prev, Number.isSafeInteger(a.until) ? a.until : null, Number(r.id)));
-      } else gone.push(Number(r.id));
+      } else if (a.state !== "ready") gone.push(Number(r.id));
     }
     if (gone.length) statements.push(...mineGone(db, gone));
     if (statements.length) await db.batch(statements);
@@ -400,10 +422,10 @@ async function askGroups(env, from) {
 export async function nextGroupWork(env, from) {
   const db = env.DB;
   await askGroups(env, from);
-  const post = await db.prepare("SELECT id, offer FROM group_mine WHERE kind = 'post' AND offer IS NOT NULL ORDER BY host_at, id LIMIT 1").first();
+  const post = await db.prepare("SELECT id, remote_id, offer FROM group_mine WHERE kind = 'post' AND offer IS NOT NULL ORDER BY host_at, id LIMIT 1").first();
   if (post) {
     const o = JSON.parse(String(post.offer));
-    return { groupPost: { id: Number(post.id), host: o.host, before: o.before, photos: o.photos, post: o.post, calloffs: o.calloffs } };
+    return { groupPost: { id: Number(post.id), old: Number(post.remote_id), host: o.host, before: o.before, photos: o.photos, post: o.post, calloffs: o.calloffs } };
   }
   const ready = await db.prepare("SELECT site, item FROM group_mine WHERE kind = 'comment' AND item IS NOT NULL ORDER BY host_at, remote_id LIMIT 1").first();
   if (!ready) return null;
@@ -411,6 +433,18 @@ export async function nextGroupWork(env, from) {
     ORDER BY host_at, remote_id`).bind(String(ready.site), String(ready.item)).all();
   return { groupComments: { item: String(ready.item), host: String(results[0].host), seen: JSON.parse(String(results[0].seen)),
     prev: results[0].prev === null ? null : String(results[0].prev), list: results.map((r) => ({ id: Number(r.id), before: Number(r.host_at), text: String(r.text ?? "") })) } };
+}
+
+/**
+ * Whether `item`, in the group `host`, is the post numbered `old` there before afterwrd 2: its first record, as its
+ * writer signed it and the group sent it (`data.items`), names that number. So the group can't put a comment the owner
+ * wrote before on another post.
+ */
+async function onOldPost(env, host, old, item, data) {
+  const first = data?.items?.[item];
+  if (!first) return false;
+  const got = await checkRecord(first.sent, { ...lookupsWith(env, data.delegations), at: Number(first.taken) });
+  return Boolean(got && got.fp === item && got.record.kind === "item" && got.record.host === host && got.record.old === old);
 }
 
 /** The delegation behind a record the owner's browser signed, and their signed name, to send with it. */
@@ -422,7 +456,7 @@ async function signedBy(db, key) {
 }
 
 /** Away (asked again later), or refused (it stays only in this site's download until it's cleared out, as 10c). */
-const refusedThere = (error) => error && error.status >= 400 && error.status < 500;
+const refusedThere = (error) => isFinal(error);
 
 /** POST /_admin/before {groupPost, sent, photos, calloffs}: one of the owner's group posts from before, signed. */
 export async function sendGroupPost(env, from, body) {
@@ -433,7 +467,8 @@ export async function sendGroupPost(env, from, body) {
   const post = sentRecord(body.sent);
   const photos = Array.isArray(body.photos) ? body.photos.slice(0, MAX_GROUP_PHOTOS) : [];
   const calloffs = Array.isArray(body.calloffs) ? body.calloffs.slice(0, MAX_DATES) : [];
-  if (!post?.record || post.record.kind !== "item" || post.record.host !== offer.host || post.record.before !== offer.before) return json({ error: "That isn't the post from before." }, 400);
+  if (!post?.record || post.record.kind !== "item" || post.record.host !== offer.host || post.record.before !== offer.before
+    || post.record.old !== Number(row.remote_id)) return json({ error: "That isn't the post from before." }, 400);
   const by = await signedBy(db, post.record.key);
   if (!by) return json({ error: "This browser can't sign for you any more. Sign out and sign in again." }, 409);
   let reply = null;

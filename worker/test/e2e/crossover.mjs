@@ -260,6 +260,16 @@ if (stage === "before") {
   check("Bob's event takes comments again with Ann's in it, the only one made there", await waitFor(() => itemRow(broughtAs(h.eventPost)).before_until === null)
     && sql(stateG, `SELECT n FROM lists WHERE id = '${broughtAs(h.eventPost)}'`)[0].n === 2);
 
+  // First the group's site says Bob's comment is on his event now, not Ann's photo: the event's own signed record names
+  // another post from before, so his site signs nothing, and keeps its copy to ask again.
+  const bobsOld = sql(stateG, `SELECT id FROM before_comments WHERE item = '${photoItem}' AND origin = '${B}'`)[0].id;
+  sql(stateG, `UPDATE before_comments SET item = '${broughtAs(h.eventPost)}' WHERE id = ${bobsOld}`);
+  ask(B);
+  await bob.goto(`${B}/`);
+  await new Promise((r) => setTimeout(r, 3000));
+  check("a group saying an old comment is on another post now gets nothing signed there", sql(stateG, `SELECT state FROM before_comments WHERE id = ${bobsOld}`)[0]?.state === "waiting"
+    && sql(stateB, "SELECT COUNT(*) AS n FROM group_mine WHERE kind = 'comment' AND item IS NOT NULL")[0].n === 0);
+  sql(stateG, `UPDATE before_comments SET item = '${photoItem}' WHERE id = ${bobsOld}`);
   ask(B);
   await bob.goto(`${B}/`);
   check("Bob's comment on Ann's photo comes over at his next visit", await waitFor(() =>

@@ -57,7 +57,8 @@ export async function callFriend(env, from, origin, path, { body = null, timeout
   if (!response.ok) {
     // retry: a site saying this one has had its allowance there today, and when to try again (allowances.js).
     throw Object.assign(new Error(typeof data.error === "string" ? data.error.slice(0, 300) : `${host(origin)} answered ${response.status}.`),
-      { status: response.status, ...(response.status === 429 && Number.isSafeInteger(data.retry) && { retry: data.retry }) });
+      { status: response.status, ...(response.status === 429 && Number.isSafeInteger(data.retry) && { retry: data.retry }),
+        ...(data.final === true && { final: true }) });
   }
   return data;
 }

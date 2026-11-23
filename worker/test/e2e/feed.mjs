@@ -510,6 +510,18 @@ check("…which Bob's site refuses, however it's sent", tried.status >= 400 && /
 // as her copy has it, and Bob's site, with nothing more to wait for, puts both comments in, in the order they were written.
 const bobConnection = sql(stateA, "SELECT id FROM connections")[0].id;
 sql(stateA, `INSERT INTO comments_elsewhere (connection_id, site, remote_id, target, text, created_at) VALUES (${bobConnection}, '${B}', ${annOldId}, '${oldKey}', 'Said before signing', ${oldAt + 61})`);
+// First, Bob's site says it's on another of his posts now: the post's own signed record shows it isn't the one it was on,
+// so her site signs nothing, and keeps its copy to ask again.
+// (Both of Ann's, the made-up one too, so Bob's post doesn't find nothing of hers waiting and put its comments in meanwhile.)
+const annsOnOther = () => sql(stateA, `SELECT COUNT(*) AS n FROM sent WHERE item = '${bobPostId}' AND kind = 'comment'`)[0].n;
+const annsBefore = annsOnOther();
+sql(stateB, `UPDATE before_comments SET item = '${bobPostId}' WHERE item = '${broughtId}' AND origin = '${A}'`);
+await ann.goto(`${A}/`);
+await new Promise((r) => setTimeout(r, 3000));
+check("a friend's site saying an old comment is on another post now gets nothing signed there", annsOnOther() === annsBefore
+  && sql(stateA, "SELECT item FROM comments_elsewhere")[0]?.item === null, JSON.stringify(sql(stateA, "SELECT item, asked_at FROM comments_elsewhere")));
+sql(stateB, `UPDATE before_comments SET item = '${broughtId}' WHERE item = '${bobPostId}' AND origin = '${A}'`);
+sql(stateA, "UPDATE comments_elsewhere SET asked_at = NULL");
 await ann.goto(`${A}/`);
 check("Ann's Home brings her old comment over, and Bob's site puts the comments from before in", await waitFor(() =>
   sql(stateB, `SELECT before_until FROM items WHERE id = '${broughtId}'`)[0]?.before_until === null, 20_000),
