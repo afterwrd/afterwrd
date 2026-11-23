@@ -120,16 +120,17 @@ async function dropPost(env, id) {
 export async function answerGroupBefore(request, env, url) {
   const bytes = await bodyBytes(request, BODY_LIMIT);
   if (!bytes) return json({ error: "That's too much at once." }, 413);
-  const caller = await siteCalling(request, env, url, bytes);
-  if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
   const self = await hostOf(env);
   if (!self) return json({ error: "This group hasn't come over to afterwrd 2 yet." }, 409);
   const until = await groupUntil(env);
   if (now() >= until) return json({ error: "It's too late to bring anything from before afterwrd 2 over here." }, 410);
   const db = env.DB;
+  // Only someone who wrote here before is ever looked into: a stranger's call doesn't make this site fetch anything.
   const has = await db.prepare("SELECT EXISTS (SELECT 1 FROM group_posts WHERE origin = ?1) OR EXISTS (SELECT 1 FROM group_comments WHERE origin = ?1) AS n")
-    .bind(caller.from).first();
+    .bind(request.headers.get("Afterwrd-From") ?? "").first();
   if (!Number(has?.n)) return json({ error: "Nothing you wrote before afterwrd 2 is here." }, 403);
+  const caller = await siteCalling(request, env, url, bytes);
+  if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
   const body = bodyJson(bytes);
   const group = { rules: await groupRules(env, self, false), table: "group_comments" };
   if (Array.isArray(body.ask)) return json({ answers: await answerAsk(env, self, caller, body, group) });

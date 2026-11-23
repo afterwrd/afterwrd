@@ -194,7 +194,8 @@ const stateOf = (fp) => after.entries.find((e) => e.fp === fp)?.state;
 check("readers see one deleted and one removed by Ann, with their words gone for good, and the list still checks",
   !after.problem && stateOf(t1.fp) === "deleted" && stateOf(t2.fp) === "removed" && after.entries.find((e) => e.fp === t2.fp).removedBy === ann.id
   && !JSON.stringify(thread.entries).includes(b64url(utf8("regret"))), after.problem);
-const hostRemoves = await makeRecord({ kind: "remove", author: ann.id, host: ann.id, item: thread.list, seen: thread.point(), prev: null, about: t3.fp },
+const t5 = await writeAndTake(cat, thread, { kind: "comment" }, { text: "Something else rude" });
+const hostRemoves = await makeRecord({ kind: "remove", author: ann.id, host: ann.id, item: thread.list, seen: thread.point(), prev: null, about: t5.fp },
   undefined, { privateKey: ann.hosting.privateKey, publicKey: ann.state.current.hosting });
 check("Ann's site can remove with its own hosting key too", !(await thread.take(hostRemoves.sent)).refused);
 const closing = await writeAndTake(ann, thread, { kind: "close" }, undefined);
@@ -264,11 +265,27 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   revived[1].sent = words;
   revived[2].sent.sig = b64url(new Uint8Array(64));
   check("a delete whose signature the host spoiled doesn't bring its words back: spotted", (await read(shed, { entries: revived })).problem === "unexpected");
+  check("deleting it again adds nothing, so it isn't taken", (await writeAndTake(bob, shed, { kind: "delete", about: comment.fp }, undefined)).refused === "That's already gone.");
+  check("…nor is deleting the delete", (await writeAndTake(bob, shed, { kind: "delete", about: unsaid.fp }, undefined)).refused === "That's already gone.");
   const withWords = structuredClone(shed.entries);
   withWords[1].sent = words;
   const noKey = await checkList({ host: ann.id, hostingKey: ann.state.current.hosting, list: shed.list, owner: ann.id, entries: withWords,
     signedHead: await shed.signed(), lookups: { ...lookups, delegationOf: async (k) => (k === bob.browser.publicKey ? null : delegations.get(k) ?? null) } });
   check("…nor one sent without its delegation", noKey.problem === "unexpected", noKey.problem);
+}
+
+// A full list takes nothing more, but its item can still be deleted or removed, or closed.
+{
+  const { MAX_ENTRIES } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
+  const full = new Rules({ host: ann.id, list: post.list, owner: ann.id });
+  const h = "h".repeat(43);
+  full.startAt(MAX_ENTRIES, h);
+  const at = { n: MAX_ENTRIES, h };
+  const one = async (who, fields, content) => (await checkRecord((await makeRecord({ author: who.id, host: ann.id, item: post.list, seen: at, prev: null, ...fields },
+    content, who.browser)).sent, { ...lookups, at: NOW }));
+  check("a full list takes no more comments", full.refuse(await one(bob, { kind: "comment" }, { text: "one more" }), NOW) === "This is as long as a list gets.");
+  check("…but its owner can still delete their post", full.refuse(await one(ann, { kind: "delete", about: post.list }), NOW, { checkpointed: full.from }) === null);
+  check("…or close it", full.refuse(await one(ann, { kind: "close" }), NOW, { checkpointed: full.from }) === null);
 }
 
 // Reading on from what a reader kept: what's new is held to the same rules as reading from the start.
@@ -468,6 +485,11 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   check("a group's owner is in, without joining", rules.roleOf(ann.id) === "owner" && (await take(await sign(ann, "join", {}, { name: "Ann" }))) === "The owner is in already.");
   const bobJoin = await sign(bob, "join", {}, { name: "Bob" });
   check("someone asks to join with their own signed join, and waits", !(await take(bobJoin)) && rules.roleOf(bob.id) === "waiting");
+  const eve = await person("https://eve.example");
+  const asks = [];
+  for (let i = 0; i < 11; i++) asks.push(await take(await sign(eve, "join", {}, { name: "Eve" })));
+  check("someone can ask again while they wait, but not for ever", asks.slice(0, 10).every((x) => x === null)
+    && asks[10] === "You've asked to join this group too many times.", asks.join());
   const catJoin = await sign(cat, "join", {}, { name: "Cat" });
   await take(catJoin);
   check("someone waiting can't let anyone in", (await take(await sign(bob, "approve", { about: catJoin.fp, role_at: at() }))) === "Only the group's admins can do that.");

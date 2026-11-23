@@ -193,6 +193,7 @@ if (stage === "before") {
     JSON.stringify(sql(stateG, "SELECT origin, identity, approved_at FROM group_members")));
   check("…and knows the group by its identity now", groupOf(B).identity === groupOf(A).identity && groupOf(B).brought_at > 0);
   check("…waiting to be let back in", sql(stateG, `SELECT approved_at FROM group_members WHERE origin = '${B}'`)[0].approved_at === null);
+  check("…and his site can't ask to come back again meanwhile", (await siteCall(stateB, B, `${G}/_group/rejoin`, {})).status === 409);
 
   // Ann's next visit: her browser lets him back in.
   asked(A);
@@ -291,6 +292,13 @@ if (stage === "before") {
     JSON.stringify(sql(stateB, "SELECT kind, remote_id, item FROM group_mine")));
   // Bob's changed post: his site said it isn't his (his copy doesn't have it as it is there), so it's gone from there.
   check("Bob's changed post is gone from the group's old rows", !sql(stateG, `SELECT 1 FROM group_posts WHERE id = ${h.bobSecond}`).length);
+
+  // Cat leaves: she can't come back as a member from before, only with an invite link like anyone.
+  await cat.goto(`${C}/groups/${saved[C].group}/members`);
+  await Promise.all([cat.waitForNavigation(), cat.click('button[data-group-record="leave"]')]);
+  check("Cat leaves", !sql(stateG, `SELECT 1 FROM group_members WHERE origin = '${C}'`).length);
+  check("…and can't come back as a member from before", !sql(stateG, `SELECT 1 FROM group_members_before WHERE origin = '${C}'`).length
+    && (await siteCall(stateC, C, `${G}/_group/rejoin/point`, {})).status === 403);
 
   // --- the clear-out (step 10f): the group's 30 days are up, so at a member's next pull what's left from before goes ---
   const annPhoto = photoContent.photos[0];

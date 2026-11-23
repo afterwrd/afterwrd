@@ -21,6 +21,7 @@ import { recordTrouble } from "./records.js";
 export const PAGE = 50;
 export const CHECKPOINT = 500;
 export const MAX_ENTRIES = 2000;
+const MAX_ENDINGS = 10; // past a full list: deleting, removing or closing its item, which ends it
 export const PER_AUTHOR = 20;
 export const EDIT_SECONDS = 15 * 60;
 /** Kinds only a group's members list holds (members.js). */
@@ -87,6 +88,7 @@ export class Rules {
     this.lastOf = new Map(); // author -> fp of their newest record here
     this.chainOf = new Map(); // author -> Set of fps in their chain of prev (their own records, gone ones included)
     this.count = new Map(); // author -> entries
+    this.emptied = new Set(); // fps a delete or removal here has already acted on
     this.closed = false;
     this.ended = false; // a poll's voting, ended by its owner (`end`)
     this.n = 0;
@@ -102,7 +104,9 @@ export class Rules {
    */
   refuse({ record, fp, byHost }, taken, { checkpointed = 0 } = {}) {
     const n = this.n + 1;
-    if (n > MAX_ENTRIES) return "This is as long as a list gets.";
+    // The cap stops anyone filling a list up; it never stops its item being deleted, removed or closed.
+    const ends = ((record.kind === "delete" || record.kind === "remove") && record.about === this.item) || record.kind === "close";
+    if (n > MAX_ENTRIES + (ends ? MAX_ENDINGS : 0)) return "This is as long as a list gets.";
     if (this.byFp.has(fp)) return "duplicate";
     if (record.host !== this.host) return "That belongs somewhere else.";
     if (record.kind === "item") {
@@ -137,6 +141,10 @@ export class Rules {
     } else if (ABOUT.has(record.kind)) {
       const target = this.byFp.get(record.about);
       if (!target && !checkpointed) return "That acts on something that isn't here.";
+      // Once is enough: a delete or removal of what's gone already, or of another delete or removal, adds nothing.
+      if ((record.kind === "delete" || record.kind === "remove") && (this.emptied.has(record.about) || target?.kind === "delete" || target?.kind === "remove")) {
+        return "That's already gone.";
+      }
       if (record.kind === "edit" || record.kind === "delete") {
         // Only the writer's own: a record in their chain of prev, this one's prev included (deleting the comment you
         // just made: a reader sees it gone, so only the prev says whose it was).
@@ -219,6 +227,7 @@ export class Rules {
       if (record.prev) chain.add(record.prev);
       this.chainOf.set(author, chain);
     }
+    if ((record?.kind === "delete" || record?.kind === "remove") && record.about) this.emptied.add(record.about);
     if (record?.kind === "close") this.closed = true;
     if (record?.kind === "end") this.ended = true;
     if (record?.kind === "calloff" && this.date) this.off = true;

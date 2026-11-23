@@ -17,6 +17,7 @@ export const MAX_MEMBER_ENTRIES = 20_000;
 const MEMBER_ENDINGS = 2_000; // leaves, removals and a close a full list still takes
 const MEMBER_KINDS = new Set(["join", "approve", "remove", "role", "leave", "close"]);
 const ROLES = new Set(["admin", "member"]);
+export const MAX_JOINS = 10; // asks to join by one person, ever: each leave or removal needs a join before it
 
 export class MemberRules extends Rules {
   constructor({ host, list, owner }) {
@@ -27,6 +28,8 @@ export class MemberRules extends Rules {
     this.people = new Map();
     /** @type {Map<string, number>} person -> the entry that last changed their role or membership */
     this.changedAt = new Map();
+    /** @type {Map<string, number>} person -> how many times they've asked to join */
+    this.asked = new Map();
   }
 
   /** Someone's role now: "owner", "admin", "member", "waiting", or null. */
@@ -66,6 +69,8 @@ export class MemberRules extends Rules {
       // Asking again while still waiting replaces the earlier request (the group may have stopped showing it to its
       // admins: a week unanswered).
       if (actor && actor !== "waiting") return "You're in already.";
+      // So nobody can fill the list up by asking again and again (or joining and leaving).
+      if ((this.asked.get(record.author) ?? 0) >= MAX_JOINS) return "You've asked to join this group too many times.";
       return null;
     }
     if (record.kind === "leave") {
@@ -101,6 +106,7 @@ export class MemberRules extends Rules {
       const earlier = this.people.get(record.author);
       if (earlier && this.joins.get(earlier.join)?.state === "waiting") this.joins.get(earlier.join).state = "out";
       this.joins.set(fp, { person: record.author, state: "waiting", n });
+      this.asked.set(record.author, (this.asked.get(record.author) ?? 0) + 1);
       this.people.set(record.author, { join: fp, role: "member" });
       this.changedAt.set(record.author, n);
     } else if (record.kind === "leave") {

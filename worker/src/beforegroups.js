@@ -37,9 +37,10 @@ const tooLate = () => json({ error: "You weren't in this group before afterwrd 2
 /** POST /_group/rejoin/point: what an old member's `join` says it saw, and the group, for their browser to sign. */
 export async function rejoinPoint(request, env, url, windowSeconds) {
   const bytes = await bodyBytes(request);
+  // Only an old member's address is ever looked into: a stranger's call doesn't make this site fetch anything.
+  if (!(await oldMember(env, request.headers.get("Afterwrd-From") ?? "", windowSeconds))) return tooLate();
   const caller = await siteCalling(request, env, url, bytes);
   if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
-  if (!(await oldMember(env, caller.from, windowSeconds))) return tooLate();
   const self = await groupSelf(env);
   if (!self) return json({ error: "This group hasn't come over to afterwrd 2 yet." }, 409);
   const head = await env.DB.prepare("SELECT n, head FROM lists WHERE id = ?").bind(self.list).first();
@@ -51,12 +52,15 @@ export async function rejoinPoint(request, env, url, windowSeconds) {
 /** POST /_group/rejoin: an old member's signed `join`, taken as an invite link's is; they wait for the owner's yes. */
 export async function rejoin(request, env, url, windowSeconds) {
   const bytes = await bodyBytes(request);
+  const old = await oldMember(env, request.headers.get("Afterwrd-From") ?? "", windowSeconds);
+  if (!old) return tooLate();
   const caller = await siteCalling(request, env, url, bytes);
   if (!caller) return json({ error: "Your site's signature didn't check." }, 401);
-  if (!(await oldMember(env, caller.from, windowSeconds))) return tooLate();
   if (await env.DB.prepare("SELECT 1 FROM group_members WHERE origin = ? AND approved_at IS NOT NULL").bind(caller.from).first()) {
     return json({ error: "You're already in this group." }, 409);
   }
+  // Once: then they wait for the owner. (Leaving, or being removed or turned down, ends coming back this way: groupmembers.js.)
+  if (old.rejoined_at) return json({ error: "You've asked to come back already: the group's owner lets you in." }, 409);
   let body = {};
   try { body = JSON.parse(new TextDecoder().decode(bytes ?? new Uint8Array())); } catch {}
   const answer = await takeJoin(env, await theGroup(env.DB), caller, body, { maxWaiting: MAX_REJOINING });

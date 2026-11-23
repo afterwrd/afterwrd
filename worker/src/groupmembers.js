@@ -121,6 +121,9 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
   if (answer.refused) return json({ error: answer.refused }, 409);
   await keepKnown(env.DB, got.delegation);
   const db = env.DB;
+  // Someone who leaves, or is removed or turned down, can't come back as a member from before afterwrd 2
+  // (beforegroups.js rejoin): only with an invite link, like anyone.
+  if (record.kind === "remove" || record.kind === "leave") await db.prepare("DELETE FROM group_members_before WHERE origin = ?").bind(target.origin).run();
   if (record.kind === "approve") await db.prepare("UPDATE group_members SET approved_at = ? WHERE id = ?").bind(now(), target.id).run();
   if (record.kind === "role") {
     const role = (await contentOf(record, body.sent.content, body.sent.salt))?.role;
