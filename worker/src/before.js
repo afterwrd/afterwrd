@@ -31,7 +31,9 @@
 //                                  {to: "own" | connection id, item, records: [{id, sent}]} -> {ok}
 //                                  {rejoin: group id, sent}: a `join` for a group from before (10d: beforegroups.js)
 //   …GET also gives, once posts and comments are over, `rejoin` ({group, host, item, seen, prev, name}: an old group
-//   come over, for a join) and `approve` ({group, joins}: old members of a group the owner here brought over, waiting).
+//   come over, for a join) and `approve` ({group, joins}: old members of a group the owner here brought over, waiting);
+//   then `groupPost` and `groupComments`: what the owner wrote in old groups (10e: beforehistory.js), which POST takes as
+//   {groupPost, sent, photos, calloffs} and {groupItem, records}.
 //   POST /_p/before (friendhost)   {ask: [old ids], all} -> {answers: [{id, item, at, seen, until} | {id, state}]}
 //                                  {records: [{id, sent}], delegation, profile} -> {ok}
 import { guestsFor, lookupsFor, ownHost, refreshItem, sentRecord, takePost } from "./items.js";
@@ -43,6 +45,7 @@ import { checkDelegation } from "./identity.js";
 import { isBlocked } from "./blocks.js";
 import { decode, fromB64url } from "../public/static/signed.js";
 import { nextApprovals, nextRejoin, sendRejoin } from "./beforegroups.js";
+import { nextGroupWork, sendGroupComments, sendGroupPost } from "./beforehistory.js";
 import { queueItemNote } from "./notes.js";
 import { pollTrouble } from "./itemkinds.js";
 import { cleanEvent, EVENT_FIELDS, finishedAt } from "./calendar.js";
@@ -103,7 +106,7 @@ async function prepare(env, row, until) {
   // A poll closed by hand closes at the time it was closed, so it stays closed without anything else to sign.
   if (poll) {
     const closes = [poll.closes_at, poll.closed_at].filter((t) => t !== null && t !== undefined).map(Number);
-    const asked = { options: JSON.parse(String(poll.options)), multiple: Number(poll.multiple) ? 1 : 0, closes_at: closes.length ? Math.min(...closes) : null };
+    const asked = { options: JSON.parse(String(poll.options)), multiple: Number(poll.multiple) ? 1 : 0, closes_at: closes.length ? Math.max(Math.min(...closes), Number(row.created_at) + 1) : null };
     if (!pollTrouble(asked, Number(row.created_at))) post.poll = asked;
   }
   let guests = null;
@@ -157,12 +160,16 @@ export async function handleBefore(request, env, url) {
     const comments = shown ? null : await nextComments(env, host, url.origin);
     const rejoin = shown || comments ? null : await nextRejoin(env, url.origin);
     const approve = shown || comments || rejoin ? null : await nextApprovals(env, windowOf(env));
-    return json({ next: shown, comments, rejoin, approve, left, waiting });
+    // Then what the owner wrote in groups from before, once they've come over (10e: beforehistory.js).
+    const history = shown || comments || rejoin || approve ? null : await nextGroupWork(env, url.origin);
+    return json({ next: shown, comments, rejoin, approve, groupPost: history?.groupPost ?? null, groupComments: history?.groupComments ?? null, left, waiting });
   }
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
   const body = await request.json().catch(() => ({}));
   if (body.to !== undefined) return takeComments(env, host, url.origin, body);
   if (body.rejoin !== undefined) return sendRejoin(env, url.origin, Number(body.rejoin), body.sent);
+  if (body.groupPost !== undefined) return sendGroupPost(env, url.origin, body);
+  if (body.groupItem !== undefined) return sendGroupComments(env, url.origin, body);
   const row = typeof body.old === "string"
     ? await env.DB.prepare("SELECT id, key, created_at, text, title, mentions FROM posts WHERE key = ? AND source = 'afterwrd'").bind(body.old).first() : null;
   if (!row) return json({ error: "That post has come over already, or isn't here." }, 404);
@@ -229,12 +236,12 @@ async function mismatch(env, host, prepared, post, photos, body) {
 // ---- 10c: the comments made before ----------------------------------------------------------------------------------
 
 const ASK_SITES = 3; // friends' sites asked about the owner's old comments at one go
-const ASK_EVERY = 3600; // how often one is asked again, while it hasn't said
-const MAX_ASK = 500; // old comments asked about in one call
-const SAME_TIME = 86400; // how far apart the host's time for a comment and this site's may be, to sign it
+export const ASK_EVERY = 3600; // how often one is asked again, while it hasn't said
+export const MAX_ASK = 500; // old comments asked about in one call
+export const SAME_TIME = 86400; // how far apart the host's time for a comment and this site's may be, to sign it
 
 /** An item's list now: {n, h}, the point a comment signed for it sees. */
-async function headNow(db, item) {
+export async function headNow(db, item) {
   const row = await db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(item).first();
   return row ? { n: Number(row.n), h: String(row.head) } : null;
 }
@@ -307,7 +314,7 @@ async function askHosts(env, from) {
 }
 
 /** What's wrong with a set of signed comments for an item (in order, `rows` the old ones they're for), or null. */
-async function commentsTrouble(env, { rows, records, author, host, item, seen, prev, texts }) {
+export async function commentsTrouble(env, { rows, records, author, host, item, seen, prev, texts }) {
   if (records.length !== rows.length) return "Those aren't all the comments from before.";
   let last = prev;
   for (let i = 0; i < rows.length; i++) {
@@ -383,7 +390,7 @@ async function takeComments(env, host, from, body) {
 }
 
 /** Keeps signed comments from before, to go into their item's list once they're all in (build). */
-function keepSigned(db, rows, records) {
+export function keepSigned(db, rows, records) {
   const at = now();
   return db.batch(rows.map((r, i) => db.prepare("UPDATE before_comments SET state = 'signed', sent = ?, signed_at = ? WHERE id = ? AND state = 'waiting'")
     .bind(JSON.stringify(records[i].sent), at, Number(r.id))));
@@ -451,27 +458,36 @@ export async function answerBefore(env, caller, body) {
   return json({ ok: true });
 }
 
-/** Puts an item's comments from before into its list, once none is waiting. */
-async function maybeBuild(env, host, item) {
+/**
+ * Puts an item's comments from before into its list, once none is waiting. In a group (step 10e: beforehistory.js),
+ * `group`: {rules (the group's, for takeRecord), table: 'group_comments'}, where its old comments were.
+ */
+export async function maybeBuild(env, host, item, group = null) {
   const waiting = await env.DB.prepare("SELECT 1 FROM before_comments WHERE item = ? AND state = 'waiting' LIMIT 1").bind(item).first();
-  if (!waiting) await build(env, host, item);
+  if (!waiting) await build(env, host, item, group);
 }
 
-/** Items whose 30 days are up: their comments from before go in with what came (Home, and friends' pulls, ask). */
-export async function buildDue(env) {
+/**
+ * Items whose 30 days are up: their comments from before go in with what came (Home, and friends' pulls, ask; in a
+ * group, members' pulls). `group` as for maybeBuild.
+ */
+export async function buildDue(env, group = null) {
   const host = await ownHost(env);
   if (!host) return;
   const { results } = await env.DB.prepare(`SELECT DISTINCT b.item FROM before_comments b JOIN items i ON i.id = b.item
     WHERE i.before_until IS NOT NULL AND i.before_until <= ? LIMIT 5`).bind(now()).all();
-  for (const r of results) await build(env, host, String(r.item));
+  for (const r of results) await build(env, host, String(r.item), group);
+  // One brought over with no comments from before left waiting (all declined, say), still frozen: open again.
+  await env.DB.prepare(`UPDATE items SET before_until = NULL WHERE before_until IS NOT NULL AND before_until <= ?
+    AND NOT EXISTS (SELECT 1 FROM before_comments b WHERE b.item = items.id)`).bind(now()).run();
 }
 
-/** Before a friend reads an item: its comments from before go in first, if its time is up. */
-export async function buildIfDue(env, item) {
+/** Before a friend (or a group's member) reads an item: its comments from before go in first, if its time is up. */
+export async function buildIfDue(env, item, group = null) {
   const due = await env.DB.prepare("SELECT 1 FROM items WHERE id = ? AND before_until IS NOT NULL AND before_until <= ?").bind(item, now()).first();
   if (!due) return;
   const host = await ownHost(env);
-  if (host) await build(env, host, item);
+  if (host) await build(env, host, item, group);
 }
 
 /**
@@ -479,18 +495,19 @@ export async function buildIfDue(env, item) {
  * so its delegation checks); what never came is dropped, with its old row. Then it takes new records again, and its
  * changed time moves on, so friends' sites ask for it again.
  */
-async function build(env, host, item) {
+async function build(env, host, item, group = null) {
   const db = env.DB;
   const { results } = await db.prepare("SELECT id, state, sent, signed_at FROM before_comments WHERE item = ? ORDER BY at, id").bind(item).all();
   const lookups = lookupsFor(env);
   for (const r of results.filter((x) => x.state === "signed")) {
-    await takeRecord(db, { sent: JSON.parse(String(r.sent)), host, lookups, taken: Number(r.signed_at), bringing: true }).catch(() => null);
+    await takeRecord(db, { sent: JSON.parse(String(r.sent)), host, lookups, taken: Number(r.signed_at), bringing: true, group: group?.rules ?? null }).catch(() => null);
   }
   const ids = JSON.stringify(results.map((r) => Number(r.id)));
+  const [table, versions] = group ? ["group_comments", "group_comment_versions"] : ["comments", "comment_versions"];
   await db.batch([
     db.prepare("DELETE FROM before_comments WHERE item = ?").bind(item),
-    db.prepare("DELETE FROM comment_versions WHERE comment_id IN (SELECT value FROM json_each(?))").bind(ids),
-    db.prepare("DELETE FROM comments WHERE id IN (SELECT value FROM json_each(?))").bind(ids),
+    db.prepare(`DELETE FROM ${versions} WHERE comment_id IN (SELECT value FROM json_each(?))`).bind(ids),
+    db.prepare(`DELETE FROM ${table} WHERE id IN (SELECT value FROM json_each(?))`).bind(ids),
     db.prepare("UPDATE items SET before_until = NULL, changed_at = ? WHERE id = ?").bind(now(), item),
   ]);
   await refreshItem(db, item);

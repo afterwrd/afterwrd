@@ -19,7 +19,7 @@ import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDa
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
-import { ID_RE, namesFor, ownHost } from "./items.js";
+import { frozenUntil, ID_RE, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
@@ -35,7 +35,7 @@ import { checkRecord } from "./records.js";
 import { signedFile } from "./share.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
-import { DATE_RE, parseRecord } from "../public/static/records.js";
+import { DATE_RE, parseRecord, writtenAt } from "../public/static/records.js";
 import { decode, fromB64url } from "../public/static/signed.js";
 import { html, json, now, Refusal } from "./util.js";
 import { keepGroupUsage } from "./allowances.js";
@@ -238,7 +238,7 @@ export async function groupCopiesShown(env, group, rows, people = []) {
     }
     return { ...shown, connection: null, name, mine: String(r.author) === me?.person,
       list: r.list_n && me ? { host: String(group.identity), me: me.person, seen: { n: Number(r.list_n), h: String(r.list_head) },
-        mine: last.get(String(r.id)) ?? null } : null };
+        mine: last.get(String(r.id)) ?? null, frozenUntil: frozenUntil(JSON.parse(String(r.content)).before_until) } : null };
   });
 }
 
@@ -269,7 +269,7 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
     if (!kept) continue;
     rows.push({ id: item.id, group_id: group.id, author: kept.record.author, record: JSON.stringify(item.sent), content: JSON.stringify(kept.content),
       earlier: JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []), edited_at: Number.isSafeInteger(item.edited_at) ? item.edited_at : null,
-      comments: item.comments > 0 ? 1 : 0, created_at: Number(item.taken), tally: cleanTally(item.tally) ? JSON.stringify(cleanTally(item.tally)) : null,
+      comments: item.comments > 0 ? 1 : 0, created_at: writtenAt(kept.record, Number(item.taken)), tally: cleanTally(item.tally) ? JSON.stringify(cleanTally(item.tally)) : null,
       list_n: Number.isSafeInteger(item.list?.n) ? item.list.n : null, list_head: typeof item.list?.head === "string" ? item.list.head : null,
       checked_n: null, checked_head: null });
   }
@@ -712,6 +712,14 @@ export async function groupDate(env, from, group, id, date, admins = new Set()) 
   const day = dateTally(result.entries.map((e) => ({ e, r: e.record ? { record: e.record, content: e.content } : null })));
   const last = entries.find((e) => e.n === result.upTo);
   return { ...day, seen: last ? { n: last.n, h: last.head } : null, mine, problem: result.problem };
+}
+
+/** Which post one from afterwrd 1 became, by its old number there (step 10e), for its old link; null if none. */
+export async function broughtPost(env, from, group, n) {
+  try {
+    const data = await ask(env, from, group, `/_p/items?old=${Number(n)}`);
+    return ID_RE.test(data?.id ?? "") ? String(data.id) : null;
+  } catch { return null; }
 }
 
 /** One of a group's posts this site doesn't keep (an older one, opened by a link): asked for, checked, and kept. */

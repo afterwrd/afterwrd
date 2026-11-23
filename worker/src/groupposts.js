@@ -36,6 +36,7 @@ import { checkProfile, identityState } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
 import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
 import { ownIdentity } from "./keys.js";
+import { buildDue, buildIfDue } from "./before.js";
 import { rateWindow } from "./limits.js";
 import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
@@ -57,7 +58,7 @@ const KINDS = new Set(["comment", "edit", "delete", "vote", "answer", "end", "ch
  * This group as host: its identity and hosting key, its members list's id, and its owner (from its identity); null
  * before it has an identity.
  */
-async function hostOf(env) {
+export async function hostOf(env) {
   const self = await groupSelf(env);
   const own = self && (await ownIdentity(env.DB));
   return self && own?.state.current.owner ? { ...self, owner: String(own.state.current.owner) } : null;
@@ -67,7 +68,7 @@ async function hostOf(env) {
  * The group's side of GroupRules (lists.js): its owner, and who's an admin at a point in its members list. Only a
  * remove or a calloff asks, so the members list is read only for those (`admins`).
  */
-async function groupRules(env, self, admins) {
+export async function groupRules(env, self, admins) {
   if (!admins) return { owner: self.owner, admin: () => false };
   const roles = await membersNow(env, self);
   return {
@@ -78,7 +79,7 @@ async function groupRules(env, self, admins) {
 }
 
 /** A member's signed name, if they sent one: kept, to name them to others in the group. */
-async function keepProfile(env, person, profile) {
+export async function keepProfile(env, person, profile) {
   if (!profile) return;
   const state = await identityState(env, person);
   if (state && (await checkProfile(profile, state))) {
@@ -114,7 +115,15 @@ export async function handleGroupItems(request, env, url) {
     const answer = await answerCheck(env, String(member.identity), body, { host: self.person, rolesOf: (people) => roleProofs(env, self, people) });
     return json(answer, answer.status ?? 200);
   }
+  // Posts from afterwrd 1 whose 30 days are up: their comments from before go in first (step 10e: before.js).
+  const brought = { rules: await groupRules(env, self, false), table: "group_comments" };
   if (request.method === "GET" && url.pathname === "/_p/items") {
+    // ?old=<n>: which post one from afterwrd 1 became (its old link, /groups/<id>/posts/<n>), once brought over.
+    if (/^\d{1,15}$/.test(url.searchParams.get("old") ?? "")) {
+      const row = await db.prepare("SELECT item FROM brought WHERE old = ?").bind(`gpost-${Number(url.searchParams.get("old"))}`).first();
+      return row ? json({ v: 2, id: String(row.item) }) : json({ error: "That post isn't there any more." }, 404);
+    }
+    await buildDue(env, brought);
     const before = Number(url.searchParams.get("before") ?? 0) || 0;
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
     // ?id=: one post, as the others come (a member opening one older than their site keeps).
@@ -161,6 +170,7 @@ export async function handleGroupItems(request, env, url) {
       const event = await db.prepare("SELECT 1 FROM lists WHERE id = ? AND deleted_at IS NULL").bind(one[1]).first();
       return event ? json({ v: 2, empty: true }) : json({ error: "Not found." }, 404);
     }
+    if (!one[2]) await buildIfDue(env, one[1], brought);
     // ?after=: a member's site that checked up to there asks only for what's after (threads.js).
     const after = Math.max(0, Number(url.searchParams.get("after") ?? 0) || 0);
     const list = await readList(db, one[2] ? dateList(one[1], one[2]) : one[1], { host: self, after });
@@ -340,48 +350,75 @@ async function newPost(env, url, self, group, member, body) {
     release = here.release;
   }
   await keepProfile(env, String(member.identity), body.profile);
+  const made = await takeGroupPost(env, self, String(member.identity), { sent: body.sent, post, photosSent, photos });
+  if (made.error) { await release(); return json({ error: made.error }, 400); }
+  const id = made.id;
+  // The files, copied from the member's site; if that goes wrong, the post and its photos go again.
+  try {
+    await copyPhotos(env, copies);
+  } catch (error) {
+    await made.undo();
+    await release();
+    return json({ error: error.message }, 400);
+  }
+  // Those it mentions are told; @here tells everyone.
+  if (post.content.here === true) await outbox(env).sendNote({ origin: url.origin, kind: "here", item: id, audience: "members" });
+  else await queueToPeople(env, url.origin, { kind: "item", item: id, people: post.record.mentions ?? [], except: String(member.identity) });
+  return json({ ok: true, id, receipt: made.receipt });
+}
+
+/**
+ * Takes a member's post, checked already, its photos first (each an item of its own), and writes their rows: for a new
+ * post (newPost), and for one brought over from afterwrd 1 (beforehistory.js: `bringing`, its records saying when it was
+ * first written, `before`, its photos' files here already). `frozen`: until when it takes no new comments (hosted.js).
+ * Its time is when it was first written, so the group's pages put it in its place. Returns {id, receipt, photos (their
+ * item ids), undo (takes it all back again)} or {error}.
+ * @param {any} env @param {any} self @param {string} author
+ * @param {{ sent: any, post: any, photosSent: any[], photos: any[] }} what
+ * @param {{ bringing?: boolean, frozen?: number | null }} [options]
+ */
+export async function takeGroupPost(env, self, author, { sent, post, photosSent, photos }, { bringing = false, frozen = null } = {}) {
+  const db = env.DB;
   const lookups = lookupsFor(env);
   const rules = await groupRules(env, self, false);
   const taken = [];
   const undo = async () => {
     for (const t of taken) { await tombstone(db, t.id); await itemGone(env, t.id); }
-    await release();
   };
   for (let i = 0; i < photos.length; i++) {
-    const answer = await takeRecord(db, { sent: photosSent[i], host: self, lookups, group: rules });
-    if (answer.refused) { await undo(); return json({ error: answer.refused }, 400); }
-    taken.push({ id: answer.entry.fp, at: answer.entry.taken, content: photos[i].content });
+    const answer = await takeRecord(db, { sent: photosSent[i], host: self, lookups, group: rules, bringing });
+    if (answer.refused) { await undo(); return { error: answer.refused }; }
+    taken.push({ id: answer.entry.fp, at: answer.entry.taken, written: photos[i].record.before ?? answer.entry.taken, content: photos[i].content });
   }
-  const answer = await takeRecord(db, { sent: body.sent, host: self, lookups, group: rules });
-  if (answer.refused) { await undo(); return json({ error: answer.refused }, 400); }
+  const answer = await takeRecord(db, { sent, host: self, lookups, group: rules, bringing });
+  if (answer.refused) { await undo(); return { error: answer.refused }; }
   const id = answer.entry.fp;
+  const written = post.record.before ?? answer.entry.taken;
   const event = post.content.type === "event";
-  // The post's row, its photos' rows and files' rows, referenced before the files arrive, so none is cleared away
-  // meanwhile; if anything goes wrong, the post and its photos go again.
+  // The post's row, its photos' rows and files' rows, referenced before any files arrive, so none is cleared away
+  // meanwhile.
+  const photoItems = taken.map((t) => t.id);
   taken.push({ id });
   try {
     await db.batch([
-      db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience, version, tally)
-        VALUES (?, ?, 'post', ?, ?, ?, ?, 'group', ?, ?)`).bind(id, member.identity, JSON.stringify(post.content), answer.entry.taken, answer.entry.taken, id, id,
-        post.content.poll ? JSON.stringify({ votes: {}, ended_at: null }) : event ? JSON.stringify({ answers: {} }) : null),
+      db.prepare(`INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience, version, tally, before_until)
+        VALUES (?, ?, 'post', ?, ?, ?, ?, 'group', ?, ?, ?)`).bind(id, author, JSON.stringify(post.content), written, answer.entry.taken, id, id,
+        post.content.poll ? JSON.stringify({ votes: {}, ended_at: null }) : event ? JSON.stringify({ answers: {} }) : null, frozen),
       ...taken.slice(0, -1).flatMap((t, i) => [
+        // (Never frozen: groups from afterwrd 1 had no comments on photos of their own.)
         db.prepare("INSERT INTO items (id, author, type, content, created_at, changed_at, author_last, audience) VALUES (?, ?, 'photo', ?, ?, ?, ?, 'group')")
-          .bind(t.id, member.identity, JSON.stringify(t.content), t.at, t.at, t.id),
+          .bind(t.id, author, JSON.stringify(t.content), t.written, t.at, t.id),
         db.prepare("INSERT INTO item_photos (photo, post, position) VALUES (?, ?, ?)").bind(t.id, id, i),
         db.prepare(`INSERT INTO media (source, path, kind, created_at, width, height, hash, thumb_hash, size, type, item_id)
           VALUES ('afterwrd', ?, 'photo', ?, ?, ?, ?, ?, ?, 'image/jpeg', ?)`)
           .bind(`group/${t.content.hash}.jpg`, t.at, t.content.width, t.content.height, t.content.hash, t.content.thumb_hash, t.content.size + THUMB_BYTES, t.id),
       ]),
     ]);
-    await copyPhotos(env, copies);
   } catch (error) {
     await undo();
-    return json({ error: error.message }, 400);
+    return { error: error.message };
   }
-  // Those it mentions are told; @here tells everyone.
-  if (post.content.here === true) await outbox(env).sendNote({ origin: url.origin, kind: "here", item: id, audience: "members" });
-  else await queueToPeople(env, url.origin, { kind: "item", item: id, people: post.record.mentions ?? [], except: String(member.identity) });
-  return json({ ok: true, id, receipt: answer.receipt });
+  return { id, receipt: answer.receipt, photos: photoItems, undo };
 }
 
 /** A member's record on a post here (POST /_p/records). Once the group's closed (`shut`), only their own deletes. */

@@ -4,7 +4,8 @@
 // comments they made before, on their own posts and friends', an item at a time, each following the last (prev). Then
 // groups from before (step 10d): a `join` for one that has come over, and, for one the owner brought over, an
 // `approve` for each of its old members waiting to be let in, as the owner's own approve button signs one
-// (ui/groupsign.js). Then Home is shown again, with them in place.
+// (ui/groupsign.js). Then what the owner wrote in groups from before (step 10e): each post, then each post's comments.
+// Then Home is shown again, with them in place.
 import { audienceOf, makeRecord } from "../records.js";
 import { b64url } from "../signed.js";
 import { savedKey } from "../browserkey.js";
@@ -83,6 +84,38 @@ async function approveOld(key, a) {
   }
 }
 
+/**
+ * One of the owner's posts in a group from before (step 10e), as their site checked the group's offer against its own
+ * copy: each photo signed first (an item of its own), then the post listing them, then each date of a repeating event
+ * called off before (a `calloff` starting that date's list).
+ * @param {{ privateKey: CryptoKey, publicKey: string, person: string }} key @param {any} g
+ */
+async function bringGroupPost(key, g) {
+  const own = { kind: "item", author: key.person, host: g.host, before: g.before };
+  const photos = [];
+  for (const content of g.photos) photos.push(await makeRecord(own, content, key));
+  const post = g.post;
+  if (post.photos) post.photos.forEach((/** @type {any} */ photo, /** @type {number} */ i) => { photo.item = photos[i].fp; });
+  const made = await makeRecord(own, post, key);
+  const calloffs = [];
+  for (const date of g.calloffs) {
+    calloffs.push((await makeRecord({ kind: "calloff", author: key.person, host: g.host, item: made.fp, about: made.fp, date, seen: null, prev: null }, undefined, key)).sent);
+  }
+  return call("POST", { groupPost: g.id, sent: made.sent, photos: photos.map((m) => m.sent), calloffs });
+}
+
+/** One group post's comments from before, written by the owner (as bringComments). @param {any} key @param {any} c */
+async function bringGroupComments(key, c) {
+  let prev = c.prev;
+  const records = [];
+  for (const one of c.list) {
+    const made = await makeRecord({ kind: "comment", author: key.person, host: c.host, item: c.item, seen: c.seen, prev, before: one.before }, { text: one.text }, key);
+    records.push({ id: one.id, sent: made.sent });
+    prev = made.fp;
+  }
+  return call("POST", { groupItem: c.item, records });
+}
+
 (async () => {
   const key = await savedKey();
   if (!key?.person || key.expires < Date.now() / 1000) {
@@ -92,7 +125,7 @@ async function approveOld(key, a) {
   let brought = 0;
   try {
     for (;;) {
-      const { next, comments, rejoin, approve, left, waiting } = await call("GET");
+      const { next, comments, rejoin, approve, groupPost, groupComments, left, waiting } = await call("GET");
       if (!next && comments) {
         say("Bringing the comments you wrote before afterwrd 2 over, signed on this device…");
         await bringComments(/** @type {any} */ (key), comments);
@@ -108,6 +141,18 @@ async function approveOld(key, a) {
       if (!next && approve) {
         say("Letting the people who were in your group before afterwrd 2 back in…");
         await approveOld(key, approve);
+        brought++;
+        continue;
+      }
+      if (!next && groupPost) {
+        say("Bringing what you wrote in your groups before afterwrd 2 over, signed on this device…");
+        await bringGroupPost(/** @type {any} */ (key), groupPost);
+        brought++;
+        continue;
+      }
+      if (!next && groupComments) {
+        say("Bringing what you wrote in your groups before afterwrd 2 over, signed on this device…");
+        await bringGroupComments(/** @type {any} */ (key), groupComments);
         brought++;
         continue;
       }

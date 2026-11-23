@@ -28,9 +28,13 @@
 // members list, posts and threads, and members deleting what they wrote. Then it empties itself, and its owner's site
 // deletes its Worker:
 //   POST /_group/admin/end        the owner, once the 30 days are up: empties it, if it hasn't already
-// Groups made on afterwrd 1 kept their posts in group_* tables, read-only now, until migration (step 10).
+// Groups made on afterwrd 1 kept their posts in group_* tables, read-only now, until migration (step 10). Once one has
+// come over (10d), for 30 days:
+//   POST /_group/rejoin/point, /_group/rejoin   its members from before joining again (beforegroups.js)
+//   POST /_group/before                         its posts and comments from before, brought over (beforehistory.js)
 import { rejoin, rejoinPoint } from "./beforegroups.js";
 import { windowOf } from "./before.js";
+import { answerGroupBefore } from "./beforehistory.js";
 import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.js";
 import pkg from "../package.json";
 import { mediaStore } from "./media.js";
@@ -326,6 +330,8 @@ export async function handleGroupApi(request, env, url) {
   // A group from afterwrd 1, come over: its members from before re-joining, by their sites' addresses (beforegroups.js).
   if (route === "POST /_group/rejoin/point") return rejoinPoint(request, env, url, windowOf(env));
   if (route === "POST /_group/rejoin") return rejoin(request, env, url, windowOf(env));
+  // …and its posts and comments from before, re-signed by whoever wrote them, from their own copies (beforehistory.js).
+  if (route === "POST /_group/before") return answerGroupBefore(request, env, url);
   const gone = await groupGone(env);
   const member = await signedMember(request, env, url);
   const group = member && !gone ? await theGroup(db) : null;

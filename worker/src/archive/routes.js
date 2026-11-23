@@ -6,6 +6,7 @@ import { connectionById, friendEvents, friendItem, friendItems, friendThread, no
 import { dateOver, ownHost } from "../items.js";
 import { buildDue, commentsToBring, leftToBring, windowOf } from "../before.js";
 import { groupsToBring, groupsToBringOver } from "../beforegroups.js";
+import { groupWordsToBring } from "../beforehistory.js";
 import * as itemViews from "../views/items.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
@@ -120,6 +121,8 @@ const ROUTES = [
   [/^\/groups\/(\d{1,15})$/, null, groupHome, views.groupPage],
   // A group's posts (groupcopies.js), by their id.
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})$/, null, (ctx, params, id, item) => groupItemPost(ctx, params, id, item), views.groupItemPage],
+  // A post's address from afterwrd 1 (by its number there): to the signed post it became, once brought over (step 10e).
+  [/^\/groups\/(\d{1,15})\/posts\/(\d{1,15})$/, null, groupOldPost, views.groupItemPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/photos\/(\d{1,2})$/, null, groupItemPost, views.groupItemPhotoPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/edit$/, null, groupItemEventEdit, views.groupItemEventEditPage],
   [/^\/groups\/(\d{1,15})\/posts\/([A-Za-z0-9_-]{43})\/event\.ics$/, null, groupItemEventFile, null],
@@ -814,7 +817,7 @@ async function home(ctx, params) {
   const moved = gone?.done ? gone : null;
   // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
   const bringOver = moved ? null : { posts: ownOld.length ? await leftToBring(db) : 0, comments: await commentsToBring(db),
-    groups: await groupsToBring(db, windowOf(ctx.env)), owned: await groupsToBringOver(db) };
+    groups: (await groupsToBring(db, windowOf(ctx.env))) + (await groupWordsToBring(db)), owned: await groupsToBringOver(db) };
   const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
@@ -1140,7 +1143,18 @@ async function groupHome(ctx, params, id) {
     const before = Number(params.get("before")) || null;
     const got = await groups_.groupPosts(ctx.env, ctx.url.origin, g, { before });
     if (got.error || !got.info) throw got.error ?? new Error("The group's site sent something unexpected.");
-    return { group: got.info, posts: got.posts, next: got.next, before, maxPhotos: MAX_GROUP_PHOTOS };
+    // A group from afterwrd 1, come over lately (step 10e): its posts from before still coming back.
+    const bringing = Number(g.brought_at) > 0 && now() < Number(g.brought_at) + windowOf(ctx.env);
+    return { group: got.info, posts: got.posts, next: got.next, before, maxPhotos: MAX_GROUP_PHOTOS, bringing };
+  });
+}
+
+/** A group post's address from afterwrd 1 (/groups/<id>/posts/<n>): to the signed post it became, if it came over. */
+async function groupOldPost(ctx, params, id, n) {
+  return fromGroup(ctx, id, async (g) => {
+    const item = g.identity ? await groups_.broughtPost(ctx.env, ctx.url.origin, g, n) : null;
+    if (!item) throw new Error("That post isn't there any more.");
+    return Response.redirect(`${ctx.url.origin}/groups/${g.id}/posts/${item}`, 302);
   });
 }
 
@@ -1196,6 +1210,8 @@ async function groupItemPost(ctx, params, id, itemId, photo = null) {
     item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? item;
     const { admins: _, ...rest } = shown;
     void _;
+    // Brought over from afterwrd 1 and waiting for its old comments (the group says so: step 10e): no comment box yet.
+    if (rest.list) rest.list.frozenUntil = item.list?.frozenUntil ?? null;
     return { group: info, item, ...rest };
   });
 }

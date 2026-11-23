@@ -104,6 +104,8 @@ export async function setGroupIdentity(request, env, url) {
     db.prepare(`INSERT OR IGNORE INTO group_members_before (origin, name, role, since)
       SELECT origin, name, role, ? FROM group_members WHERE identity IS NULL AND id != ? AND approved_at IS NOT NULL`).bind(now(), member.id),
     db.prepare("DELETE FROM group_members WHERE identity IS NULL AND id != ?").bind(member.id),
+    // …and its posts from before come over for 30 days from now too (step 10e: beforehistory.js).
+    db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('group_brought_at', ?)").bind(String(now())),
   ]);
   if (!made.meta.changes) return json({ error: "This group's identity is already set up." }, 409);
   return json({ ok: true, person: state.id });

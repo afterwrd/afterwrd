@@ -303,11 +303,12 @@ const ownerPersonOf = (info) => info?.people?.find((p) => p.origin === info.owne
  * A group's page (groupcopies.js): its newest posts as this site keeps them, and older ones a page at a time (`next`: the
  * time the next page goes back from), with a composer that signs (none once it's closed).
  */
-function signedGroupPage(ctx, { membership: g, group: info, posts, next, before, maxPhotos }) {
+function signedGroupPage(ctx, { membership: g, group: info, posts, next, before, maxPhotos, bringing = false }) {
   g.ownerFrom = info.ownerFrom;
   const ownerPerson = ownerPersonOf(info);
   return page(ctx, info.name, html`
 ${groupHead(ctx, g, info, "posts")}
+${bringing && !before && html`<p class="notice bringing">Posts from before afterwrd 2 come back as the people who wrote them bring them over.</p>`}
 ${!before && !closedGroup(g) && composer({ action: `/_groups/${g.id}/items`, max: maxPhotos, placeholder: `Write something for ${info.name}`, host: g.identity })}
 ${feed(posts, (p) => groupItemCard(ctx, g, p, { ownerPerson }), before ? "Nothing older." : "Nothing posted yet. Write the first post above.")}
 ${(before || next) && html`<nav class="pager">${before ? html`<a class="chip" href="${groupBase(g)}">Newest</a>` : ""}${next ? html`<a class="chip" href="${groupBase(g)}?before=${next}">Older posts</a>` : ""}</nav>`}`);

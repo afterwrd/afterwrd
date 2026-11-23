@@ -60,6 +60,7 @@ import m0045 from "../migrations/0045_crossover.sql";
 import m0046 from "../migrations/0046_bringing_over.sql";
 import m0047 from "../migrations/0047_bringing_comments.sql";
 import m0048 from "../migrations/0048_bringing_groups.sql";
+import m0049 from "../migrations/0049_bringing_group_history.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -112,6 +113,7 @@ const MIGRATIONS = [
   ["0046_bringing_over.sql", m0046],
   ["0047_bringing_comments.sql", m0047],
   ["0048_bringing_groups.sql", m0048],
+  ["0049_bringing_group_history.sql", m0049],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */
