@@ -968,6 +968,11 @@ check("the owner can't just leave: there's no Leave for her", !(await ann.$('but
 // Cat asks again with the invite link, and Ann lets her back in.
 await join(cat, C, link);
 check("Cat can ask again after being removed", n(stateG, `group_members WHERE origin = '${C}' AND approved_at IS NULL`) === 1);
+// Still only asking, she can't leave (she isn't in): she can forget the group here instead, and ask again later.
+const asking = sql(stateC, "SELECT id FROM groups")[0].id;
+await post(cat, `/_groups/${asking}/forget`, {});
+check("…and while only asking, can forget it on her own site", n(stateC, "groups") === 0);
+await join(cat, C, link);
 await ann.goto(`${A}/groups/${annGroup}/members`);
 await Promise.all([ann.waitForNavigation(), ann.click('.requests button[data-group-record="approve"]')]);
 const catAgain = sql(stateC, "SELECT id FROM groups")[0].id;

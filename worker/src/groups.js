@@ -38,7 +38,7 @@ import { answerGroupBefore } from "./beforehistory.js";
 import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.js";
 import { fromB64url, PROTOCOL } from "../public/static/signed.js";
 import { parseRecord } from "../public/static/records.js";
-import { delegationsFor } from "./friendhost.js";
+import { delegationsFor, peopleFor } from "./friendhost.js";
 import { roleProofs } from "./groupposts.js";
 import pkg from "../package.json";
 import { mediaStore } from "./media.js";
@@ -210,7 +210,10 @@ async function tellRemoved(env, member, proof) {
     const record = parseRecord(fromB64url(proof.sent.record));
     const roles = self && record && record.author !== owner ? await roleProofs(env, { ...self, owner: String(owner) }, [record.author]) : {};
     const keys = [record?.key, ...Object.values(roles).flatMap((r) => [r.join, r.role].map((x) => parseRecord(fromB64url(x.record))?.key))].filter(Boolean);
-    const response = await callMember(env, member, "/_member/removed", { ...proof, roles, delegations: await delegationsFor(env.DB, keys) });
+    // With who decided (and their role's proof): someone still waiting has never pulled the group, so their site may not
+    // know an admin yet.
+    const people = await peopleFor(env.DB, [record?.author].filter(Boolean));
+    const response = await callMember(env, member, "/_member/removed", { ...proof, roles, delegations: await delegationsFor(env.DB, keys), people });
     await response.body?.cancel();
   } catch {}
 }

@@ -514,6 +514,9 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   for (let i = 0; i < 11; i++) asks.push(await take(await sign(eve, "join", {}, { name: "Eve" })));
   check("someone can ask again while they wait, but not for ever", asks.slice(0, 10).every((x) => x === null)
     && asks[10] === "You've asked to join this group too many times.", asks.join());
+  // Turned down: that ask was decided on, so it no longer counts, and they can ask once more (the owner says each time).
+  await take(await sign(ann, "remove", { about: last.get(eve.id) }));
+  check("…though once the group turns them down, they can ask again", (await take(await sign(eve, "join", {}, { name: "Eve" }))) === null);
   const catJoin = await sign(cat, "join", {}, { name: "Cat" });
   await take(catJoin);
   check("someone waiting can't let anyone in", (await take(await sign(bob, "approve", { about: catJoin.fp, role_at: at() }))) === "Only the group's admins can do that.");

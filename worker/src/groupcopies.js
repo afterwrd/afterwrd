@@ -29,7 +29,7 @@ import { pushAllowed, writerMayBuzz } from "./notify.js";
 import { checkPhotos, removeUnusedFiles } from "./posts.js";
 import { notifyLater } from "./push.js";
 import { checkGroupReceipts, queueReceipts } from "./receipts.js";
-import { friendsAmong, peopleShown } from "./names.js";
+import { actorName, friendsAmong, peopleShown } from "./names.js";
 import { compareMine, compareThread, keepSent as keepSentAs, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { signedFile } from "./share.js";
@@ -510,7 +510,15 @@ export async function relayToGroup(request, env, url, group, id) {
 // --- notes from a group ------------------------------------------------------------------------------------------------
 
 /** Someone's name as a group's note says its members list has it: only when there's no better (memberNames). */
-const groupSays = (note, person) => (typeof note.names?.[person] === "string" && note.names[person].trim() ? note.names[person].trim().slice(0, 100) : "Someone");
+const groupSays = (note, person) => (typeof note.names?.[person] === "string" && note.names[person].trim() ? note.names[person].trim().slice(0, 100) : null);
+/**
+ * Who did something, as a group's note tells it: by their own signed name, else the one the group says, with "not your
+ * friend …" when that looks like a friend's (names.js actorName), so a member can't pass as one in a notification.
+ */
+const noteActor = (env, note, person, signed = new Map()) => {
+  const said = signed.get(person) ?? groupSays(note, person);
+  return actorName(env.DB, person, { signed: said ? new Map([[person, said]]) : new Map() });
+};
 
 const eventWords = (e) => `${e.title} · ${eventWhen(e)}${e.place ? ` · ${e.place}` : ""}`.slice(0, 400);
 
@@ -535,7 +543,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     const author = kept.record.author;
     // Their own, or from someone the owner's blocked (kept, folded away on the group's page: blocks.js): nothing to tell.
     if (author === me.person || (await isBlocked(env.DB, author))) return json({ ok: true }, 202);
-    const actor = (await namesFor(env.DB, [author])).get(author) ?? groupSays(note, author);
+    const actor = await noteActor(env, note, author);
     const text = kept.content.text || (kept.content.photos.length ? "Shared photos." : "");
     if ((kept.record.mentions ?? []).includes(me.person)) {
       if (await keepNotice(env.DB, { kind: "mention", fp: id, group: g, item: id, target: id, actor, text, author })) {
@@ -596,7 +604,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const author = got.record.author;
   if (author === me.person) return json({ ok: true }, 202);
   if (note.kind === "comment" && (await isBlocked(env.DB, author))) return json({ ok: true }, 202); // blocks.js
-  const actor = (await namesFor(env.DB, [author])).get(author) ?? signed.get(author) ?? groupSays(note, author);
+  const actor = await noteActor(env, note, author, signed);
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
   if (note.kind === "comment") {
@@ -675,7 +683,7 @@ async function groupClosed(env, url, group, me, note) {
   const marked = await env.DB.prepare("UPDATE groups SET closed_at = ?, closed_by = ? WHERE id = ? AND (closed_by IS NULL OR closed_by != ?)")
     .bind(entry.taken, entry.fp, g, entry.fp).run();
   if (marked.meta.changes && got.record.author !== me.person) {
-    const actor = (await namesFor(env.DB, [got.record.author])).get(got.record.author) ?? signed.get(got.record.author) ?? groupSays(note, got.record.author);
+    const actor = await noteActor(env, note, got.record.author, signed);
     await keepNotice(env.DB, { kind: "closed", fp: entry.fp, group: g, item: host, target: "", actor, text: String(group.name) });
   }
   return json({ ok: true }, 202);

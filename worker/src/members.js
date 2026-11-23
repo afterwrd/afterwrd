@@ -17,12 +17,12 @@ export const MAX_MEMBER_ENTRIES = 20_000;
 const MEMBER_ENDINGS = 2_000; // leaves, removals and a close a full list still takes
 const MEMBER_KINDS = new Set(["join", "approve", "remove", "role", "leave", "close"]);
 const ROLES = new Set(["admin", "member"]);
-export const MAX_JOINS = 10; // asks to join by one person, ever: each leave or removal needs a join before it
+export const MAX_JOINS = 10; // asks to join by one person that nobody has decided on: each leave or removal needs a join before it
 
 export class MemberRules extends Rules {
   constructor({ host, list, owner }) {
     super({ host, list, owner });
-    /** @type {Map<string, { person: string, state: "waiting" | "in" | "out", n: number }>} join fp -> what became of it */
+    /** @type {Map<string, { person: string, state: "waiting" | "in" | "out", n: number, counted?: boolean }>} join fp -> what became of it (counted: towards asking too often) */
     this.joins = new Map();
     /** @type {Map<string, { join: string, role: "admin" | "member" }>} person -> their newest join, and role */
     this.people = new Map();
@@ -69,7 +69,8 @@ export class MemberRules extends Rules {
       // Asking again while still waiting replaces the earlier request (the group may have stopped showing it to its
       // admins: a week unanswered).
       if (actor && actor !== "waiting") return "You're in already.";
-      // So nobody can fill the list up by asking again and again (or joining and leaving).
+      // So nobody can fill the list up by asking again and again unanswered (joins decided on don't count: each needs
+      // an admin's say, so the group holds those back itself).
       if ((this.asked.get(record.author) ?? 0) >= MAX_JOINS) return "You've asked to join this group too many times.";
       return null;
     }
@@ -105,7 +106,7 @@ export class MemberRules extends Rules {
     if (record.kind === "join") {
       const earlier = this.people.get(record.author);
       if (earlier && this.joins.get(earlier.join)?.state === "waiting") this.joins.get(earlier.join).state = "out";
-      this.joins.set(fp, { person: record.author, state: "waiting", n });
+      this.joins.set(fp, { person: record.author, state: "waiting", n, counted: true });
       this.asked.set(record.author, (this.asked.get(record.author) ?? 0) + 1);
       this.people.set(record.author, { join: fp, role: "member" });
       this.changedAt.set(record.author, n);
@@ -118,6 +119,12 @@ export class MemberRules extends Rules {
       if (target) {
         if (record.kind === "approve") target.state = "in";
         if (record.kind === "remove") target.state = "out";
+        // A join someone decided on (let in, or turned down) no longer counts towards asking too often: only asking
+        // again unanswered does, so the group's admins can always let someone in again.
+        if ((record.kind === "approve" || record.kind === "remove") && target.counted) {
+          target.counted = false;
+          this.asked.set(target.person, Math.max(0, (this.asked.get(target.person) ?? 0) - 1));
+        }
         if (record.kind === "role" && ROLES.has(content?.role)) this.people.get(target.person).role = content.role;
         this.changedAt.set(target.person, n);
       }

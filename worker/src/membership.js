@@ -32,7 +32,7 @@ import { callFriend } from "./calls.js";
 import { joinPoint, joinSigned, membersPoint, relayGroupRecord, signedGroup, waitingPoint } from "./groupjoin.js";
 import { checkRoles, postSigned, relayToGroup } from "./groupcopies.js";
 import { lookupsWith } from "./friendcopies.js";
-import { identityState } from "./identities.js";
+import { identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { checkRecord } from "./records.js";
 import { checkHead, headOf } from "./lists.js";
 import { ownOrigin } from "./keys.js";
@@ -258,7 +258,12 @@ export async function handleGroupActions(request, env, url) {
   if (action === "/identity/start" || action === "/identity/finish") return handleGroupIdentity(request, env, url, group, action);
   // A group from before signing, or one closed and gone (its owner deletes theirs instead): off the list here.
   if (action === "/forget") {
-    if (group.identity && !groupGoneHere(group)) return problem("Leave the group instead.", new URL(`/groups/${group.id}/members`, site));
+    // In it: leave instead, so the group's list says so. But a group that says this site isn't in it (turned down, or
+    // removed by someone this site couldn't check) or is still only asking can't be left: forgetting it is all there is.
+    if (group.identity && !groupGoneHere(group)) {
+      const status = await membersPoint(env, group, (path) => call(env, group, path)).then(() => 200, (error) => Number(error?.status) || 0);
+      if (status !== 401 && status !== 403) return problem("Leave the group instead.", new URL(`/groups/${group.id}/members`, site));
+    }
     if (group.role === "owner" && group.script) return problem("Delete the group's site instead, from Members & settings.", new URL(`/groups/${group.id}/members`, site));
     await forgetGroup(db, group);
     return Response.redirect(`${site}/groups`, 303);
@@ -348,10 +353,14 @@ async function removedForSure(env, group, body) {
     const owner = hostState?.current.owner ? String(hostState.current.owner) : null;
     const entry = body?.entry;
     if (!owner || hostState.frozen || !Number.isSafeInteger(entry?.n) || !Number.isSafeInteger(entry.taken) || typeof entry.prev !== "string") return false;
+    // Whoever decided, if this site doesn't know them yet (someone waiting has never pulled the group): learnt only once
+    // what they signed here checks against them (identities.js learnPeopleIn).
+    await learnPeopleIn(env, body.people, signersIn({ sent: body.sent, roles: body.roles }), { delegations: body.delegations, from: String(group.origin) });
     const got = await checkRecord(body.sent, { ...lookupsWith(env, body.delegations), at: entry.taken });
     if (!got || got.record.kind !== "remove" || got.record.host !== host || got.record.item !== host || got.fp !== entry.fp) return false;
-    const mine = await env.DB.prepare("SELECT 1 FROM sent WHERE fp = ? AND item = ? AND kind = 'join'").bind(got.record.about, host).first();
-    if (!mine) return false;
+    // About the newest join this site sent there: an older decision, replayed, says nothing about now.
+    const newest = await env.DB.prepare("SELECT fp FROM sent WHERE item = ? AND kind = 'join' ORDER BY created_at DESC, rowid DESC LIMIT 1").bind(host).first();
+    if (!newest || String(newest.fp) !== got.record.about) return false;
     if (got.record.author !== owner && !(await checkRoles(env, group, owner, body.roles, body.delegations)).has(got.record.author)) return false;
     const head = await headOf({ host, list: host, prev: entry.prev, n: entry.n, fp: got.fp, taken: entry.taken });
     const took = await checkHead(body.receipt, { hostingKey: hostState.current.hosting, host, list: host });
