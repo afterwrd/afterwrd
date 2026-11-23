@@ -36,7 +36,10 @@ import { rejoin, rejoinPoint } from "./beforegroups.js";
 import { windowOf } from "./before.js";
 import { answerGroupBefore } from "./beforehistory.js";
 import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.js";
-import { PROTOCOL } from "../public/static/signed.js";
+import { fromB64url, PROTOCOL } from "../public/static/signed.js";
+import { parseRecord } from "../public/static/records.js";
+import { delegationsFor } from "./friendhost.js";
+import { roleProofs } from "./groupposts.js";
 import pkg from "../package.json";
 import { mediaStore } from "./media.js";
 import { groupLinkPage, messagePage } from "./views/pages.js";
@@ -196,7 +199,21 @@ export async function copyPhotos(env, photos) {
 // --- running the group ------------------------------------------------------------------------------------------------
 
 /** Tells a member's site it's no longer in the group, if it can be reached. */
-const tellRemoved = (env, member) => callMember(env, member, "/_member/removed", {}).then((r) => r.body?.cancel()).catch(() => {});
+/**
+ * Tells a member's site it was removed (or its request turned down), with the signed removal and where the group took
+ * it (`proof`: {sent, entry, receipt}), and what shows its writer could: their admin role, and the delegations behind it.
+ */
+async function tellRemoved(env, member, proof) {
+  try {
+    const self = await groupSelf(env);
+    const owner = self && (await env.DB.prepare("SELECT owner FROM lists WHERE id = ?").bind(self.list).first())?.owner;
+    const record = parseRecord(fromB64url(proof.sent.record));
+    const roles = self && record && record.author !== owner ? await roleProofs(env, { ...self, owner: String(owner) }, [record.author]) : {};
+    const keys = [record?.key, ...Object.values(roles).flatMap((r) => [r.join, r.role].map((x) => parseRecord(fromB64url(x.record))?.key))].filter(Boolean);
+    const response = await callMember(env, member, "/_member/removed", { ...proof, roles, delegations: await delegationsFor(env.DB, keys) });
+    await response.body?.cancel();
+  } catch {}
+}
 
 /**
  * The owner's `close`, just taken onto the members list (`entry`): the group is closed from now. No more invite links;
@@ -340,7 +357,7 @@ export async function handleGroupApi(request, env, url) {
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
   const shut = closedGroup(group);
   const record = (body) => takeMemberRecord(env, group, member, body, { maxMembers: maxMembers(env), closed: Boolean(shut),
-    tell: (m) => tellRemoved(env, m), onClose: (entry) => closed(env, url.origin, group, entry) });
+    tell: (m, proof) => tellRemoved(env, m, proof), onClose: (entry) => closed(env, url.origin, group, entry) });
   // Someone still waiting may take back their request: a signed `leave` (members.js only lets them do that).
   if (!member.approved_at && route === "POST /_group/records") return record(await request.json().catch(() => ({})));
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);

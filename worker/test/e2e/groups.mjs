@@ -954,6 +954,9 @@ check("Bob leaves", n(stateB, "groups") === 0 && n(stateG, `group_members WHERE 
 check("…keeping his own record of what he signed there", n(stateB, `sent WHERE item = '${bobPost}' AND kind = 'item'`) === 1);
 check("…and forgetting the group's posts and notices", n(stateB, "copies WHERE group_id IS NOT NULL") === 0 && n(stateB, "notices WHERE group_id IS NOT NULL") === 0);
 check("…whose posts stay in the group", n(stateG, `items WHERE id = '${bobPost}'`) === 1);
+// The group's site saying Cat was removed, with no signed removal to show for it: her site doesn't take its word.
+await siteCall(stateG, G, `${C}/_member/removed`, {});
+check("a group saying Cat was removed, with nothing signed to show it, isn't believed", n(stateC, "groups") === 1);
 await ann.goto(`${A}/groups/${annGroup}/members`);
 await Promise.all([ann.waitForNavigation(), ann.click('button[data-group-record="remove"]')]);
 check("Ann removes Cat, and Cat's site forgets the group", await waitFor(() => n(stateC, "groups") === 0));

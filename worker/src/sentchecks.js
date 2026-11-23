@@ -17,13 +17,15 @@
 import { rateWindow } from "./limits.js";
 import { callFriend } from "./calls.js";
 import { delegationsFor, peopleFor } from "./friendhost.js";
-import { checkProfile, identityState, learnIdentity, parseChain } from "./identities.js";
+import { identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { ID_RE, ownHost } from "./items.js";
 import { listOf, PAGE, parseListId } from "./lists.js";
 import { checkRecord } from "./records.js";
 import { checkRoles } from "./groupcopies.js";
 import { contentOf, parseRecord } from "../public/static/records.js";
-import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
+import { checkDelegation } from "./identity.js";
+import { ownIdentity } from "./keys.js";
 import { now } from "./util.js";
 
 const MAX_POINTS = 200; // in one check (section 9)
@@ -139,9 +141,23 @@ export async function answerCheck(env, person, body, { host, mayRead = async (_i
 
 /** The caller's records taken here since `since` (this site's clock), for a pull's `mine` (T6). */
 export async function mineSince(db, person, since) {
-  const { results } = await db.prepare("SELECT fp, list, taken FROM authored WHERE author = ? AND taken >= ? ORDER BY taken LIMIT 200")
+  const { results } = await db.prepare("SELECT fp, list, n, taken FROM authored WHERE author = ? AND taken >= ? ORDER BY taken LIMIT 200")
     .bind(person, Math.max(0, since - MINE_OVERLAP)).all();
-  return { now: now(), records: results.map((r) => ({ fp: String(r.fp), list: String(r.list), taken: Number(r.taken) })) };
+  // Each as signed (not its words), from its list's page, with the delegations behind them: their site believes
+  // nothing it can't check.
+  const pages = new Map();
+  const records = [];
+  for (const r of results) {
+    const where = `${r.list}:${Math.floor((Number(r.n) - 1) / PAGE)}`;
+    if (!pages.has(where)) {
+      const row = await db.prepare("SELECT entries FROM list_pages WHERE list = ? AND page = ?").bind(String(r.list), Math.floor((Number(r.n) - 1) / PAGE)).first();
+      pages.set(where, row ? JSON.parse(String(row.entries)) : []);
+    }
+    const sent = pages.get(where).find((e) => e.fp === String(r.fp))?.sent;
+    records.push({ fp: String(r.fp), list: String(r.list), taken: Number(r.taken), ...(sent && { sent: { record: sent.record, sig: sent.sig } }) });
+  }
+  const keys = records.map((r) => (r.sent ? parseRecord(fromB64url(r.sent.record))?.key : null)).filter(Boolean);
+  return { now: now(), records, delegations: await delegationsFor(db, keys) };
 }
 
 // ---- The writer's side: checking ----
@@ -188,20 +204,6 @@ async function notice(env, { kind, fp, where, list, actor = null, text = null, a
 async function nameOf(env, person, learnt) {
   const friend = await env.DB.prepare("SELECT name FROM connections WHERE identity = ? AND approved_at IS NOT NULL").bind(person).first();
   return friend ? String(friend.name) : learnt.get(person) ?? null;
-}
-
-/** Identities and signed names a host sent, learnt and checked. */
-async function learnPeople(env, people) {
-  const names = new Map();
-  for (const [p, info] of Object.entries(people ?? {}).slice(0, 50)) {
-    if (!ID_RE.test(p)) continue;
-    const chain = parseChain(info?.chain);
-    const state = chain && (await learnIdentity(env, chain));
-    if (!state || state.id !== p) continue;
-    const profile = info.profile && (await checkProfile(info.profile, state));
-    if (profile) names.set(p, profile.name);
-  }
-  return names;
 }
 
 /**
@@ -337,7 +339,8 @@ async function checkHost(env, from, me, host, where, rows) {
     await db.prepare(`UPDATE sent SET next_at = ? WHERE fp IN (SELECT value FROM json_each(?))`).bind(at + dayOf(env), JSON.stringify(asking.map((r) => String(r.fp)))).run();
     return;
   }
-  const learnt = await learnPeople(env, data.people);
+  // Only those who signed something in the answer (identities.js learnPeopleIn).
+  const learnt = await learnPeopleIn(env, data.people, signersIn(data));
   const mayRemove = await removersAt(env, host, where, data);
   const answers = new Map((Array.isArray(data.results) ? data.results : []).map((r) => [r?.fp, r]));
   for (const row of asking) {
@@ -392,15 +395,39 @@ export async function compareThread(env, { where, host, list, entries, me, names
 export async function compareMine(env, where, mine) {
   const records = (Array.isArray(mine?.records) ? mine.records : []).slice(0, 200)
     .filter((r) => ID_RE.test(r?.fp ?? "") && typeof r.list === "string" && Number.isSafeInteger(r.taken));
-  const hostNow = Number.isSafeInteger(mine?.now) ? mine.now : now();
-  const settled = records.filter((r) => hostNow - r.taken > Math.min(GRACE, dayOf(env)));
+  // By this site's own clock: the host's can't stretch or shorten the time a record of the owner's has to arrive in `sent`.
+  const settled = records.filter((r) => now() - r.taken > Math.min(GRACE, dayOf(env)));
   if (!settled.length) return;
   const { results } = await env.DB.prepare("SELECT fp FROM sent WHERE fp IN (SELECT value FROM json_each(?))").bind(JSON.stringify(settled.map((r) => r.fp))).all();
   const known = new Set(results.map((r) => String(r.fp)));
-  for (const r of settled) if (!known.has(r.fp)) await forged(env, where, r.list, r.fp);
+  // Only a record that really is signed as the owner, by a key their identity allowed: a host can't raise the alarm
+  // with fingerprints alone. A few at a time.
+  const own = await ownIdentity(env.DB);
+  let told = 0;
+  for (const r of settled) {
+    if (known.has(r.fp) || told >= MAX_FORGED || !own) continue;
+    if (await signedAsOwner(env, own, r, mine.delegations)) { await forged(env, where, r.list, r.fp); told++; }
+  }
 }
 
 /** Something signed as the owner that their site never sent: said on Home until they clear it. */
+const MAX_FORGED = 20; // "signed as you" notices from one pull
+
+/** Whether `r` ({fp, taken, sent: {record, sig}}) is a record signed as the owner (`own`), by a key their identity allowed. */
+async function signedAsOwner(env, own, r, delegations) {
+  try {
+    const bytes = typeof r.sent?.record === "string" ? fromB64url(r.sent.record) : null;
+    const record = bytes && parseRecord(bytes);
+    if (!record || record.author !== own.person || (await fingerprintOf("record", bytes)) !== r.fp || typeof r.sent.sig !== "string") return false;
+    const kept = await env.DB.prepare("SELECT bytes, proof FROM delegations WHERE key = ?1 UNION ALL SELECT bytes, proof FROM known_delegations WHERE key = ?1 LIMIT 1")
+      .bind(record.key).first();
+    const d = kept ? { bytes: String(kept.bytes), proof: JSON.parse(String(kept.proof)) } : delegations?.[record.key];
+    const dBytes = typeof d?.bytes === "string" ? fromB64url(d.bytes) : null;
+    if (!dBytes || (await checkDelegation(dBytes, d.proof, own.state, r.taken)) !== record.key) return false;
+    return checkAs("record", record.key, bytes, r.sent.sig);
+  } catch { return false; }
+}
+
 async function forged(env, where, list, fp) {
   await notice(env, { kind: "forged", fp, where, list });
 }

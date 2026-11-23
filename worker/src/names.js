@@ -96,6 +96,18 @@ export async function peopleShown(db, people, { signed = new Map(), friendHost =
   return { names, tags, known };
 }
 
+/**
+ * How a notice names someone (peopleShown, for one person): a friend by the name the owner approved; anyone else as they
+ * sign themselves, said not to be the friend whose name they look like.
+ * @param {D1Database} db @param {string} person @param {Parameters<typeof peopleShown>[2]} [where]
+ */
+export async function actorName(db, person, where = {}) {
+  const shown = await peopleShown(db, [person], where);
+  const name = shown.names.get(person) ?? "Someone";
+  const warn = shown.tags.get(person)?.warn;
+  return warn ? `${name} (${warn})` : name;
+}
+
 /** Which of `people` are the owner's friends (for counts split by who they know). @param {D1Database} db @param {string[]} people */
 export async function friendsAmong(db, people) {
   const list = [...new Set(people.filter(Boolean))];

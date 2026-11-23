@@ -34,6 +34,7 @@ import { pushAllowed, writerMayBuzz } from "./notify.js";
 import { outbox } from "./outbox.js";
 import { notifyLater } from "./push.js";
 import { checkRecord } from "./records.js";
+import { actorName } from "./names.js";
 import { json, now } from "./util.js";
 import { cleanEvent, eventChanged, eventWhen } from "./calendar.js";
 import { parseRecord } from "../public/static/records.js";
@@ -243,12 +244,13 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
   const head = await headOf({ host: person, list: item, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: hostState.current.hosting, host: person, list: item });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  // Its writer: anyone in the thread, whose identity (and signed name) the note carries.
+  // Its writer, whose identity (and signed name) the note carries: theirs alone is learnt, and only their own name used.
+  const writer = typeof entry.sent?.record === "string" ? parseRecord(fromB64url(entry.sent.record))?.author : null;
   let name = null;
-  for (const [p, info] of Object.entries(note.people ?? {}).slice(0, 2)) {
-    const chain = parseChain(info?.chain);
-    const state = chain && (await learnIdentity(env, chain));
-    if (!state || state.id !== p) continue;
+  const info = writer && ID_RE.test(writer) ? note.people?.[writer] : null;
+  const chain = info && parseChain(info.chain);
+  const state = chain && (await learnIdentity(env, chain));
+  if (state && state.id === writer) {
     const profile = info.profile && (await checkProfile(info.profile, state));
     if (profile) name = profile.name;
   }
@@ -264,8 +266,8 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
   const there = !mentioned && (await env.DB.prepare(`SELECT 1 FROM sent WHERE item = ? AND kind = 'comment' AND ${TAKEN_SQL} LIMIT 1`).bind(item).first());
   if (!mentioned && !there) return json({ ok: true }, 202);
   // Named as the owner here knows them: the friend whose site it is, another friend, or as they sign themselves.
-  const friend = author === person ? connection : await env.DB.prepare("SELECT name FROM connections WHERE identity = ? AND approved_at IS NOT NULL").bind(author).first();
-  const actor = friend ? String(friend.name) : name ?? "Someone";
+  const actor = author === person ? String(connection.name)
+    : await actorName(env.DB, author, { signed: new Map(name ? [[author, name]] : []), friendHost: { person, name: String(connection.name) }, me: me.person });
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
   const text = got.content?.text ?? "";

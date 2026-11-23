@@ -12,6 +12,7 @@ import { readBytesLimited, siteOrigin } from "./sites.js";
 import { b64url, checkAs, decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { checkDelegation } from "./identity.js";
 import { json, now } from "./util.js";
+import { later } from "./later.js";
 
 const MAX_CHAIN = 200;
 const MAX_REPLY = 512 * 1024;
@@ -65,12 +66,13 @@ export async function readChain(db, chain, firstSeen, at = now()) {
 
 /** The longest start of `chain` that reads without a problem, and how it reads; null if not even the first does. */
 async function cleanest(db, chain, firstSeen, at) {
-  for (let n = chain.length; n > 0; n--) {
-    const state = await readChain(db, chain.slice(0, n), firstSeen, at);
-    if (!state) return null;
-    if (!state.problem) return { chain: chain.slice(0, n), state };
-  }
-  return null;
+  const state = await readChain(db, chain, firstSeen, at);
+  if (!state) return null;
+  if (!state.problem) return { chain, state };
+  // Read once more, up to the document with the problem (readIdentity says how far it got), to see how that reads alone.
+  const clean = chain.slice(0, state.clean);
+  const again = clean.length ? await readChain(db, clean, firstSeen, at) : null;
+  return again && !again.problem ? { chain: clean, state: again } : null;
 }
 
 /**
@@ -105,6 +107,53 @@ export async function learnIdentity(env, chain, { owner = null } = {}) {
       moving_to = excluded.moving_to, moving_at = excluded.moving_at`)
     .bind(state.id, state.current.origin, storedChain(found.chain), at, move?.to ?? null, move?.at ?? null).run();
   return { ...state, frozen: Boolean(row?.frozen_at) };
+}
+
+const MAX_NEW = 1100; // identities new to this site one answer can have it learn: a group's or a friend's thousand, and a few
+
+/** Everyone who signed a record anywhere in `value` (an answer or note, as decoded: records are `{record, sig}`). */
+export function signersIn(value) {
+  const out = new Set();
+  const walk = (v, depth) => {
+    if (!v || typeof v !== "object" || depth > 8) return;
+    if (typeof v.record === "string" && typeof v.sig === "string") {
+      try {
+        const author = JSON.parse(new TextDecoder().decode(fromB64url(v.record)))?.author;
+        if (typeof author === "string") out.add(author);
+      } catch {}
+    }
+    for (const x of Array.isArray(v) ? v : Object.values(v)) walk(x, depth + 1);
+  };
+  walk(value, 0);
+  return out;
+}
+
+/**
+ * Learns, from `people` as another site passed them on ({person: {chain, profile?}}), only those in `wanted` (who signed
+ * something in what it sent: signersIn), and at most MAX_NEW this site didn't know: a host can't fill this site with
+ * identities, or use up its writes, by sending ones nobody needs. Returns their signed names, checked (person -> name).
+ * @param {Env} env @param {any} people @param {Set<string>} wanted
+ */
+export async function learnPeopleIn(env, people, wanted) {
+  const names = new Map();
+  const asked = Object.entries(people && typeof people === "object" ? people : {}).filter(([p]) => wanted.has(p) && /^[A-Za-z0-9_-]{43}$/.test(p));
+  if (!asked.length) return names;
+  const { results } = await env.DB.prepare("SELECT person FROM identities WHERE person IN (SELECT value FROM json_each(?))")
+    .bind(JSON.stringify(asked.map(([p]) => p))).all();
+  const known = new Set(results.map((r) => String(r.person)));
+  let fresh = 0;
+  for (const [p, info] of asked) {
+    if (!known.has(p) && fresh++ >= MAX_NEW) continue;
+    const chain = parseChain(info?.chain);
+    const state = chain && (await learnIdentity(env, chain));
+    if (!state || state.id !== p) continue;
+    const profile = info.profile && (await checkProfile(info.profile, state));
+    if (profile) {
+      names.set(p, profile.name);
+      await keepNewerProfile(env.DB, p, info.profile, profile.at);
+    }
+  }
+  return names;
 }
 
 /** Fetches the identity a site's address gives, learns it, and checks it names that address; null if not. */
@@ -188,17 +237,32 @@ export async function hostingKeyFor(env, person, from, { again = false } = {}) {
   // for anyone, so bad signatures can't make this site fetch from them over and over.
   if (again) {
     if (!row || row.frozen_at || Number(row.updated_at ?? 0) > now() - REFETCH_SECONDS) return null;
-    await env.DB.prepare("UPDATE identities SET updated_at = ? WHERE person = ?").bind(now(), person).run();
-    const fetched = await fetchIdentity(env, from);
+    const refresh = (async () => {
+      await env.DB.prepare("UPDATE identities SET updated_at = ? WHERE person = ?").bind(now(), person).run();
+      return fetchIdentity(env, from);
+    })().catch(() => null);
+    // Fetched after the answer has gone, when there's a request to hand it to: how long a refused call takes then says
+    // nothing about whether the caller named someone this site knows (a friend, a member). They're let in next time.
+    if (later(refresh)) return null;
+    const fetched = await refresh;
     return fetched?.id === person ? fetched.current.hosting : null;
   }
-  if (row && !row.frozen_at) {
-    const chain = parseChain(JSON.parse(String(row.chain)));
-    const state = chain && (await readChain(env.DB, chain, await seenTimes(env.DB, chain), now()));
-    if (state && !state.problem && state.current.origin === from) return state.current.hosting;
-  }
+  const known = row && !row.frozen_at ? await keyIfKnown(env.DB, row, from) : null;
+  if (known) return known;
   const fetched = await fetchIdentity(env, from);
   return fetched?.id === person ? fetched.current.hosting : null;
+}
+
+/** The hosting key `person` signs calls from `from` with, from what this site knows alone (it fetches nothing); or null. */
+export async function knownHostingKey(env, person, from) {
+  const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
+  return row && !row.frozen_at ? keyIfKnown(env.DB, row, from) : null;
+}
+
+async function keyIfKnown(db, row, from) {
+  const chain = parseChain(JSON.parse(String(row.chain)));
+  const state = chain && (await readChain(db, chain, await seenTimes(db, chain), now()));
+  return state && !state.problem && state.current.origin === from ? state.current.hosting : null;
 }
 
 /**

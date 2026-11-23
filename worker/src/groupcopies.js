@@ -18,7 +18,7 @@ import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
 import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
-import { checkProfile, identityState, keepNewerProfile, learnIdentity, parseChain } from "./identities.js";
+import { identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { checkDelegation } from "./identity.js";
 import { frozenUntil, ID_RE, keepKnown, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
@@ -49,22 +49,11 @@ const SNIPPET = 200;
 
 const snippet = (text) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim().slice(0, SNIPPET) : "");
 
-/** Everyone a group sent (`people`: {person: {chain, profile}}), learnt and checked here, with their signed names. */
-async function learnPeople(env, people) {
-  const names = new Map();
-  for (const [p, info] of Object.entries(people ?? {}).slice(0, 500)) {
-    if (!ID_RE.test(p)) continue;
-    const chain = parseChain(info?.chain);
-    const state = chain && (await learnIdentity(env, chain));
-    if (!state || state.id !== p) continue;
-    const profile = info.profile && (await checkProfile(info.profile, state));
-    if (profile) {
-      names.set(p, profile.name);
-      await keepNewerProfile(env.DB, p, info.profile, profile.at);
-    }
-  }
-  return names;
-}
+/**
+ * Those a group sent (`people`: {person: {chain, profile}}) who signed something in what it sent (`sent`: the answer or
+ * note), learnt and checked here, with their signed names (identities.js learnPeopleIn).
+ */
+const learnPeople = (env, people, sent) => learnPeopleIn(env, people, signersIn(sent));
 
 /** What to say when a group's site refused a call: if it's had a lot from this one today (allowances.js), that. */
 const busyMessage = (group, error) => (busyUntil(error) ? `${group.name}'s site has had a lot of requests from you today. Try tomorrow.` : error.message);
@@ -98,7 +87,7 @@ export async function pullGroup(env, from, group) {
     // Anything signed as the owner here that this site never sent (sentchecks.js).
     if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
     const sentKeys = await fillGaps(env, from, group, data);
-    await learnPeople(env, data.people);
+    await learnPeople(env, data.people, data);
     await keepSentKeys(env, sentKeys);
     const rules = await copyRules(env, group, data);
     const statements = [];
@@ -271,7 +260,7 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
   let data;
   try { data = await ask(env, from, group, `/_p/items?before=${Number(before)}`); } catch (e) { return { info: null, posts: [], error: e, next: null }; }
   info = parseGroup(data.context, String(group.origin), Number(group.remote_id), env);
-  await learnPeople(env, data.people);
+  await learnPeople(env, data.people, data);
   const rules = await copyRules(env, group, data);
   const rows = [];
   for (const item of Array.isArray(data.items) ? data.items.slice(0, PAGE_SIZE) : []) {
@@ -345,7 +334,7 @@ export async function groupThread(env, from, group, id, people = []) {
   const owner = String(state.current.owner);
   const host = String(group.identity);
   const me = await ownHost(env);
-  let signed = await learnPeople(env, data.people);
+  let signed = await learnPeople(env, data.people, data);
   let admins = await checkRoles(env, group, owner, data.roles, data.delegations);
   const check = (entries, from, kept = null) => checkList({ host, hostingKey: state.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? ""),
     entries, signedHead: data.signedHead, from, kept, lookups: lookupsWith(env, data.delegations), group: { owner, admin: (p) => admins.has(p) } });
@@ -366,7 +355,7 @@ export async function groupThread(env, from, group, id, people = []) {
     } else {
       // Doesn't follow on from where this site got to: the whole conversation, as before, to show what it is now.
       try { data = await ask(env, from, group, `/_p/items/${id}`); } catch (error) { return { error: busyMessage(group, error), status: error.status }; }
-      signed = new Map([...signed, ...(await learnPeople(env, data.people))]);
+      signed = new Map([...signed, ...(await learnPeople(env, data.people, data))]);
       admins = await checkRoles(env, group, owner, data.roles, data.delegations);
     }
   }
@@ -528,7 +517,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const g = Number(group.id);
   const link = (target) => `/groups/${g}/posts/${target}`;
   if (note.kind === "item") {
-    await learnPeople(env, note.people);
+    await learnPeople(env, note.people, note);
     const kept = await keepCopy(env, { group: g, host, site: String(group.origin), rules: await copyRules(env, group, {}) }, note.item, note.delegations);
     if (!kept) return json({ error: "That isn't a post in this group." }, 400);
     await kept.statement.run();
@@ -588,7 +577,7 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   const head = await headOf({ host, list, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  const signed = await learnPeople(env, note.people);
+  const signed = await learnPeople(env, note.people, note);
   const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
   if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== host || got.record.item !== item
     || (got.record.date ?? null) !== date) {
@@ -619,6 +608,15 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   if (!copy) return json({ ok: true }, 202);
   const was = JSON.parse(String(copy.content));
   if (!was.event) return json({ error: "That isn't a change to an event." }, 400);
+  // Called off only by whoever added it, the group's owner, or an admin (as the owner's signed roles say: not the owner's
+  // own event). Otherwise it isn't applied here, and the next pull, which checks the whole post, settles it.
+  if (note.kind === "calloff") {
+    const owner = (await identityState(env, String(group.identity)))?.current.owner ?? null;
+    const writer = String(copy.author);
+    const may = author === writer || author === owner
+      || (owner && writer !== owner && (await checkRoles(env, group, String(owner), note.roles, note.delegations)).has(author));
+    if (!may) return json({ ok: true }, 202);
+  }
   if (date) return dateCalledOff(env, url, work, { group, me, copy, was, item, date, entry, actor });
   if (note.kind === "change" && author !== String(copy.author)) return json({ error: "That isn't theirs to change." }, 400);
   // A repeating one stays one (step 6d), with its dates called off as they were.
@@ -658,7 +656,7 @@ async function groupClosed(env, url, group, me, note) {
   const head = await headOf({ host, list: host, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: state.current.hosting, host, list: host });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  const signed = await learnPeople(env, note.people);
+  const signed = await learnPeople(env, note.people, note);
   const got = await checkRecord(entry.sent, { ...lookupsWith(env, note.delegations), at: entry.taken });
   // Only the group's owner closes it.
   if (!got || got.fp !== entry.fp || got.record.kind !== "close" || got.record.host !== host || got.record.item !== host
@@ -708,7 +706,7 @@ export async function groupDate(env, from, group, id, date, admins = new Set()) 
   try { data = await ask(env, from, group, `/_p/items/${id}/dates/${date}`); } catch (error) { return { error: busyMessage(group, error) }; }
   const mine = (await env.DB.prepare(`SELECT fp FROM sent WHERE item = ? AND ${TAKEN_SQL} ORDER BY created_at DESC, rowid DESC LIMIT 1`).bind(dateList(id, date)).first())?.fp ?? null;
   if (data?.empty === true) return { answers: {}, off: null, seen: null, mine, problem: null };
-  await learnPeople(env, data.people);
+  await learnPeople(env, data.people, data);
   const state = await identityState(env, String(group.identity));
   if (!state || state.frozen || !state.current.owner) return { error: "The group's identity couldn't be checked." };
   const copy = await env.DB.prepare("SELECT author FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id).first();
@@ -738,7 +736,7 @@ export async function broughtPost(env, from, group, n) {
 export async function fetchGroupItem(env, from, group, id, people = []) {
   let data;
   try { data = await ask(env, from, group, `/_p/items?id=${id}`); } catch { return null; }
-  await learnPeople(env, data.people);
+  await learnPeople(env, data.people, data);
   const item = Array.isArray(data.items) ? data.items.find((i) => i?.id === id) : null;
   const kept = item && (await keepCopy(env, { group: Number(group.id), host: String(group.identity), site: String(group.origin), rules: await copyRules(env, group, data) }, item, data.delegations));
   if (kept) await kept.statement.run();

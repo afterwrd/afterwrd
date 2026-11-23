@@ -4,7 +4,7 @@
 // address (/.well-known/afterwrd): no passwords are handed over or kept. Each friend is tied to their identity when the
 // friendship is made (connect.js), or the first time it's needed (friendPerson).
 import { checkCall, signCall } from "./signedcalls.js";
-import { fetchIdentity, hostingKeyFor, identityState } from "./identities.js";
+import { fetchIdentity, hostingKeyFor, identityState, knownHostingKey } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { ownHost } from "./items.js";
 import { host, ownerName, readLimited } from "./sites.js";
@@ -151,6 +151,17 @@ export async function siteCalling(request, env, url, body) {
   const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
     { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => hostingKeyFor(env, person, site, options) });
   if (caller) await admit(env, caller.person); // within their allowance here today, or refused (allowances.js)
+  return caller;
+}
+
+/**
+ * siteCalling, for a caller whose identity this site knows already: nothing is fetched to check it, so the call can't
+ * make this site reach out to anywhere, or say by how long it takes whom this site knows. null if it doesn't check.
+ */
+export async function knownCalling(request, env, url, body) {
+  const caller = await checkCall({ method: request.method, url: request.url, headers: request.headers, body },
+    { ownOrigin: url.origin, hostingKeyOf: (person, site, options) => (options?.again ? null : knownHostingKey(env, person, site)) });
+  if (caller) await admit(env, caller.person);
   return caller;
 }
 

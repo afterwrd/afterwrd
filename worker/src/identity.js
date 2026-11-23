@@ -173,7 +173,10 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     state.pending = state.pendingFp = state.effectiveAt = null; state.pendingByRecovery = false;
   };
   let prevFp = genesisFp;
+  // How many documents read cleanly: the whole chain, or those before the one with the problem.
+  state.clean = chain.length;
   for (let i = 1; i < chain.length; i++) {
+    state.clean = i;
     const { bytes, sig } = chain[i] ?? {};
     const doc = parseIdentity(bytes);
     const fp = doc && (await fingerprintOf("identity", bytes));
@@ -205,6 +208,7 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     else { state.pending = doc; state.pendingFp = fp; state.pendingByRecovery = byRecovery; state.effectiveAt = firstSeen(fp) + SLOW_SECONDS; }
     prevFp = fp;
   }
+  if (!state.problem) state.clean = chain.length;
   settle(at);
   return state;
 }

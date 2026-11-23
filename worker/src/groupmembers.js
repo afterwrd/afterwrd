@@ -10,6 +10,7 @@ import { checkCall, signCall } from "./signedcalls.js";
 import { hostingKeyFor, identityState, checkProfile, keepNewerProfile } from "./identities.js";
 import { keepKnown, lookupsFor, ownHost, sentDelegationOf, withDelegation } from "./items.js";
 import { listEntries, readList, takeRecord } from "./hosted.js";
+import { PAGE } from "./lists.js";
 import { MemberRules } from "./members.js";
 import { delegationsFor, peopleFor } from "./friendhost.js";
 import { contentOf, parseRecord } from "../public/static/records.js";
@@ -97,7 +98,7 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
 
 /**
  * A member's decision, their leaving, or the owner closing the group: `member` (their row) sent `body` ({sent,
- * delegation}). Taken onto the members list if its rules allow, then group_members brought into line. `tell(member)`: a
+ * delegation}). Taken onto the members list if its rules allow, then group_members brought into line. `tell(member, proof)`: a
  * removed member's site, told. Once the group's `closed`, nothing more is taken (members.js); `onClose(entry)`: the
  * owner's close, just taken.
  */
@@ -130,11 +131,23 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
     if (role === "admin" || role === "member") await db.prepare("UPDATE group_members SET role = ? WHERE id = ?").bind(role, target.id).run();
   }
   if (record.kind === "remove" || record.kind === "leave") {
-    if (record.kind === "remove") await tell(target);
+    // The removal as signed, and where the group took it, so their site needn't take the group's word for it.
+    if (record.kind === "remove") {
+      const { n, fp, taken } = answer.entry;
+      await tell(target, { sent: body.sent, entry: { n, fp, taken, prev: await headAt(db, self.list, n - 1) }, receipt: answer.receipt });
+    }
     await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
   }
   if (record.kind === "close") await onClose(answer.entry);
   return json({ ok: true, receipt: answer.receipt, n: answer.entry?.n ?? null });
+}
+
+/** A list's running fingerprint at entry `n` ("" before the first), from its stored pages; null if it isn't there. */
+async function headAt(db, list, n) {
+  if (n < 1) return "";
+  const row = await db.prepare("SELECT entries FROM list_pages WHERE list = ? AND page = ?").bind(list, Math.floor((n - 1) / PAGE)).first();
+  const entry = row ? JSON.parse(String(row.entries)).find((e) => e.n === n) : null;
+  return entry?.head ?? null;
 }
 
 /** The members list's rules as they stand (who's in, waiting, and admin). */

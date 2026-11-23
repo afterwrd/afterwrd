@@ -9,7 +9,7 @@
 // And a group calls this site's /_member/… with signed calls (signedGroup).
 import { callFriend } from "./calls.js";
 import { checkCall } from "./signedcalls.js";
-import { checkProfile, fetchIdentity, hostingKeyFor, identityState, learnIdentity, parseChain } from "./identities.js";
+import { fetchIdentity, hostingKeyFor, identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { checkList } from "./lists.js";
 import { fitToKeep, keepThread, keptList } from "./threads.js";
 import { MemberRules } from "./members.js";
@@ -89,11 +89,8 @@ export async function checkMembers(env, group, data, { rules = null } = {}) {
   let state = await identityState(env, person);
   if (!state) state = await fetchIdentity(env, String(group.origin));
   if (!state || state.id !== person || state.frozen) throw new Refusal("The group's identity doesn't check.");
-  for (const [p, info] of Object.entries(data.people ?? {})) {
-    const chain = ID_RE.test(p) ? parseChain(info?.chain) : null;
-    const learnt = chain && (await learnIdentity(env, chain));
-    if (learnt?.id === p && info.profile) await checkProfile(info.profile, learnt);
-  }
+  // Only those who signed something on the list (identities.js learnPeopleIn).
+  await learnPeopleIn(env, data.people, signersIn(data.entries));
   // A group with nobody in it yet but its owner has nothing on its list, and nothing for the group to sign.
   const entries = Array.isArray(data.entries) ? data.entries : [];
   if (!entries.length && !rules) {

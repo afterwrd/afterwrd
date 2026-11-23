@@ -11,7 +11,7 @@
 // owner is friends with. The writer's identity is
 // fetched from their own address only once that much has checked.
 import { isBlocked } from "./blocks.js";
-import { callFriend, siteCalling } from "./calls.js";
+import { callFriend, knownCalling } from "./calls.js";
 import { friendThread } from "./friendcopies.js";
 import { groupThread } from "./groupcopies.js";
 import { checkProfile, identityState } from "./identities.js";
@@ -20,6 +20,7 @@ import { checkHead } from "./lists.js";
 import { keepNotice, tellMention } from "./notes.js";
 import { outbox } from "./outbox.js";
 import { checkRecord } from "./records.js";
+import { actorName } from "./names.js";
 import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
@@ -100,8 +101,10 @@ export async function receiveReceipt(request, env, url, work) {
   const record = typeof note.sent?.record === "string" ? parseRecord(fromB64url(note.sent.record)) : null;
   if ((!connection && !group) || !record || record.kind !== "comment" || record.host !== host || record.item !== item || record.author === me.person
     || !(record.mentions ?? []).includes(me.person)) return quiet();
-  // From the writer's own site, signed by it (its identity fetched from its address only now).
-  const caller = await siteCalling(request, env, url, bytes);
+  // From the writer's own site, signed by it, someone this site knows already (from the conversation they wrote in): a
+  // stranger's call never makes this site fetch anything, so can't learn from it whom the owner here knows. Anyone else
+  // is mentioned by the host's own note instead.
+  const caller = await knownCalling(request, env, url, bytes);
   if (!caller || caller.person !== record.author || (await isBlocked(env.DB, record.author))) return quiet();
   const got = await checkRecord(note.sent, { identityOf: (p) => identityState(env, p),
     delegationOf: async (key) => (key === record.key && note.delegation ? note.delegation : null), at: now() });
@@ -109,11 +112,10 @@ export async function receiveReceipt(request, env, url, work) {
   const took = hostState && !hostState.frozen && (await checkHead(note.receipt, { hostingKey: hostState.current.hosting, host, list: item }));
   if (!took) return quiet();
   // Named as the owner here knows them: a friend, or as they sign themselves.
-  const friend = await env.DB.prepare("SELECT name FROM connections WHERE identity = ? AND approved_at IS NOT NULL").bind(record.author).first();
   const writer = await identityState(env, record.author);
   const profile = note.people?.[record.author]?.profile;
-  const signed = !friend && profile && writer ? await checkProfile(profile, writer) : null;
-  const actor = friend ? String(friend.name) : signed?.name ?? "Someone";
+  const signed = profile && writer ? await checkProfile(profile, writer) : null;
+  const actor = await actorName(env.DB, record.author, { signed: new Map(signed ? [[record.author, signed.name]] : []), me: me.person });
   const photo = note.photo && ID_RE.test(note.photo.post ?? "") && Number.isSafeInteger(note.photo.index) && note.photo.index >= 1 && note.photo.index <= 20 ? note.photo : null;
   const target = photo ? `${photo.post}/photos/${photo.index}` : item;
   await env.DB.prepare(`INSERT OR IGNORE INTO mention_receipts (fp, connection_id, group_id, item, n, head, writer, state, created_at)
@@ -151,6 +153,9 @@ export async function checkGroupReceipts(env, from, group, only = null) {
     const thread = threads.get(item);
     if (thread.error) continue;
     const at = thread.entries.find((e) => e.n === Number(r.n));
+    // Not in what was read (it started after that point, from a checkpoint, or stopped at a problem, which says so
+    // itself): asked again later, rather than said to be hidden.
+    if (!at && (thread.problem || Number(r.n) < (thread.entries[0]?.n ?? Infinity))) continue;
     const state = at && at.fp === r.fp && at.head === r.head ? "ok" : "hidden";
     await db.prepare("UPDATE mention_receipts SET state = ?, checked_at = ? WHERE fp = ?").bind(state, now(), r.fp).run();
     if (state === "hidden") {
@@ -180,6 +185,9 @@ export async function checkReceipts(env, from, connection, only = null) {
     // The host away (or refusing the owner here: that's for its own notices): asked again later.
     if (thread.error) continue;
     const at = thread.entries.find((e) => e.n === Number(r.n));
+    // Not in what was read (it started after that point, from a checkpoint, or stopped at a problem, which says so
+    // itself): asked again later, rather than said to be hidden.
+    if (!at && (thread.problem || Number(r.n) < (thread.entries[0]?.n ?? Infinity))) continue;
     const state = at && at.fp === r.fp && at.head === r.head ? "ok" : "hidden";
     await db.prepare("UPDATE mention_receipts SET state = ?, checked_at = ? WHERE fp = ?").bind(state, now(), r.fp).run();
     if (state === "hidden") {

@@ -352,10 +352,15 @@ async function madeUp(origin, name) {
 }
 const fakes = [];
 for (const [i, name] of ["Pat Madeup", "Lee Madeup", "Sol Madeup", "Kit Madeup", "Ray Madeup"].entries()) fakes.push(await madeUp(`http://localhost:${8781 + i}`, name));
-// Their "sites": each answers with its identity, and takes whatever it's sent.
+// Their "sites": each answers with its identity, and takes whatever it's sent. How often each was asked for its identity.
+const identityAsked = fakes.map(() => 0);
+const slowIdentity = fakes.map(() => 0); // ms each takes to answer for its identity
 const standIns = fakes.map((f, i) => createServer((req, res) => {
   req.resume();
-  if (req.url === "/.well-known/afterwrd") res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ v: 2, chain: f.chain }));
+  if (req.url === "/.well-known/afterwrd") {
+    identityAsked[i]++;
+    setTimeout(() => res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ v: 2, chain: f.chain })), slowIdentity[i]);
+  }
   else res.writeHead(202, { "Content-Type": "application/json" }).end("{}");
 }).listen(8781 + i));
 
@@ -460,14 +465,37 @@ const claim = await fakes[0].call(`${G}/_join/${patToken}/accept`, { sent: claim
 check("a join signed with someone else's browser key isn't taken", claim.status >= 400, String(claim.status));
 check("…and the group's site still says that key is Ann's", sql(stateG, `SELECT person FROM known_delegations WHERE key = ${q(annKey)}`)[0]?.person === person(stateA));
 
+// --- how long a refused call takes says nothing ---------------------------------------------------------------------------
+
+// A call from Lee's address, as Lee, with a signature that doesn't check: the group's site may look Lee's identity up
+// again in case her key changed, but its answer doesn't wait for that, so it comes as fast as it would for a stranger.
+// (Lee's site is slow to say who she is here: an answer that waited would take 3 seconds.)
+sql(stateG, `UPDATE identities SET updated_at = 0 WHERE person = ${q(fakes[1].id)}`);
+const leeBefore = identityAsked[1];
+slowIdentity[1] = 3000;
+{
+  const url = `${G}/_group/records`;
+  const body = JSON.stringify({});
+  const headers = await signCall({ method: "POST", url, body, person: fakes[1].id, from: fakes[1].origin, privateKey: (await newKeyPair()).privateKey });
+  const started = Date.now();
+  const answer = await fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body });
+  const took = Date.now() - started;
+  check("a call that doesn't check is refused without waiting for the caller's identity to be looked up again", answer.status === 401 && took < 2000,
+    `${answer.status} in ${took} ms`);
+  check("…which it is, meanwhile", await waitFor(() => identityAsked[1] > leeBefore, 6000));
+  slowIdentity[1] = 0;
+}
+
 // --- someone else's identity, given by a site that isn't theirs -----------------------------------------------------------
 
 // Zed's identity is at another address; a site at 8786 hands it out as if it were its own, and calls the group as Zed.
 // The group's site fetches from 8786 to check the call, and must not learn Zed's identity from there.
 const zed = await madeUp("http://localhost:8791", "Zed Madeup");
 const MAL = "http://localhost:8786";
+const malHits = { n: 0 };
 const mal = createServer((req, res) => {
   req.resume();
+  if (req.url === "/.well-known/afterwrd") malHits.n++;
   if (req.url === "/.well-known/afterwrd") res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ v: 2, chain: zed.chain }));
   else res.writeHead(404).end();
 }).listen(8786);
@@ -479,6 +507,18 @@ for (const path of ["/_group/rejoin/point", "/_join/x/accept"]) {
   await fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body }).catch(() => null);
 }
 check("a site handing out someone else's identity as its own doesn't get it learnt", n(stateG, `identities WHERE person = ${q(zed.id)}`) === 0);
+// A "mention" sent to Ann's site by a stranger, about a post of her friend Bob's: nothing is fetched to check it, so the
+// stranger can't tell from it whom Ann knows.
+const malAsked = malHits.n;
+{
+  const item = "i".repeat(43);
+  const made = await zed.sign({ kind: "comment", host: person(stateB), item, seen: { n: 1, h: "h".repeat(43) }, prev: null, mentions: [person(stateA)] }, { text: "Hello" });
+  const url = `${A}/_p/mention`;
+  const body = JSON.stringify({ v: 2, kind: "receipt", host: person(stateB), item, sent: made.sent });
+  const headers = await signCall({ method: "POST", url, body, person: zed.id, from: MAL, privateKey: malKey.privateKey });
+  await fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body });
+}
+check("a mention from someone Ann's site doesn't know makes it fetch nothing", malHits.n === malAsked && n(stateA, `identities WHERE person = ${q(zed.id)}`) === 0);
 mal.close();
 
 // --- the end -----------------------------------------------------------------------------------------------------------------

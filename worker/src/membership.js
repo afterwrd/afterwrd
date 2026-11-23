@@ -30,7 +30,11 @@ import { handleGroupSites } from "./groupsites.js";
 import { handleGroupIdentity } from "./groupidentity.js";
 import { callFriend } from "./calls.js";
 import { joinPoint, joinSigned, membersPoint, relayGroupRecord, signedGroup, waitingPoint } from "./groupjoin.js";
-import { postSigned, relayToGroup } from "./groupcopies.js";
+import { checkRoles, postSigned, relayToGroup } from "./groupcopies.js";
+import { lookupsWith } from "./friendcopies.js";
+import { identityState } from "./identities.js";
+import { checkRecord } from "./records.js";
+import { checkHead, headOf } from "./lists.js";
 import { ownOrigin } from "./keys.js";
 import { messagePage } from "./views/pages.js";
 import { callSite, ownerName, siteOrigin } from "./sites.js";
@@ -332,13 +336,38 @@ const problem = (message, back, status = 400) =>
 
 // --- calls from groups' sites ------------------------------------------------------------------------------------------
 
+/**
+ * Whether `body` ({sent, entry: {n, fp, taken, prev}, receipt, roles, delegations}) shows this site's owner removed from
+ * `group`, or their request turned down: a `remove` of one of their joins, by the group's owner or an admin (with the
+ * owner's signed role for them), taken by the group at that point in its members list.
+ */
+async function removedForSure(env, group, body) {
+  try {
+    const host = String(group.identity);
+    const hostState = await identityState(env, host);
+    const owner = hostState?.current.owner ? String(hostState.current.owner) : null;
+    const entry = body?.entry;
+    if (!owner || hostState.frozen || !Number.isSafeInteger(entry?.n) || !Number.isSafeInteger(entry.taken) || typeof entry.prev !== "string") return false;
+    const got = await checkRecord(body.sent, { ...lookupsWith(env, body.delegations), at: entry.taken });
+    if (!got || got.record.kind !== "remove" || got.record.host !== host || got.record.item !== host || got.fp !== entry.fp) return false;
+    const mine = await env.DB.prepare("SELECT 1 FROM sent WHERE fp = ? AND item = ? AND kind = 'join'").bind(got.record.about, host).first();
+    if (!mine) return false;
+    if (got.record.author !== owner && !(await checkRoles(env, group, owner, body.roles, body.delegations)).has(got.record.author)) return false;
+    const head = await headOf({ host, list: host, prev: entry.prev, n: entry.n, fp: got.fp, taken: entry.taken });
+    const took = await checkHead(body.receipt, { hostingKey: hostState.current.hosting, host, list: host });
+    return Boolean(took && took.n === entry.n && took.head === head);
+  } catch { return false; }
+}
+
 export async function handleMember(request, env, url) {
   const route = `${request.method} ${url.pathname}`;
   const group = await signedGroup(request, env, url);
   if (!group?.joined_at) return json({ error: "Not a member." }, 401);
   if (route === "POST /_member/removed") {
     // A group this site made is only forgotten when its owner deletes it here, so its Worker is never lost track of.
-    if (!group.script) await forgetGroup(env.DB, group);
+    // Otherwise only on the signed removal itself, as the group took it: a group can't drop someone unseen (they'd
+    // stop checking what it shows of their words) without a removal everyone in it can see.
+    if (!group.script && (await removedForSure(env, group, await request.json().catch(() => ({}))))) await forgetGroup(env.DB, group);
     return json({ ok: true });
   }
   return json({ error: "Not found." }, 404);

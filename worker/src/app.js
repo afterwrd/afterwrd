@@ -6,6 +6,7 @@
 // groups the owner's in, which carry a key (membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
+import { withWork } from "./later.js";
 import { receiveNotes } from "./notes.js";
 import { receiveReceipt } from "./receipts.js";
 import { handleIdentity } from "./identities.js";
@@ -72,7 +73,7 @@ export const handle = (request, env, work) => measure(async () => {
   countRequest(); // today's usage (limits.js), for the busy-account warning
   let response;
   try {
-    response = await route(request, env, work);
+    response = await withWork(work, () => route(request, env, work));
   } catch (error) {
     // A site past its allowance here today (allowances.js): refused until the day ends, and told when that is.
     if (error instanceof OverAllowance) response = json({ error: error.message, ...error.more }, 429);

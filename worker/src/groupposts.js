@@ -218,7 +218,7 @@ async function memberItem(env, origin, row, member, entries = null) {
  * For each of `people` (admins who removed something or called it off), what shows they're an admin: the owner's
  * newest signed `role` record making them one, and the `join` it's about, both as the members list holds them.
  */
-async function roleProofs(env, self, people) {
+export async function roleProofs(env, self, people) {
   const wanted = new Set(people);
   const joins = new Map();
   const out = {};

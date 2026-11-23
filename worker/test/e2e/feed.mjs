@@ -426,10 +426,15 @@ const stolen = await signHere(ann, { kind: "comment" }, { text: "Not from Ann's 
 const annDelegation = sql(stateA, "SELECT bytes, proof FROM delegations ORDER BY expires_at DESC LIMIT 1")[0];
 check("…a comment signed with Ann's key but sent around her site is taken by Bob's", (await siteCall(stateA, A, `${B}/_p/records`,
   { sent: stolen.sent, delegation: { bytes: annDelegation.bytes, proof: JSON.parse(annDelegation.proof) } })).status === 200);
+// And one Bob's site only says is Ann's, with nothing signed: a made-up row in its index of who wrote what.
+const madeUpFp = "m".repeat(43);
+sql(stateB, `INSERT INTO authored (fp, author, list, n, taken) VALUES ('${madeUpFp}', '${annPerson}', '${bobPostId}', 1, ${Math.floor(Date.now() / 1000) - 3600})`);
 await new Promise((r) => setTimeout(r, (SENT_DAY + 1) * 1000));
 sql(stateA, `UPDATE connections SET items_checked_at = 0 WHERE identity = '${bobPerson}'`);
 check("Ann's site finds it at its next pull from Bob's", await roundUntil(() =>
   sql(stateA, `SELECT COUNT(*) AS n FROM notices WHERE kind = 'forged' AND fp = '${stolen.fp}'`)[0].n === 1));
+check("…but not the one Bob's site only says is hers, with nothing signed", sql(stateA, `SELECT COUNT(*) AS n FROM notices WHERE fp = '${madeUpFp}'`)[0].n === 0);
+sql(stateB, `DELETE FROM authored WHERE fp = '${madeUpFp}'`);
 await ann.goto(`${A}/`);
 check("…and Home says something was signed as her that her site didn't send", (await ann.$eval("main", (m) => m.innerText))
   .includes("Something signed as you appeared on Bob Example's post"));

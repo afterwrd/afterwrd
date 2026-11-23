@@ -9,7 +9,7 @@
 import { rateWindow } from "./limits.js";
 import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./threads.js";
 import { busyUntil, callFriend, friendPerson, switchConnection } from "./calls.js";
-import { answersAsAfterwrd, fetchIdentity, identityState, keepNewerProfile, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { answersAsAfterwrd, fetchIdentity, identityState, keepNewerProfile, learnPeopleIn, checkProfile, signersIn } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { checkReceipts, queueReceipts } from "./receipts.js";
 import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
@@ -404,21 +404,12 @@ export async function friendThread(env, from, connection, id) {
   // Everyone in it: their identities as their site passed them on (each checked as it's learnt), and their names.
   const names = new Map();
   const me = await ownHost(env);
-  const learn = async (people) => {
-    for (const [p, info] of Object.entries(people ?? {})) {
-      if (!ID_RE.test(p)) continue;
-      const chain = parseChain(info?.chain);
-      const state = chain && (await learnIdentity(env, chain));
-      if (!state || state.id !== p) continue;
-      const profile = info.profile && (await checkProfile(info.profile, state));
-      if (profile) {
-        names.set(p, profile.name);
-        // Kept, so pages elsewhere (a poll's voters, an event's guests) can name them too.
-        await keepNewerProfile(db, p, info.profile, profile.at);
-      }
-    }
+  // Only those who wrote something in it (identities.js learnPeopleIn); their names kept, so pages elsewhere (a poll's
+  // voters, an event's guests) can name them too.
+  const learn = async (answer) => {
+    for (const [p, name] of await learnPeopleIn(env, answer.people, signersIn(answer.entries))) names.set(p, name);
   };
-  await learn(data.people);
+  await learn(data);
   const hostState = await identityState(env, person);
   if (!hostState) return { error: "Their site's identity couldn't be checked." };
   const check = (entries, from, kept = null) => checkList({ host: person, hostingKey: hostState.current.hosting, list: id, owner: copy ? String(copy.author) : String(data.owner ?? person),
@@ -439,7 +430,7 @@ export async function friendThread(env, from, connection, id) {
       // Doesn't follow on from where this site got to: the whole conversation, as before, to show what it is now.
       data = await fetchList(0);
       if (data.error && !Array.isArray(data.entries)) return { error: data.error };
-      await learn(data.people);
+      await learn(data);
     }
   }
   if (!result) {
