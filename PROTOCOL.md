@@ -329,7 +329,7 @@ This is protocol version **2**. There is no version header and no negotiation. T
 
 - every signed byte string is prefixed `afterwrd <kind> 2\n` (section 3.2);
 - every signed or protocol JSON object carries `"v": 2`: identity documents, delegations, profiles, records, heads,
-  enrolments, move requests and notes, and also the reply of `/.well-known/afterwrd`. Readers refuse any other `v` in
+  move requests and notes, and also the reply of `/.well-known/afterwrd`. Readers refuse any other `v` in
   signed objects and notes; the `v` of that reply isn't read.
 
 `tag="afterwrd"` in a signed call names the application, not a version. `/_version` gives the Worker's build id, not
@@ -380,7 +380,6 @@ kinds (`KINDS`) are fixed:
 | `profile` | A signed profile, the owner's name (section 4) | A browser key |
 | `statements` | Making the WebAuthn challenge from a list of statements (section 3.6). Nothing is signed with it directly. | |
 | `recovery` | Deriving the recovery key from the recovery code (section 3.7). Nothing is signed with it. | |
-| `enrol` | A device link's enrolment (section 4): its fingerprint is a passkey statement | A passkey |
 | `request` | Not used. Reserved. | |
 | `audience` | The salted fingerprint of an invited audience (section 7). Never signed. | |
 | `move` | A move request (section 4): its fingerprint is a passkey statement | The new site's passkey |
@@ -472,7 +471,7 @@ Ed25519 is deterministic, so a second implementation must produce exactly these 
 ### 3.6 Passkeys and statements
 
 A passkey (WebAuthn) can't sign arbitrary bytes. It signs a challenge. afterwrd makes that challenge from a list of
-**statements**, each the `fingerprintOf` of something signed (an identity document, a delegation, an enrolment, a move
+**statements**, each the `fingerprintOf` of something signed (an identity document, a delegation, a move
 request), so that one prompt can sign several things at once. Anyone given the nonce and the list can check any one
 statement without the others' contents.
 
@@ -549,8 +548,6 @@ Which statements are signed together:
 | Signing in | this browser's delegation (`delegation`) |
 | A browser that can't sign yet | its delegation (`delegation`) |
 | Changing the identity | the next identity document (`identity`) |
-| Allowing a device link | the enrolment (`enrol`) |
-| Joining from a new device | the next identity document (`identity`), this browser's delegation (`delegation`) |
 | Agreeing to a move, on the new site | the move request (`move`) |
 | A group's identity | the group's identity document (`identity`), signed by its owner's passkey |
 
@@ -700,10 +697,7 @@ A proof is valid for every statement in its list, so one prompt can sign several
 **By the recovery key.** `sig` is `{recovery: signature}`: an Ed25519 signature (64 bytes, base64url) by the key in
 `recovery`, over `"afterwrd identity 2\n" + bytes` (section 3 `signAs("identity", …)`).
 
-**By a new device, with an enrolment.** `sig` is `{passkey: proof, enrolment: {statement, proof, signature}}`. Only
-for adding one passkey: see 4.9.
-
-Source: `src/identity.js` `checkPasskeyProof`, `checkEnrolment`; `public/static/signed.js` `statementsChallenge`, `checkAs`.
+Source: `src/identity.js` `checkPasskeyProof`; `public/static/signed.js` `statementsChallenge`, `checkAs`.
 
 ### 4.4 Reading a chain
 
@@ -723,7 +717,6 @@ Then the reader compares it with the document in effect (`before`) and classifie
 | Change | Signed by | Takes effect |
 |---|---|---|
 | Only adds passkeys, and/or replaces `hosting` | a passkey in `before` | at once ("fast") |
-| Adds exactly one passkey, and is otherwise fast | that new passkey, with an enrolment (4.9) | at once |
 | Anything else: removes or alters a passkey, a new `recovery`, a new `origin`, `closed` | a passkey in `before`, or the recovery key | 7 days after the reader first saw it ("slow") |
 | Anything at all | the recovery key | 7 days after the reader first saw it |
 
@@ -845,7 +838,6 @@ reference implementation makes these (all between the owner's browser and their 
 | `move` | new `origin`, `hosting` and `passkeys` (4.13) | a listed passkey | slow |
 | `devices` | `passkeys` replaced by those on the site now | the recovery key | slow |
 | `cancel` | `cancels` the pending document, content as before it | a listed passkey (not for a recovery-signed change) or the recovery key | at once |
-| join | adds the new device's passkey | that passkey, with an enrolment | fast |
 
 The next document copies `origin`, `passkeys`, `recovery` and `hosting` from the document in effect, then overrides
 the changed fields. The site refuses a new change while one is pending. It appends a document only if the chain still
@@ -884,40 +876,20 @@ make it sign, the owner still needs the recovery code (`devices`). Without the c
 Source: `public/static/signed.js` `newRecoveryCode`, `tidyRecoveryCode`, `recoveryKey`; `src/keys.js` `recoverStart`,
 `recoverFinish`.
 
-### 4.9 Adding a device: enrolment
+### 4.9 Adding a device
 
-A new device's passkey can sign straight away if a device that already signs vouches for it. Two signatures are needed:
-one from a current passkey, given when the device link is made, and one from the new passkey itself.
+A new device's passkey signs for the owner only once a passkey that already does says so. Nothing else can add one:
+a new passkey can't add itself, however it came to be on the site.
 
-1. On a device that signs, the owner makes a device link (a one-time token in its path). The token stands for an
-   Ed25519 key (`enrolKey(token)`: the private key's 32-byte seed is SHA-256 of `"afterwrd enrol 2\n" + token` in
-   UTF-8). One of the identity's passkeys signs an `enrol` statement naming the document in effect now and that key's
-   public half:
+1. On a device that signs, the owner makes a device link: a one-time link to make a passkey on the site.
+   The new device opens it and makes its passkey. That passkey can sign in to the site, but isn't in the identity yet.
+2. On the device that signs, the owner lets it: the `allow` change (4.7), one prompt, adds every passkey on the site
+   that isn't in the identity. It's fast, so it counts at once.
+3. On the new device, one prompt signs a delegation for its browser key (as for a browser that can't sign yet, 4.10).
 
-   ```json
-   {"v":2,"kind":"enrol","person":"5ZlwuPHaLz8_MkVydNmRkhkDh_ca2f9LOgW7ciEBP0w","prev":"<fingerprint of the document it follows>","key":"<the token's public key, base64url>"}
-   ```
+The link is never part of the identity, so whoever later finds a used link learns nothing that lets them sign.
 
-   The passkey signs its fingerprint, `fingerprintOf("enrol", bytes)`, as the only statement.
-2. The new device opens the link and makes its passkey. Then one prompt with the new passkey signs both the identity
-   document that adds it and the device's delegation, and the device's browser signs that document with the token's key.
-3. That document's `sig` is `{passkey: <the new passkey's proof>, enrolment: {statement, proof, signature}}`.
-   `statement` is the enrol bytes in base64url, `proof` the current passkey's proof of it, and `signature` the token
-   key's signature over the document (`signAs("identity", …)`). The token itself never leaves the new device's browser.
-
-A reader accepts it, at once, when (`checkEnrolment`): the statement is `v` 2, `kind` `"enrol"`, names this identity's
-id, and its `prev` is the new document's `prev`; a passkey in the document in effect signed the statement; `signature`
-is the statement's `key`'s signature of the new document; the new document adds exactly one passkey, whose `origin` is
-the document's own, and changes nothing else (the hosting key included); and that added passkey signed the new
-document. A group's chain never accepts an enrolment, and a document carrying `enrolment` is never accepted as an
-ordinary passkey-signed one.
-
-So an enrolment counts once, in one place: copying it into another document needs the token, which is never published.
-If the owner's identity changes between making the link and the new device joining, the enrolment no longer fits, and
-the new device is let sign from a device that already does instead.
-
-Source: `src/identity.js` `checkEnrolment`; `public/static/signed.js` `enrolKey`; `src/keys.js` `enrolStart`, `enrolFinish`,
-`joinStart`, `joinFinish`.
+Source: `src/keys.js` `changeStart` (`allow`), `signingNow`, `browserStart`, `browserFinish`; `src/views/pages.js` `joinPage`.
 
 ### 4.10 Browser keys and delegations
 
@@ -1072,7 +1044,7 @@ A group has no devices and no recovery code. Its documents have `owner` (the id 
 **Who signs.** Document 0, and any later document, is signed by one of the owner's passkeys, as the owner's identity
 had them when this reader first saw the group's document, or as it has them now. A later document may instead be
 signed by the owner's current recovery key. The rules for fast, slow, pending and cancel are as in 4.4, applied to
-the group's own documents. Enrolments are not accepted.
+the group's own documents.
 
 **Reading needs the owner.** A reader reads a group's chain with the owner's identity beside it, as that reader knows
 it. It refuses the group (no identity at all) if it does not know the owner, or the owner's identity is frozen or is

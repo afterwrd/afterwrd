@@ -62,6 +62,7 @@ import m0047 from "../migrations/0047_bringing_comments.sql";
 import m0048 from "../migrations/0048_bringing_groups.sql";
 import m0049 from "../migrations/0049_bringing_group_history.sql";
 import m0050 from "../migrations/0050_invited_lists.sql";
+import m0051 from "../migrations/0051_no_enrolment.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -116,6 +117,7 @@ const MIGRATIONS = [
   ["0048_bringing_groups.sql", m0048],
   ["0049_bringing_group_history.sql", m0049],
   ["0050_invited_lists.sql", m0050],
+  ["0051_no_enrolment.sql", m0051],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

@@ -10,7 +10,7 @@
 // - Checks never throw: anything malformed is simply "doesn't check".
 
 export const PROTOCOL = 2;
-export const KINDS = /** @type {const} */ (["record", "head", "delegation", "identity", "profile", "statements", "recovery", "enrol", "request", "audience", "move"]);
+export const KINDS = /** @type {const} */ (["record", "head", "delegation", "identity", "profile", "statements", "recovery", "request", "audience", "move"]);
 const ED25519 = { name: "Ed25519" };
 const enc = new TextEncoder();
 const dec = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
@@ -153,16 +153,6 @@ export async function recoveryKey(code) {
   const tidy = tidyRecoveryCode(code);
   if (!tidy) return null;
   return keyFromSeed(await sha256(tagged("recovery", utf8(tidy))));
-}
-
-/**
- * The key a device link's one-time token stands for. When the link is made, a passkey of the owner's signs an enrolment
- * naming its public key; the new device's browser, which has the token, signs the document adding itself with it. The
- * token itself is never published, so an enrolment can't be used again by anyone else.
- * @param {string} token @returns {Promise<{ privateKey: CryptoKey, publicKey: string }>}
- */
-export async function enrolKey(token) {
-  return keyFromSeed(await sha256(tagged("enrol", utf8(String(token)))));
 }
 
 /** An Ed25519 key pair from a 32-byte seed: the private half not extractable, the public as base64url. */

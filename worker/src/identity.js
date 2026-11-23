@@ -10,8 +10,8 @@
 // and `seq` (0, 1, 2…) and `prev` (the fingerprint of the one before; null for the first).
 //
 // A change takes effect:
-//   at once      if it only adds passkeys or replaces the hosting key, signed by a current passkey (or, for a new
-//                device, by that device's passkey with an enrolment a current passkey signed: see checkEnrolment)
+//   at once      if it only adds passkeys or replaces the hosting key, signed by a current passkey (a new device's
+//                passkey starts signing when a device that already signs lets it)
 //   after 7 days anything else (removing a passkey, a new recovery key, a new address, closing) or anything signed with
 //                the recovery key. The 7 days run from when the reader FIRST SAW the change, never from a time written
 //                in it, so backdating can't skip them. Meanwhile it's "pending", and a cancel (the document before it,
@@ -44,7 +44,7 @@ export const MAX_DOCUMENT = 4096;
 /** @typedef {{ id: string, key: string, origin: string }} Passkey */
 /** @typedef {{ v: 2, kind: "identity", seq: number, prev: string | null, origin: string, passkeys: Passkey[], recovery?: string, hosting: string, owner?: string, closed?: true, cancels?: string }} IdentityDoc */
 /** @typedef {{ credential: string, nonce: string, statements: string[], response: { authenticatorData: string, clientDataJSON: string, signature: string, userHandle?: string } }} PasskeyProof */
-/** @typedef {{ passkey?: PasskeyProof, recovery?: string, enrolment?: { statement: string, proof: PasskeyProof, token: string } }} Signature */
+/** @typedef {{ passkey?: PasskeyProof, recovery?: string }} Signature */
 /** @typedef {{ bytes: Uint8Array, sig: Signature }} SignedDoc */
 
 const isOrigin = (o) => {
@@ -120,30 +120,6 @@ async function signedByPasskeyOf(doc, proof, statement) {
   return passkey && (await checkPasskeyProof(proof, passkey, statement)) ? passkey : null;
 }
 
-/**
- * A new device's passkey added through a device link: a current passkey signed an enrolment ({kind: "enrol", person,
- * prev, key}) when the link was made, naming the document it follows and the key the link's one-time token stands for
- * (signed.js enrolKey). The document adding the new passkey is signed by that key (`signature`: only someone with the
- * link can) and by the new passkey. So nobody can add a passkey without both a current passkey's say-so and the link,
- * and an enrolment counts once, in one place: the token is never published.
- */
-async function checkEnrolment(person, before, after, bytes, sig, docFp) {
-  const e = sig.enrolment;
-  if (!e || typeof e.statement !== "string" || typeof e.signature !== "string") return false;
-  const statement = fromB64url(e.statement);
-  const enrol = statement && decode(statement);
-  if (!enrol || enrol.v !== 2 || enrol.kind !== "enrol" || enrol.person !== person || enrol.prev !== after.prev
-    || typeof enrol.key !== "string") return false;
-  if (!(await signedByPasskeyOf(before, e.proof, await fingerprintOf("enrol", statement)))) return false;
-  if (!(await checkAs("identity", enrol.key, bytes, e.signature))) return false;
-  // Exactly one passkey added, at the identity's own address, nothing else changed (not even the hosting key), and the
-  // new passkey is what signed the document.
-  const added = after.passkeys.filter((p) => !before.passkeys.some((b) => b.id === p.id));
-  if (added.length !== 1 || added[0].origin !== after.origin || classify(before, after) !== "fast"
-    || !sameKeys({ ...content(after), passkeys: null }, { ...content(before), passkeys: null })) return false;
-  return checkPasskeyProof(sig.passkey, added[0], docFp);
-}
-
 const sameKeys = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const content = (d) => ({ origin: d.origin, passkeys: d.passkeys, recovery: d.recovery ?? null, hosting: d.hosting, owner: d.owner ?? null, closed: d.closed ?? false });
 
@@ -207,7 +183,7 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     const before = state.current;
     const recoveryKey = group ? owner.current.recovery : before.recovery;
     const byRecovery = typeof sig?.recovery === "string" && (await checkAs("identity", recoveryKey, bytes, sig.recovery));
-    const byPasskey = !byRecovery && sig?.passkey && !sig.enrolment
+    const byPasskey = !byRecovery && sig?.passkey
       && (group ? await byOwnerPasskey(sig.passkey, fp) : await signedByPasskeyOf(before, sig.passkey, fp));
     if (state.pending) {
       // While a change waits, the only thing that counts is cancelling it: the document before it, again.
@@ -220,8 +196,7 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     }
     if (doc.cancels) { state.problem = "unexpected"; break; }
     const kind = classify(before, doc);
-    const enrolled = !group && !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, bytes, sig, fp));
-    if (!(byRecovery || byPasskey || enrolled)) { state.problem = "unsigned"; break; }
+    if (!(byRecovery || byPasskey)) { state.problem = "unsigned"; break; }
     // Adding passkeys (or a new hosting key) counts from when the document before it did: what those keys signed is the
     // owner's whenever a reader first meets it. Otherwise a reader who learnt the identity today (a new friend, a site
     // taking a move) would refuse yesterday's comment from the owner's second phone. Honest hosts' "taken at" times

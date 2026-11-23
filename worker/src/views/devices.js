@@ -30,7 +30,8 @@ export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = 
     if (pending?.added.includes(k.id)) return `, starts signing for you on ${day(pending.at)}`;
     return signs(k.id) ? ", signs for you" : ", can sign in, but can't sign for you yet";
   };
-  const letItSign = identity && thisSigns && !pending && passkeys.some((k) => !signs(k.id));
+  const canLet = Boolean(identity && thisSigns && !pending);
+  const notSigning = passkeys.filter((k) => !signs(k.id)).length;
   return `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -73,7 +74,7 @@ link here and open it on that device: it works once, for an hour, and gives owne
   ${passkeys.map((k, i) => `<li class="card" data-credential="${escape(k.id)}"><span><strong>Passkey ${i + 1}</strong>${k.id === thisCredential ? " (this device)" : ""}<span class="meta"> · added ${day(k.created_at)}${k.last_used_at ? `, last used ${day(k.last_used_at)}` : ""}${status(k)}</span></span>
     <button class="chip danger" data-action="delete-passkey" data-credential="${escape(k.id)}" ${passkeys.length === 1 ? 'disabled title="Your only passkey"' : ""}>Remove</button></li>`).join("")}
 </ul>
-${letItSign ? '<div class="row"><button class="chip primary" data-sign="allow">Let every passkey here sign for you</button></div>' : ""}
+${canLet ? `<div class="row" id="let-sign"${notSigning ? "" : " hidden"}><button class="chip primary" data-sign="allow">${notSigning > 1 ? "Let them sign for you" : "Let it sign for you"}</button></div>` : ""}
 <div class="row">
   ${openLinks ? `<button class="chip" data-action="cancel-links">Cancel ${openLinks} unused link${openLinks === 1 ? "" : "s"}</button>` : ""}
   ${sessions ? '<button class="chip" data-action="sign-out">Sign out everywhere</button>' : ""}
@@ -124,8 +125,8 @@ ${notifying.length ? `<ul class="devices" id="notifying">
       linkUrl.value = (await post("/_admin/devices/link")).link;
       document.getElementById("link").hidden = false;
       linkUrl.select();
-      // On a device that signs: one prompt allows the new device to sign straight away (the module below).
-      if (window.afterwrdSigning) document.getElementById("link-note").textContent = await window.afterwrdSigning.enrol(linkUrl.value);
+      // On a device that signs: once the new device has its passkey, it can be let sign from here (the module below).
+      if (window.afterwrdSigning) window.afterwrdSigning.watch();
     } catch (err) { error.textContent = err.message; }
   });
   const confirmations = {
@@ -155,12 +156,12 @@ ${notifying.length ? `<ul class="devices" id="notifying">
     share.addEventListener("click", () => navigator.share({ title: "Add a device to afterwrd", url: linkUrl.value }).catch(() => {}));
   }
 </script>
-${identity ? `<script type="application/json" id="signing-data">${JSON.stringify({ identity, thisSigns }).replace(/</g, "\\u003c")}</script>
+${identity ? `<script type="application/json" id="signing-data">${JSON.stringify({ identity, thisSigns, passkeys: passkeys.map((k) => k.id) }).replace(/</g, "\\u003c")}</script>
 <script type="module">
   // Changing the owner's identity (keys.js): a passkey that signs for them, or their recovery code, signs each change.
   import * as S from ${JSON.stringify(asset("/static/signed.js"))};
   import { passkeySigns } from ${JSON.stringify(asset("/static/passkey.js"))};
-  const { identity, thisSigns } = JSON.parse(document.getElementById("signing-data").textContent);
+  const { identity, thisSigns, passkeys } = JSON.parse(document.getElementById("signing-data").textContent);
   const error = document.getElementById("error");
   async function post(path, body) {
     const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -175,20 +176,23 @@ ${identity ? `<script type="application/json" id="signing-data">${JSON.stringify
   }
   const cancelled = (e) => e?.name === "NotAllowedError";
   window.afterwrdSigning = {
-    /** Lets the device a new link adds sign straight away; returns what to say under the link. */
-    async enrol(link) {
-      if (!thisSigns || identity.pending) return "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added.";
-      try {
-        const start = await post("/_admin/keys/enrol/start", { link });
-        // What the passkey allows is the key this link's token stands for, and nothing else.
-        const token = String(link).split("/_auth/device/")[1];
-        if (!token || S.decode(S.fromB64url(start.statement))?.key !== (await S.enrolKey(token)).publicKey) throw new Error("Something didn't match. Try again.");
-        const response = await passkeySigns(start.nonce, [await S.fingerprintOf("enrol", S.fromB64url(start.statement))], start.allow);
-        await post("/_admin/keys/enrol/finish", { link, statement: start.statement, response });
-        return "It can sign for you as soon as it's added.";
-      } catch (e) {
-        return cancelled(e) ? "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added." : e.message;
+    /** After making a link: waits for the new device's passkey, then offers to let it sign for the owner. */
+    watch() {
+      const note = document.getElementById("link-note");
+      if (!thisSigns || identity.pending) {
+        note.textContent = "Once it's added it can sign in. To let it sign for you, come back to Your devices on a device that does.";
+        return;
       }
+      note.textContent = "Once it has its passkey, it shows here, and you can let it sign for you.";
+      const until = Date.now() + 3600_000;
+      (async function poll() {
+        const now = await fetch("/_admin/keys/signing").then((r) => r.json()).catch(() => null);
+        const added = (now?.passkeys ?? []).filter((id) => !passkeys.includes(id) && !now.signing.includes(id));
+        if (added.length) {
+          note.textContent = "Your new device has its passkey. Let it sign for you, then press Continue on it.";
+          document.getElementById("let-sign").hidden = false;
+        } else if (Date.now() < until) setTimeout(poll, 3000);
+      })();
     },
     /** Before a passkey is removed from signing in: if it signs for the owner, it stops, after 7 days. */
     async removing(credential) {

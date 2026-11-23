@@ -120,16 +120,19 @@ await phone.click("#new-link");
 await phone.waitForSelector("#link:not([hidden])");
 const link = await phone.$eval("#link-url", (i) => i.value);
 check("Add a device shows a one-time link", /\/_auth\/device\/[\w-]{40,}$/.test(link), link.slice(0, 60) + "…");
-// On a device that signs, one prompt there lets the new device sign straight away (keys.js enrolment).
-await phone.waitForFunction(() => document.getElementById("link-note").textContent.trim(), { timeout: 15_000 });
-check("…and, on a device that signs, lets the new one sign straight away", (await phone.$eval("#link-note", (p) => p.textContent))
-  === "It can sign for you as soon as it's added.", await phone.$eval("#link-note", (p) => p.textContent));
+// On a device that signs, the page waits for the new device's passkey, then offers to let it sign (keys.js).
+check("…and, on a device that signs, says it'll show the new device here", (await phone.$eval("#link-note", (p) => p.textContent))
+  .startsWith("Once it has its passkey, it shows here"), await phone.$eval("#link-note", (p) => p.textContent));
 const laptop = await device();
 await laptop.goto(link);
 check("the link says it's adding a device", (await laptop.title()).startsWith("Add this device") && (await laptop.$eval("main, body", (m) => m.textContent)).includes("Add this phone or computer"));
 await Promise.all([laptop.waitForNavigation(), laptop.click("#go")]);
-check("after its passkey, the laptop is asked once more, to sign for the owner", new URL(laptop.url()).pathname === "/_admin/keys/join"
-  && !new URL(laptop.url()).hash);
+check("after its passkey, the laptop waits to be let sign for the owner", new URL(laptop.url()).pathname === "/_admin/keys/join"
+  && !(await laptop.$eval("#waiting", (p) => p.hidden)) && (await laptop.$eval("#ready", (d) => d.hidden)));
+await phone.waitForSelector("#let-sign:not([hidden])", { timeout: 15_000 });
+check("the phone sees the new device and offers to let it sign", (await phone.$eval("#let-sign button", (b) => b.textContent)) === "Let it sign for you");
+await Promise.all([phone.waitForNavigation({ timeout: 30_000 }), phone.click("#let-sign button")]);
+await laptop.waitForSelector("#ready:not([hidden])", { timeout: 15_000 });
 await Promise.all([laptop.waitForNavigation({ timeout: 30_000 }), laptop.click("#go")]);
 check("the laptop is signed in as the owner", (await navLabels(laptop)).includes("Your devices"), await navLabels(laptop));
 const docs = () => JSON.parse(sql("SELECT chain FROM own_identity")[0].chain).map((d) => JSON.parse(Buffer.from(d.bytes, "base64url").toString()));
@@ -165,18 +168,18 @@ await fetch(`${BASE}/_admin/devices/delete-passkey`, { method: "POST", headers: 
   "Content-Type": "application/json" }, body: JSON.stringify({ credential: spareKey }) });
 check("the laptop, no longer new, has nothing to hear", (await alerts(laptop)).length === 0);
 
-// Changing the owner's identity from Your devices (keys.js). A device added with a link made by API, without a prompt
-// from a device that signs, can sign in but not sign; "Let every passkey here sign for you" adds it, at once.
+// Changing the owner's identity from Your devices (keys.js). A device added with a link made by API signs in, and waits
+// to be let sign; "Let it sign for you" on a device that signs adds it, at once, even from a page loaded afterwards.
 const desk = await device();
 await register(desk, (await (await fromLaptop("/_admin/devices/link")).json()).link);
-check("a device added without a signing device's say-so signs in, but can't sign", new URL(desk.url()).pathname === "/"
+check("a device added without a signing device's say-so signs in, but can't sign", new URL(desk.url()).pathname === "/_admin/keys/join"
   && docs().length === 2 && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 2);
 const deskKey = sql("SELECT id FROM credentials ORDER BY rowid DESC LIMIT 1")[0].id;
 const statusOf = async (page, id) => { await page.goto(`${BASE}/_admin`); return page.$eval(`li[data-credential="${id}"] .meta`, (m) => m.textContent).catch(() => ""); };
 check("Your devices says so", (await statusOf(phone, deskKey)).includes("can't sign for you yet"), await statusOf(phone, deskKey));
 const reloaded = (page) => page.waitForNavigation({ timeout: 30_000 });
 await Promise.all([reloaded(phone), phone.click("button[data-sign=allow]")]);
-check("…and \"Let every passkey here sign for you\" adds it, at once", docs().length === 3 && docs()[2].passkeys.some((p) => p.id === deskKey)
+check("…and \"Let it sign for you\" adds it, at once", docs().length === 3 && docs()[2].passkeys.some((p) => p.id === deskKey)
   && (await statusOf(phone, deskKey)).includes("signs for you"));
 // Removing a passkey that signs: it stops signing in at once, and stops signing after 7 days, which Home says.
 await Promise.all([reloaded(phone), phone.click(`button[data-action=delete-passkey][data-credential="${deskKey}"]`)]);

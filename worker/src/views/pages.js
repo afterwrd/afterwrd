@@ -193,12 +193,11 @@ fingerprint or PIN. There's no password, and this link only works once.</p>
     const credential = await navigator.credentials.create({ publicKey: {
       ...options, challenge: dec(options.challenge), user: { ...options.user, id: dec(options.user.id) },
       excludeCredentials: ids(options.excludeCredentials) } });
-    const { first, enrol } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
+    const { first, signing: owned } = await post("/_auth/register/verify", { token, response: credentialJSON(credential) });
     // A site's first passkey: next, the recovery code and signing (keysPage), which then carries on as afterPasskey.
     if (first) return location.replace("/_admin/keys" + (fromSetup ? "#setup" : ""));
-    // A device the owner allowed to sign when they made the link: one more prompt adds it (joinPage). The token goes
-    // after the #, so it reaches that page but no server log.
-    if (enrol) return location.replace("/_admin/keys/join#" + token);
+    // The owner signs what they post: a device that already signs lets this one, then one more prompt here (joinPage).
+    if (owned) return location.replace("/_admin/keys/join");
     afterPasskey(false);
   });`);
 }
@@ -260,30 +259,39 @@ instead, and keep your recovery code, friends and posts.</p>`, `
 }
 
 /**
- * A new device joining the owner's identity (keys.js), straight after making its passkey from a link a signing device
- * allowed: one prompt signs the identity document adding this passkey, and this browser's key, together.
+ * A new device, straight after making its passkey from a device link (keys.js): a device that already signs for the owner
+ * lets it, from Your devices; this page waits for that, then one prompt lets this browser sign, as at sign-in.
  */
 export function joinPage() {
   return page("One more step", `
 <h1>One more step</h1>
-<p>Let this device sign for you, so what you post and comment from it is yours: one more face, fingerprint or PIN.</p>
+<p>So that what you post and comment from this device is yours: on a phone or computer that already signs for you, open
+Your devices and choose <b>Let it sign for you</b>.</p>
+<p id="waiting" class="small">Waiting for that…</p>
+<div id="ready" hidden>
+<p>Done there. Now one more face, fingerprint or PIN here.</p>
 <button id="go">Continue</button>
+</div>
 <p id="error" role="alert"></p>
 <p class="small"><a href="/">Not now</a> (it can still sign in; let it sign later from Your devices)</p>`, `
-  const token = location.hash.slice(1);
-  history.replaceState(null, "", "/_admin/keys/join");
+  const until = Date.now() + 3600_000;
+  (async function wait() {
+    const now = await fetch("/_admin/keys/signing").then((r) => r.json()).catch(() => null);
+    if (now?.thisSigns) {
+      document.getElementById("waiting").hidden = true;
+      document.getElementById("ready").hidden = false;
+    } else if (Date.now() < until) setTimeout(wait, 3000);
+  })();
   run(document.getElementById("go"), async () => {
     const [S, keys] = await signing();
     const key = await keys.newBrowserKey();
-    const start = await post("/_admin/keys/join/start", { browserKey: key.publicKey });
-    const doc = S.fromB64url(start.doc), delegation = S.fromB64url(start.delegation);
+    const start = await post("/_admin/keys/browser/start", { browserKey: key.publicKey });
+    const delegation = S.fromB64url(start.delegation);
     if (S.decode(delegation)?.key !== key.publicKey) throw new Error("Something didn't match. Try again.");
-    const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("identity", doc), await S.fingerprintOf("delegation", delegation)]);
+    const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("delegation", delegation)]);
     const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
       allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
-    // The link's token stays here: what goes back is the document signed with the key it stands for.
-    const signature = await S.signAs("identity", (await S.enrolKey(token)).privateKey, doc);
-    const done = await post("/_admin/keys/join/finish", { doc: start.doc, delegation: start.delegation, signature, response: credentialJSON(credential) });
+    const done = await post("/_admin/keys/browser/finish", { delegation: start.delegation, response: credentialJSON(credential) });
     await keys.keyAllowed(key, done.person, done.expires);
     afterPasskey(false);
   });`);
