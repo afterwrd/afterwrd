@@ -10,7 +10,9 @@
 //   - `brought` remembers which item it became, so old links lead there, and the comments made on it before can follow
 //     (10c);
 //   - if anyone commented on it, it takes nothing new until those comments are in (items.before_until: hosted.js), at
-//     most 30 days after the update, so they go into its list first, in the order they were written.
+//     most 30 days after signing was set up here, so they go into its list first, in the order they were written.
+//   - one brought over after those 30 days (it waited, or failed to sign) comes with the owner's own comments on it and
+//     nobody else's, which go (10f): it takes nothing new for a day while this browser signs those.
 // No notes go out for it (it isn't new), except an upcoming event's invitations. An upcoming event waits until everyone
 // it's for has moved to afterwrd 2 (their identity is known here), or the 30 days are up, then goes with those who have.
 //
@@ -23,7 +25,9 @@
 //     doesn't is theirs no longer ('declined'). Their browser signs each, and their site sends them here.
 // Once none of an item's is waiting, or the 30 days are up, they go into its list in the order they were first written,
 // each taken at the time it came (so its delegation checks), and the item takes new records again (build). What never
-// came is dropped. Votes and event answers aren't carried. Nobody is notified about any of it.
+// came is dropped. Votes and event answers aren't carried. Nobody is notified about any of it. After the 30 days this
+// site answers a friend's POST /_p/before with 410, and the friend's site drops its copies of what it said here (10f).
+// Whatever's left from before then is cleared out (clearout.js).
 //
 //   GET  /_admin/before            -> {next: {old, before, photos, post, mentions, guests} | null, comments: {to, item,
 //                                     host, seen, prev, list: [{id, before, text}]} | null, left, waiting}
@@ -54,15 +58,20 @@ import { fingerprintOf } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 
 const WINDOW_SECONDS = 30 * 86400;
+const LATE_FREEZE = 86400; // a post brought over after the 30 days waits this long, at most, for the owner's own comments
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
 
 /** How long everything has to come over in: 30 days, or less on a local test site (TEST_BEFORE_SECONDS). */
 export const windowOf = (env) => (env.ALLOW_LOCAL_SITES && Number(env.TEST_BEFORE_SECONDS) > 0 ? Number(env.TEST_BEFORE_SECONDS) : WINDOW_SECONDS);
 
-/** When the 30 days after the update to afterwrd 2 end (migration 0046 noted when it came). */
+/**
+ * When the 30 days to bring things over end: 30 days after signing was set up here (10f, Ste 23 Nov), since until then
+ * the site can't reach anyone or sign anything; or after the update (migration 0046 noted when it came), if that's later.
+ */
 export async function broughtUntil(env) {
-  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'crossover_at'").first();
-  return (Number(row?.value) || now()) + windowOf(env);
+  const row = await env.DB.prepare(`SELECT MAX(COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'crossover_at'), 0),
+    COALESCE((SELECT created_at FROM own_identity WHERE id = 1), 0)) AS at`).first();
+  return (Number(row?.at) || now()) + windowOf(env);
 }
 
 /** How many of the owner's posts from before are still to come over (for Home's line). */
@@ -181,15 +190,20 @@ export async function handleBefore(request, env, url) {
   const photos = photosSent.map(sentRecord);
   const wrong = await mismatch(env, host, prepared, post, photos, body);
   if (typeof wrong === "string") return json({ error: wrong }, 400);
+  // After the 30 days (10f): the owner's own comments on it still come, signed by this browser straight after, so it
+  // takes nothing new for a day while they do; nobody else's can come now.
+  const late = now() >= until;
   let made;
   try {
     made = await takePost(env, host, { sent: body.sent, post, photosSent, photos, guests: wrong.guests },
-      { bringing: true, media: prepared.media, frozen: now() < until ? until : null });
+      { bringing: true, media: prepared.media, frozen: late ? now() + LATE_FREEZE : until });
   } catch (error) {
     return json({ error: error.message }, 400);
   }
   const db = env.DB;
   const at = now();
+  const items = JSON.stringify([made.id, ...made.photos]);
+  const others = `SELECT c.id FROM comments c JOIN brought b ON b.old = c.target WHERE b.item IN (SELECT value FROM json_each(?1)) AND c.origin != 'site'`;
   await db.batch([
     db.prepare("INSERT OR REPLACE INTO brought (old, item, at) VALUES (?, ?, ?)").bind(prepared.old, made.id, at),
     // A photo's comments on afterwrd 1 were kept by its fingerprint, and its page showed the first one posted: the same
@@ -199,12 +213,15 @@ export async function handleBefore(request, env, url) {
     ...["polls", "poll_votes", "events", "event_answers", "post_audience", "post_versions"]
       .map((t) => db.prepare(`DELETE FROM ${t} WHERE post_id = ?`).bind(prepared.id)),
     db.prepare("DELETE FROM posts WHERE id = ?").bind(prepared.id),
+    // Late, nobody else's comments on it can come now: they go first (10f).
+    ...(late ? [db.prepare(`DELETE FROM comment_versions WHERE comment_id IN (${others})`).bind(items),
+      db.prepare(`DELETE FROM comments WHERE id IN (${others})`).bind(items)] : []),
     // The comments made on it before, or on its photos, wait here for their writers to sign them (10c); an item nobody
     // commented on takes new records at once.
     db.prepare(`INSERT OR IGNORE INTO before_comments (id, item, origin, at) SELECT c.id, b.item, c.origin, c.created_at
-      FROM comments c JOIN brought b ON b.old = c.target WHERE b.item IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify([made.id, ...made.photos])),
+      FROM comments c JOIN brought b ON b.old = c.target WHERE b.item IN (SELECT value FROM json_each(?1))`).bind(items),
     db.prepare(`UPDATE items SET before_until = NULL WHERE id IN (SELECT value FROM json_each(?1))
-      AND NOT EXISTS (SELECT 1 FROM before_comments b WHERE b.item = items.id)`).bind(JSON.stringify([made.id, ...made.photos])),
+      AND NOT EXISTS (SELECT 1 FROM before_comments b WHERE b.item = items.id)`).bind(items),
   ]);
   // An event still to come: its guests are invited again, as afterwrd 2 invites them. Nothing else is new.
   if (post.content.type === "event" && finishedAt(post.content.event) > at && !post.content.event.cancelled) await queueItemNote(env, url.origin, made.id);
@@ -295,7 +312,11 @@ async function askHosts(env, from) {
     let data;
     try {
       data = await callFriend(env, from, String(site.origin), "/_p/before", { body: { ask: asked.map((r) => Number(r.remote_id)), all: rows.length <= MAX_ASK } });
-    } catch { continue; } // still on afterwrd 1, or away: asked again in an hour
+    } catch (error) {
+      // Its 30 days are over (10f): nothing more can come over there.
+      if (error?.status === 410) await db.batch(elsewhereGone(db, Number(site.id)));
+      continue; // otherwise still on afterwrd 1, or away: asked again in an hour
+    }
     const answers = new Map((Array.isArray(data?.answers) ? data.answers : []).map((a) => [Number(a?.id), a]));
     const statements = [];
     for (const r of asked) {
@@ -312,6 +333,12 @@ async function askHosts(env, from) {
     if (statements.length) await db.batch(statements);
   }
 }
+
+/** The owner's copies of what they said on a friend's site before (by connection), gone. */
+export const elsewhereGone = (db, connection) => [
+  db.prepare("DELETE FROM comments_elsewhere_versions WHERE comment_id IN (SELECT id FROM comments_elsewhere WHERE connection_id = ?)").bind(connection),
+  db.prepare("DELETE FROM comments_elsewhere WHERE connection_id = ?").bind(connection),
+];
 
 /** What's wrong with a set of signed comments for an item (in order, `rows` the old ones they're for), or null. */
 export async function commentsTrouble(env, { rows, records, author, host, item, seen, prev, texts }) {
@@ -404,6 +431,8 @@ export async function answerBefore(env, caller, body) {
   const db = env.DB;
   const host = await ownHost(env);
   if (!host) return json({ error: "Not found." }, 404);
+  // Its 30 days are over (10f): the caller's site drops its copies.
+  if (now() >= (await broughtUntil(env))) return json({ error: "It's too late to bring anything from before afterwrd 2 over here." }, 410);
   const origin = String(caller.connection.origin);
   // Someone the owner's blocked: what they wrote before doesn't come over, with no more said than "gone".
   const blocked = await isBlocked(db, caller.person);

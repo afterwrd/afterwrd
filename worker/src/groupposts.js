@@ -36,7 +36,8 @@ import { checkProfile, identityState } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
 import { dateOver, ID_RE, itemGone, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord } from "./items.js";
 import { ownIdentity } from "./keys.js";
-import { buildDue, buildIfDue } from "./before.js";
+import { buildIfDue } from "./before.js";
+import { tidyBefore } from "./clearout.js";
 import { rateWindow } from "./limits.js";
 import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
@@ -123,7 +124,7 @@ export async function handleGroupItems(request, env, url) {
       const row = await db.prepare("SELECT item FROM brought WHERE old = ?").bind(`gpost-${Number(url.searchParams.get("old"))}`).first();
       return row ? json({ v: 2, id: String(row.item) }) : json({ error: "That post isn't there any more." }, 404);
     }
-    await buildDue(env, brought);
+    await tidyBefore(env, brought); // …and once the group's 30 days are up, the rest from before goes (clearout.js)
     const before = Number(url.searchParams.get("before") ?? 0) || 0;
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
     // ?id=: one post, as the others come (a member opening one older than their site keeps).

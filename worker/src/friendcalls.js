@@ -44,7 +44,8 @@ export async function handleFriendCalls(request, env, url) {
   const body = bodyJson(bytes);
 
   if (route === "POST /_p/disconnect") {
-    // The owner's copies of what they said on that site (sent, and comments_elsewhere from before signing) stay: they're theirs.
+    // The owner's copies of what they said on that site stay: they're theirs (sent; and comments_elsewhere from before
+    // signing, until the clear-out after the 30 days to bring things over: clearout.js).
     await db.batch([
       ...friendGone(db, peer.id), // first: it reads who they were
       db.prepare("DELETE FROM connections WHERE id = ?").bind(peer.id),

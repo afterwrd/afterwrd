@@ -27,7 +27,8 @@ import { fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { noticeOwn } from "./notes.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
-import { answerBefore, buildDue, buildIfDue } from "./before.js";
+import { answerBefore, buildIfDue } from "./before.js";
+import { tidyBefore } from "./clearout.js";
 
 const PAGE = 50;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -135,8 +136,9 @@ export async function handleFriendItems(request, env, url, work) {
   const db = env.DB;
   if (request.method === "GET" && url.pathname === "/_p/items") {
     const since = Number(url.searchParams.get("since") ?? 0) || 0;
-    // Posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in first (before.js).
-    await buildDue(env);
+    // Posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in first (before.js), and
+    // once the site's are, what's left from before is cleared out (clearout.js).
+    await tidyBefore(env);
     const { results } = await db.prepare(`SELECT i.*, l.n AS list_n, l.head AS list_head FROM items i JOIN lists l ON l.id = i.id
       WHERE i.type = 'post' AND i.changed_at > ?2 AND ${SEES()} ORDER BY i.changed_at LIMIT ?3`).bind(caller.connection.id, since, PAGE + 1).all();
     const more = results.length > PAGE;

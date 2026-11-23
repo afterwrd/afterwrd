@@ -7,9 +7,12 @@
 // called off and a second post, Cat a post, with comments both ways. After, each writer's browser signs their own from
 // their own copy: posts come back dated as written, then the comments on them, in order. Bob's second post, changed on
 // the group's site, stays behind; Cat's copy is gone, so nothing of hers comes, and once the group's 30 days are up
-// Ann's photo opens with the comments that came.
+// Ann's photo opens with the comments that came. Then (step 10f) the group's site clears out what's left from before:
+// Cat's post and its photo's file, and the members it had; not Ann's photo, nor where old posts went.
 //   node crossover.mjs before|after <A state> <B state> <C state> <G state>
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
 import { setUpSigning, siteCall, siteSql as sql } from "./helpers.mjs";
@@ -21,6 +24,7 @@ const SAVED = `${OUT}/crossover-state.json`;
 const CODE = "local-test-setup-code";
 const GROUP_KEY = "local-test-group-key";
 const PHOTO = fileURLToPath(new URL("./fixtures/photos/photo1.jpg", import.meta.url));
+const CAT_PHOTO = fileURLToPath(new URL("./fixtures/photos/big.jpg", import.meta.url));
 const AUTHENTICATOR = { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true };
 const results = [];
 const check = (name, ok, extra = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  [${stage}] ${name}${extra ? `  (${extra})` : ""}`); };
@@ -55,6 +59,17 @@ const form = (page, path, fields) => page.evaluate(async (p, f) => {
   for (const [k, v] of Object.entries(f)) data.append(k, v);
   return (await fetch(p, { method: "POST", body: data })).status;
 }, path, fields);
+/** Whether a site's media store (its objects' SQLite files) has a file. */
+const hasFile = (state, hash) => {
+  const dir = join(state, "v3", "do");
+  return existsSync(dir) && readdirSync(dir).filter((f) => f.endsWith("-MediaStore")).some((folder) =>
+    readdirSync(join(dir, folder)).filter((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite").some((name) => {
+      const db = new DatabaseSync(join(dir, folder, name), { readOnly: true });
+      try {
+        return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'files'").get() && db.prepare("SELECT 1 FROM files WHERE hash = ?").get(hash));
+      } finally { db.close(); }
+    }));
+};
 const day = (days) => new Date(Date.now() + days * 86400_000).toISOString().slice(0, 10);
 
 if (stage === "before") {
@@ -108,16 +123,19 @@ if (stage === "before") {
   await form(bob, `/_groups/${groupHere[B]}/events/${eventPost}/cancel`, { date: d1, back: `/groups/${groupHere[B]}` });
   await post(bob, `/_groups/${groupHere[B]}/posts`, { text: "A second thought" });
   const bobSecond = lastPost();
-  await post(cat, `/_groups/${groupHere[C]}/posts`, { text: "My pick" });
+  await cat.goto(`${C}/groups/${groupHere[C]}`);
+  await cat.type("#composer textarea", "My pick");
+  await (await cat.$("#composer input[type=file]")).uploadFile(CAT_PHOTO);
+  await Promise.all([cat.waitForNavigation({ timeout: 60_000 }), cat.click("#composer button.post")]);
   const catPost = lastPost();
   for (const [page, site, n, text] of [[ann, A, photoPost, "Lovely cover"], [bob, B, photoPost, "Agreed"], [cat, C, photoPost, "Me too"],
     [ann, A, eventPost, "See you there"], [bob, B, catPost, "Good choice"]]) {
     await form(page, `/_groups/${groupHere[site]}/comments`, { post: String(n), text, back: `/groups/${groupHere[site]}` });
   }
-  const history = { photoPost, pollPost, eventPost, bobSecond, catPost, d1, posts: sql(stateG, "SELECT id, created_at FROM group_posts"),
+  const history = { photoPost, pollPost, eventPost, bobSecond, catPost, d1, catHash: sql(stateG, `SELECT hash FROM group_photos WHERE post_id = ${catPost}`)[0]?.hash ?? null, posts: sql(stateG, "SELECT id, created_at FROM group_posts"),
     closedAt: sql(stateG, `SELECT closed_at FROM group_polls WHERE post_id = ${pollPost}`)[0]?.closed_at ?? null };
-  check("…with posts, a photo, a poll closed by hand, an event with a date called off, and comments both ways",
-    history.posts.length === 5 && sql(stateG, "SELECT COUNT(*) AS n FROM group_comments")[0].n === 5 && sql(stateG, "SELECT COUNT(*) AS n FROM group_photos")[0].n === 1
+  check("…with posts, photos, a poll closed by hand, an event with a date called off, and comments both ways",
+    history.posts.length === 5 && sql(stateG, "SELECT COUNT(*) AS n FROM group_comments")[0].n === 5 && sql(stateG, "SELECT COUNT(*) AS n FROM group_photos")[0].n === 2
     && history.closedAt > 0 && sql(stateG, `SELECT date FROM group_event_skips WHERE post_id = ${eventPost}`)[0]?.date === d1
     && sql(stateA, "SELECT COUNT(*) AS n FROM group_mine")[0].n === 4 && sql(stateB, "SELECT COUNT(*) AS n FROM group_mine")[0].n === 4,
   JSON.stringify({ posts: history.posts.length, mineA: sql(stateA, "SELECT kind, remote_id FROM group_mine"), mineB: sql(stateB, "SELECT kind, remote_id FROM group_mine") }));
@@ -234,7 +252,7 @@ if (stage === "before") {
   const photoItem = broughtAs(h.photoPost);
   const photoContent = JSON.parse(itemRow(photoItem).content);
   check("…her photo an item of its own, its file kept", photoContent.photos?.length === 1 && Boolean(photoContent.photos[0].item)
-    && sql(stateG, `SELECT 1 FROM media WHERE item_id = '${photoContent.photos[0].item}'`).length === 1 && !sql(stateG, "SELECT 1 FROM group_photos").length);
+    && sql(stateG, `SELECT 1 FROM media WHERE item_id = '${photoContent.photos[0].item}'`).length === 1 && !sql(stateG, `SELECT 1 FROM group_photos WHERE post_id = ${h.photoPost}`).length);
   const poll = JSON.parse(itemRow(broughtAs(h.pollPost)).content).poll;
   check("…her poll closed when she closed it, with nothing waiting on it", poll?.closes_at === Math.max(h.closedAt, writtenThen(h.pollPost) + 1) && itemRow(broughtAs(h.pollPost)).before_until === null,
     JSON.stringify(poll));
@@ -272,8 +290,20 @@ if (stage === "before") {
   check("Bob's comment on Cat's post, which never came, is left behind too", await waitFor(() => !sql(stateB, "SELECT 1 FROM group_mine").length),
     JSON.stringify(sql(stateB, "SELECT kind, remote_id, item FROM group_mine")));
   // Bob's changed post: his site said it isn't his (his copy doesn't have it as it is there), so it's gone from there.
-  check("Cat's post, never brought over, stays in the group's old rows for the clear-out; Bob's changed one is gone",
-    sql(stateG, "SELECT id FROM group_posts ORDER BY id").map((r) => r.id).join() === String(h.catPost));
+  check("Bob's changed post is gone from the group's old rows", !sql(stateG, `SELECT 1 FROM group_posts WHERE id = ${h.bobSecond}`).length);
+
+  // --- the clear-out (step 10f): the group's 30 days are up, so at a member's next pull what's left from before goes ---
+  const annPhoto = photoContent.photos[0];
+  await bob.goto(`${B}/groups/${saved[B].group}`);
+  check("the group's site clears out what's left from before", await waitFor(() => Boolean(sql(stateG, "SELECT value FROM settings WHERE key = 'before_cleared_at'")[0])));
+  const left = sql(stateG, `SELECT (SELECT COUNT(*) FROM group_posts) + (SELECT COUNT(*) FROM group_comments) + (SELECT COUNT(*) FROM group_photos)
+    + (SELECT COUNT(*) FROM group_polls) + (SELECT COUNT(*) FROM group_events) + (SELECT COUNT(*) FROM group_event_skips)
+    + (SELECT COUNT(*) FROM group_members_before) + (SELECT COUNT(*) FROM before_comments) AS n`)[0].n;
+  check("…Cat's post never brought over, its comment, and the members it had", left === 0);
+  check("…and her photo's file, which no signed post uses", Boolean(h.catHash) && !hasFile(stateG, h.catHash), h.catHash);
+  check("…but not Ann's photo, brought over", hasFile(stateG, annPhoto.hash) && sql(stateG, `SELECT 1 FROM media WHERE item_id = '${annPhoto.item}'`).length === 1);
+  await bob.goto(`${B}/groups/${saved[B].group}/posts/${h.pollPost}`);
+  check("…nor where old posts went: an old link still leads to its post", bob.url().endsWith(`/posts/${broughtAs(h.pollPost)}`), bob.url());
 }
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();

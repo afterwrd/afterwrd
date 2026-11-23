@@ -180,10 +180,12 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       ? html`<p class="notice">Couldn't reach ${unreachable.length} friends' sites lately, so their newest posts may be missing.</p>`
       : unreachable.map((c) => html`<p class="notice">Couldn't reach ${c.name}'s site lately, so their newest posts may be missing.</p>`)}
     ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
-    ${(bringOver?.posts > 0 || bringOver?.comments > 0 || bringOver?.groups > 0) && html`<p class="notice" id="bring-over">${bringOver.posts > 0
+    ${(bringOver?.posts > 0 || bringOver?.comments > 0 || bringOver?.groups > 0) && html`<p class="notice"><span id="bring-over">${bringOver.posts > 0
       ? `Bringing your ${bringOver.posts === 1 ? "post" : `${bringOver.posts} posts`} from before afterwrd 2 over, signed on this device…`
       : bringOver.comments > 0 ? "Bringing the comments you wrote before afterwrd 2 over, signed on this device…"
-      : "Bringing your groups from before afterwrd 2 over…"}</p>
+      : "Bringing your groups from before afterwrd 2 over…"}</span>${(bringOver.posts > 0 || bringOver.comments > 0) && bringOver.until
+      && html` <span class="bring-until">Comments from before that haven't come over by ${fmtDate(bringOver.until)} are left behind:
+      Download everything keeps a copy until then.</span>`}</p>
       <script type="module" src="${asset("/static/ui/bringover.js")}"></script>`}
     ${(bringOver?.owned ?? []).map((g) => html`<p class="notice bring-group">${g.name} is from before afterwrd 2.
       <a href="/groups/${g.id}">Bring it over</a>, so its members can carry on there.</p>`)}

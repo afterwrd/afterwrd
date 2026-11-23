@@ -524,6 +524,51 @@ await ann.goto(`${A}/friend/${bobConnection}/posts/${broughtId}`);
 const shownOld = await ann.$$eval("main .thread .comment .said", (l) => l.map((c) => c.textContent));
 check("on her page, both comments from before, and the box to add one", shownOld.join("|") === "Said before signing|Bob said before"
   && Boolean(await ann.$("main .thread form.say")) && !(await ann.$("main .thread .frozen")), shownOld.join("|"));
+// Step 10f: the 30 days start when signing was set up, not at the update: a site updated long ago still takes things.
+const bobSetUp = sql(stateB, "SELECT created_at FROM own_identity")[0].created_at;
+const bobCrossover = sql(stateB, "SELECT value FROM settings WHERE key = 'crossover_at'")[0].value;
+sql(stateB, "UPDATE settings SET value = '1' WHERE key = 'crossover_at'");
+check("a site updated long ago takes things from before for 30 days from when signing was set up",
+  (await fromAnn("/_p/before", { ask: [], all: false })).status === 200);
+// …and once those are up too, it says so, and a friend's site drops its copies of what it said there.
+sql(stateB, "UPDATE own_identity SET created_at = 1");
+check("…after which it says it's too late", (await fromAnn("/_p/before", { ask: [], all: false })).status === 410);
+sql(stateA, `INSERT INTO comments_elsewhere (connection_id, site, remote_id, target, text, created_at) VALUES (${bobConnection}, '${B}', 987654, 'post-1-00000001', 'Too late to bring', ${oldAt})`);
+await ann.goto(`${A}/`);
+check("Ann's site, told it's too late, drops its copy", await waitFor(() => sql(stateA, "SELECT COUNT(*) AS n FROM comments_elsewhere")[0].n === 0, 20_000));
+// A post of Bob's from before still here then (as if it had failed to sign until now), with his own comment on it and
+// Ann's; a comment on a photo that was only ever in an album; and Bob's copy of something he said on the site of someone
+// who isn't his friend any more.
+const lateAt = oldAt - 3600;
+const lateKey = `post-${lateAt}-0badcafe`;
+sql(stateB, `INSERT INTO posts (key, source, created_at, text, audience) VALUES ('${lateKey}', 'afterwrd', ${lateAt}, 'Brought over late', 'friends')`);
+sql(stateB, `INSERT INTO comments (target, author_id, author_name, text, created_at, origin) VALUES ('${lateKey}', (SELECT id FROM users LIMIT 1), 'Bob Example', 'Bob late reply', ${lateAt + 60}, 'site')`);
+sql(stateB, `INSERT INTO comments (target, author_name, text, created_at, origin) VALUES ('${lateKey}', 'Ann Example', 'Ann late reply', ${lateAt + 30}, '${A}')`);
+sql(stateB, `INSERT INTO comments (target, author_name, text, created_at, origin) VALUES ('photo-${"ab".repeat(32)}', 'Ann Example', 'On an album photo', ${lateAt}, '${A}')`);
+sql(stateB, `INSERT INTO comments_elsewhere (connection_id, site, remote_id, target, text, created_at) VALUES (999999, 'https://gone.example', 5, 'post-1-00000002', 'Said to someone gone', ${lateAt})`);
+const archived = () => sql(stateB, `SELECT (SELECT COUNT(*) FROM facebook_comments) AS c, (SELECT COUNT(*) FROM posts WHERE source = 'facebook') AS p,
+  (SELECT COUNT(*) FROM albums) AS a, (SELECT COUNT(*) FROM brought WHERE old != '${lateKey}') AS b`)[0];
+const archivedBefore = archived();
+await bob.goto(`${B}/`);
+const lateId = () => sql(stateB, `SELECT item FROM brought WHERE old = '${lateKey}'`)[0]?.item;
+check("Bob's post from before comes over late, with his own comment, signed by his browser", await waitFor(() => Boolean(lateId())
+  && sql(stateB, `SELECT before_until FROM items WHERE id = '${lateId()}'`)[0]?.before_until === null, 20_000),
+  JSON.stringify(sql(stateB, "SELECT id, item, origin, state FROM before_comments")));
+const lateThread = sql(stateB, `SELECT entries FROM list_pages WHERE list = '${lateId()}' ORDER BY page`).flatMap((p) => JSON.parse(p.entries))
+  .map((e) => e.sent?.content && JSON.parse(Buffer.from(e.sent.content, "base64url").toString()).text);
+check("…and not Ann's, which can't come now", lateThread.length === 2 && lateThread[1] === "Bob late reply", JSON.stringify(lateThread));
+check("Bob's site clears out what's left from before", await waitFor(() => Boolean(sql(stateB, "SELECT value FROM settings WHERE key = 'before_cleared_at'")[0]), 20_000));
+check("…every comment from before, the album photo's too, and his copy for someone who isn't his friend",
+  sql(stateB, "SELECT COUNT(*) AS n FROM comments")[0].n === 0 && sql(stateB, "SELECT COUNT(*) AS n FROM comment_versions")[0].n === 0
+  && sql(stateB, "SELECT COUNT(*) AS n FROM before_comments")[0].n === 0 && sql(stateB, "SELECT COUNT(*) AS n FROM comments_elsewhere")[0].n === 0,
+  JSON.stringify(sql(stateB, "SELECT target, text FROM comments")));
+check("…but not his Facebook archive, his albums, or where old posts went", JSON.stringify(archived()) === JSON.stringify(archivedBefore),
+  JSON.stringify([archivedBefore, archived()]));
+await bob.goto(`${B}/posts/${oldKey}`);
+check("…so an old link still leads to its post", new URL(bob.url()).pathname === `/posts/${broughtId}`, bob.url());
+// Back as it was, for what follows.
+sql(stateB, `UPDATE own_identity SET created_at = ${bobSetUp}`);
+sql(stateB, `UPDATE settings SET value = '${bobCrossover}' WHERE key = 'crossover_at'`);
 // With his Facebook photos not shared, a photo from them can't be seen, even by fingerprint.
 const sharedBefore = sql(stateB, "SELECT value FROM settings WHERE key = 'sections'")[0]?.value ?? "[]";
 sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '[]')`);

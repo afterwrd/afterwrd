@@ -479,7 +479,8 @@ export async function removeFriend(env, origin, id) {
   const connection = await db.prepare("SELECT * FROM connections WHERE id = ?").bind(id).first();
   if (!connection) return;
   if (connection.connected_at) await callFriend(env, origin, connection.origin, "/_p/disconnect", { body: {} }).catch(() => {});
-  // The owner's copies of what they said on that site (comments_elsewhere) stay: they're theirs.
+  // The owner's copies of what they said on that site (comments_elsewhere) stay, theirs, until the clear-out after the
+  // 30 days to bring things over (clearout.js): nothing more can come of them.
   await db.batch([
     ...friendGone(db, connection.id), // first: it reads who they were
     db.prepare("DELETE FROM connections WHERE id = ?").bind(connection.id),

@@ -4,7 +4,8 @@
 import { blockedAmong, blockedList } from "../blocks.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
-import { buildDue, commentsToBring, leftToBring, windowOf } from "../before.js";
+import { broughtUntil, commentsToBring, leftToBring, windowOf } from "../before.js";
+import { tidyBefore } from "../clearout.js";
 import { groupsToBring, groupsToBringOver } from "../beforegroups.js";
 import { groupWordsToBring } from "../beforehistory.js";
 import * as itemViews from "../views/items.js";
@@ -816,16 +817,21 @@ async function home(ctx, params) {
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
   // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
+  // Until when (10f): what hasn't come over by then is left behind; and the owner's groups from before are offered here
+  // until then, on their own pages after.
+  const until = moved ? 0 : await broughtUntil(ctx.env);
   const bringOver = moved ? null : { posts: ownOld.length ? await leftToBring(db) : 0, comments: await commentsToBring(db),
-    groups: (await groupsToBring(db, windowOf(ctx.env))) + (await groupWordsToBring(db)), owned: await groupsToBringOver(db) };
+    groups: (await groupsToBring(db, windowOf(ctx.env))) + (await groupWordsToBring(db)), owned: now() < until ? await groupsToBringOver(db) : [],
+    until: now() < until ? until : null };
   const friendsMoving = movingRows.map((r) => ({ name: String(r.name), moving_to: String(r.moving_to), moving_at: Number(r.moving_at),
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
   // …and signed groups' (step 6c: groupcopies.js), likewise.
   ctx.work?.waitUntil?.(groups_.pullGroups(ctx.env, ctx.url.origin).catch(() => {}));
-  // …and posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in (before.js).
-  ctx.work?.waitUntil?.(buildDue(ctx.env).catch(() => {}));
+  // …and posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in (before.js), then
+  // what's left from before is cleared out (clearout.js).
+  ctx.work?.waitUntil?.(tidyBefore(ctx.env).catch(() => {}));
   // …then what the owner sent elsewhere, checked with its hosts (sentchecks.js), once an hour at most.
   ctx.work?.waitUntil?.(checkSentRound(ctx.env, ctx.url.origin).catch(() => {}));
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
