@@ -180,8 +180,11 @@ ${identity ? `<script type="application/json" id="signing-data">${JSON.stringify
       if (!thisSigns || identity.pending) return "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added.";
       try {
         const start = await post("/_admin/keys/enrol/start", { link });
+        // What the passkey allows is the key this link's token stands for, and nothing else.
+        const token = String(link).split("/_auth/device/")[1];
+        if (!token || S.decode(S.fromB64url(start.statement))?.key !== (await S.enrolKey(token)).publicKey) throw new Error("Something didn't match. Try again.");
         const response = await passkeySigns(start.nonce, [await S.fingerprintOf("enrol", S.fromB64url(start.statement))], start.allow);
-        await post("/_admin/keys/enrol/finish", { statement: start.statement, response });
+        await post("/_admin/keys/enrol/finish", { link, statement: start.statement, response });
         return "It can sign for you as soon as it's added.";
       } catch (e) {
         return cancelled(e) ? "It can sign in. To let it sign for you, use Let every passkey here sign for you, here, once it's added." : e.message;

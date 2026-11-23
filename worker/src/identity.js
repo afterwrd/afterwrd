@@ -28,7 +28,7 @@
 // so one prompt can sign an identity document and a browser key's delegation together. Its proof:
 //   {credential, nonce, statements: [fingerprint…], response: {authenticatorData, clientDataJSON, signature, userHandle?}}
 import { verifyAuthenticationResponse } from "@simplewebauthn/server";
-import { checkAs, decode, fingerprintOf, fromB64url, sha256, b64url, statementsChallenge, utf8 } from "../public/static/signed.js";
+import { checkAs, decode, fingerprintOf, fromB64url, statementsChallenge } from "../public/static/signed.js";
 
 export let SLOW_SECONDS = 7 * 86400;
 /** Local test sites only (app.js, with ALLOW_LOCAL_SITES and TEST_SLOW_SECONDS): a shorter wait, so a test can see one end. */
@@ -122,20 +122,25 @@ async function signedByPasskeyOf(doc, proof, statement) {
 
 /**
  * A new device's passkey added through a device link: a current passkey signed an enrolment ({kind: "enrol", person,
- * token: SHA-256 of a one-time token}) when the link was made, and the new passkey signs the document adding itself,
- * which carries the token. So nobody can add a passkey without both a current passkey's say-so and the link.
+ * prev, key}) when the link was made, naming the document it follows and the key the link's one-time token stands for
+ * (signed.js enrolKey). The document adding the new passkey is signed by that key (`signature`: only someone with the
+ * link can) and by the new passkey. So nobody can add a passkey without both a current passkey's say-so and the link,
+ * and an enrolment counts once, in one place: the token is never published.
  */
-async function checkEnrolment(person, before, after, sig, docFp) {
+async function checkEnrolment(person, before, after, bytes, sig, docFp) {
   const e = sig.enrolment;
-  if (!e || typeof e.statement !== "string" || typeof e.token !== "string" || e.token.length > 128) return false;
+  if (!e || typeof e.statement !== "string" || typeof e.signature !== "string") return false;
   const statement = fromB64url(e.statement);
   const enrol = statement && decode(statement);
-  if (!enrol || enrol.v !== 2 || enrol.kind !== "enrol" || enrol.person !== person) return false;
-  if (enrol.token !== b64url(await sha256(utf8(e.token)))) return false;
+  if (!enrol || enrol.v !== 2 || enrol.kind !== "enrol" || enrol.person !== person || enrol.prev !== after.prev
+    || typeof enrol.key !== "string") return false;
   if (!(await signedByPasskeyOf(before, e.proof, await fingerprintOf("enrol", statement)))) return false;
-  // Exactly one passkey added, nothing else changed, and the new passkey is what signed the document.
+  if (!(await checkAs("identity", enrol.key, bytes, e.signature))) return false;
+  // Exactly one passkey added, at the identity's own address, nothing else changed (not even the hosting key), and the
+  // new passkey is what signed the document.
   const added = after.passkeys.filter((p) => !before.passkeys.some((b) => b.id === p.id));
-  if (added.length !== 1 || classify(before, after) !== "fast") return false;
+  if (added.length !== 1 || added[0].origin !== after.origin || classify(before, after) !== "fast"
+    || !sameKeys({ ...content(after), passkeys: null }, { ...content(before), passkeys: null })) return false;
   return checkPasskeyProof(sig.passkey, added[0], docFp);
 }
 
@@ -215,7 +220,7 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     }
     if (doc.cancels) { state.problem = "unexpected"; break; }
     const kind = classify(before, doc);
-    const enrolled = !group && !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, sig, fp));
+    const enrolled = !group && !byRecovery && !byPasskey && sig?.enrolment && (await checkEnrolment(state.id, before, doc, bytes, sig, fp));
     if (!(byRecovery || byPasskey || enrolled)) { state.problem = "unsigned"; break; }
     // Adding passkeys (or a new hosting key) counts from when the document before it did: what those keys signed is the
     // owner's whenever a reader first meets it. Otherwise a reader who learnt the identity today (a new friend, a site

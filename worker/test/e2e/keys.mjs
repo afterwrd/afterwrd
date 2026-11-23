@@ -3,7 +3,7 @@
 // for a phone: it makes real WebAuthn assertions (P-256), as a browser would hand to the site.
 import { pathToFileURL } from "node:url";
 const { signed, checkDelegation, checkPasskeyProof, forked, readIdentity, SLOW_SECONDS, checkCall, signCall, CLOCK_SECONDS, checkProfile, parseChain } = await import(pathToFileURL(`${process.env.OUT}/bundle.mjs`).href);
-const { b64url, checkAs, concat, encode, fingerprintOf, fromB64url, newKeyPair, newRecoveryCode, publicKeyText, recoveryKey, sha256,
+const { b64url, checkAs, concat, encode, enrolKey, fingerprintOf, fromB64url, newKeyPair, newRecoveryCode, publicKeyText, recoveryKey, sha256,
   signAs, statementsChallenge, tidyRecoveryCode, utf8 } = signed;
 
 let failed = 0;
@@ -160,22 +160,43 @@ const wrongCode = await recoveryKey(newRecoveryCode());
 check("a different recovery code signs nothing", (await readIdentity([...c1, { bytes: r2, sig: { recovery: await signAs("identity", wrongCode.privateKey, r2) } }],
   seen(new Map()), NOW)).problem === "unsigned");
 
-// A new device through a device link: the phone signs an enrolment for a one-time token; the tablet signs the document adding itself.
+// A new device through a device link: the phone signs an enrolment naming the document it follows and the key the link's
+// one-time token stands for; the new device signs the document adding itself with that key and with its new passkey.
 const tablet = await softPasskey();
 const token = b64url(crypto.getRandomValues(new Uint8Array(32)));
-const enrol = encode({ v: 2, kind: "enrol", person: gFp, token: b64url(await sha256(utf8(token))) });
+const linkKey = await enrolKey(token);
+const enrol = encode({ v: 2, kind: "enrol", person: gFp, prev: d1Fp, key: linkKey.publicKey });
 const enrolProof = await phone.sign([await fingerprintOf("enrol", enrol)]);
 const e2 = doc(2, d1Fp, [phone.passkey, laptop.passkey, tablet.passkey]);
 const e2Fp = await fingerprintOf("identity", e2);
-const withTablet = async (t, by = tablet, proof = enrolProof, d = e2, dFp = e2Fp) => readIdentity([...c1, { bytes: d,
-  sig: { enrolment: { statement: b64url(enrol), proof, token: t }, passkey: await by.sign([dFp]) } }], seen(new Map()), NOW);
-const se = await withTablet(token);
+const enrolled = async (d, { by = tablet, proof = enrolProof, statement = enrol, key = linkKey } = {}) => ({ bytes: d,
+  sig: { enrolment: { statement: b64url(statement), proof, signature: await signAs("identity", key.privateKey, d) },
+    passkey: await by.sign([await fingerprintOf("identity", d)]) } });
+const withTablet = async (d = e2, options = {}) => readIdentity([...c1, await enrolled(d, options)], seen(new Map()), NOW);
+const se = await withTablet();
 check("a device link adds the new device's passkey at once", se.current.seq === 2 && se.current.passkeys.length === 3 && !se.problem);
-check("…not without the link's token", (await withTablet(b64url(crypto.getRandomValues(new Uint8Array(32))))).problem === "unsigned");
-check("…not with an enrolment signed by a passkey that isn't the person's", (await withTablet(token, tablet, await tablet.sign([await fingerprintOf("enrol", enrol)]))).problem === "unsigned");
-check("…not signed by some other new passkey", (await withTablet(token, await softPasskey())).problem === "unsigned");
+check("…not without the link's token", (await withTablet(e2, { key: await enrolKey(b64url(crypto.getRandomValues(new Uint8Array(32)))) })).problem === "unsigned");
+check("…not with an enrolment signed by a passkey that isn't the person's", (await withTablet(e2, { proof: await tablet.sign([await fingerprintOf("enrol", enrol)]) })).problem === "unsigned");
+check("…not signed by some other new passkey", (await withTablet(e2, { by: await softPasskey() })).problem === "unsigned");
 const e2bad = doc(2, d1Fp, [tablet.passkey, laptop.passkey]);
-check("…and it can't remove anyone while it's at it", (await withTablet(token, tablet, enrolProof, e2bad, await fingerprintOf("identity", e2bad))).problem === "unsigned");
+check("…and it can't remove anyone while it's at it", (await withTablet(e2bad)).problem === "unsigned");
+const mallory = await softPasskey("https://mallory.example");
+const e2away = doc(2, d1Fp, [phone.passkey, laptop.passkey, mallory.passkey]);
+check("…or add a passkey made for another site", (await withTablet(e2away, { by: mallory })).problem === "unsigned");
+const e2host = doc(2, d1Fp, [phone.passkey, laptop.passkey, tablet.passkey], { hosting: await publicKeyText((await newKeyPair()).publicKey) });
+check("…or change the hosting key", (await withTablet(e2host)).problem === "unsigned");
+const late = encode({ v: 2, kind: "enrol", person: gFp, prev: gFp, key: linkKey.publicKey });
+check("…or be used anywhere but straight after the document it names",
+  (await withTablet(e2, { statement: late, proof: await phone.sign([await fingerprintOf("enrol", late)]) })).problem === "unsigned");
+// Someone else copies the published enrolment onto a document of their own after it: nothing in the chain gives them the token.
+const thief = await softPasskey();
+const e3 = doc(3, e2Fp, [phone.passkey, laptop.passkey, tablet.passkey, thief.passkey], { hosting: await publicKeyText((await newKeyPair()).publicKey) });
+const published = (await enrolled(e2)).sig.enrolment;
+const replay = { bytes: e3, sig: { enrolment: published, passkey: await thief.sign([await fingerprintOf("identity", e3)]) } };
+const sr3 = await readIdentity([...c1, await enrolled(e2), replay], seen(new Map()), NOW);
+check("a published enrolment can't be used again to add someone else's passkey", sr3.problem === "unsigned" && sr3.current.seq === 2
+  && !sr3.current.passkeys.some((p) => p.id === thief.passkey.id) && sr3.current.hosting === hosting);
+check("…and nothing published carries the link's token", !JSON.stringify(published).includes(token));
 
 // A broken chain counts up to the break.
 const stray = doc(2, "z".repeat(43), [phone.passkey, laptop.passkey]);

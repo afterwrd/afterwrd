@@ -152,7 +152,21 @@ export function tidyRecoveryCode(text) {
 export async function recoveryKey(code) {
   const tidy = tidyRecoveryCode(code);
   if (!tidy) return null;
-  const seed = await sha256(tagged("recovery", utf8(tidy)));
+  return keyFromSeed(await sha256(tagged("recovery", utf8(tidy))));
+}
+
+/**
+ * The key a device link's one-time token stands for. When the link is made, a passkey of the owner's signs an enrolment
+ * naming its public key; the new device's browser, which has the token, signs the document adding itself with it. The
+ * token itself is never published, so an enrolment can't be used again by anyone else.
+ * @param {string} token @returns {Promise<{ privateKey: CryptoKey, publicKey: string }>}
+ */
+export async function enrolKey(token) {
+  return keyFromSeed(await sha256(tagged("enrol", utf8(String(token)))));
+}
+
+/** An Ed25519 key pair from a 32-byte seed: the private half not extractable, the public as base64url. */
+async function keyFromSeed(seed) {
   const extractable = await crypto.subtle.importKey("pkcs8", concat(PKCS8_PREFIX, seed), ED25519, true, ["sign"]);
   const { x } = /** @type {JsonWebKey} */ (await crypto.subtle.exportKey("jwk", extractable));
   const privateKey = await crypto.subtle.importKey("pkcs8", concat(PKCS8_PREFIX, seed), ED25519, false, ["sign"]);

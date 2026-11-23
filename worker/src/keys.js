@@ -32,16 +32,18 @@
 //   POST /_admin/keys/browser/start  {browserKey} -> {nonce, delegation, allow}: one prompt, as at sign-in
 //   POST /_admin/keys/browser/finish {delegation, response} -> {person, expires}
 // Adding a device that signs straight away (device links made on a device that signs):
-//   POST /_admin/keys/enrol/start    {link} -> {nonce, statement, allow}: this device's passkey allows that link's token
-//   POST /_admin/keys/enrol/finish   {statement, response}
+//   POST /_admin/keys/enrol/start    {link} -> {nonce, statement, allow}: this device's passkey allows the key that
+//                                    link's token stands for, after the identity document there is now
+//   POST /_admin/keys/enrol/finish   {link, statement, response}
 //   GET  /_admin/keys/join           on the new device, after its passkey: one more prompt adds it, and this browser
 //   POST /_admin/keys/join/start     {browserKey} -> {nonce, doc, delegation, allow}
-//   POST /_admin/keys/join/finish    {doc, delegation, token, response}
+//   POST /_admin/keys/join/finish    {doc, delegation, signature, response}: signature is the document signed in the
+//                                    browser with the token's key (the token never comes back here)
 import { checkDelegation, checkPasskeyProof, moveOf, parseIdentity, readIdentity } from "./identity.js";
 import { siteOrigin } from "./sites.js";
 import { readChain } from "./identities.js";
 import { readChallenge, safeNext, spendChallenge, withChallenge } from "./auth.js";
-import { b64url, checkAs, decode, encode, fingerprintOf, fromB64url, newKeyPair, sha256, utf8 } from "../public/static/signed.js";
+import { b64url, checkAs, decode, encode, enrolKey, fingerprintOf, fromB64url, newKeyPair } from "../public/static/signed.js";
 import { html, json, now, randomToken } from "./util.js";
 import { joinPage, keysPage, moveOutPage } from "./views/pages.js";
 import { sha256 as sha256Hex } from "./util.js";
@@ -108,11 +110,15 @@ export async function loginDelegation(env, url, browserKey) {
  */
 export async function sentDelegation(env, url, text) {
   const bytes = typeof text === "string" && text.length < 2048 ? fromB64url(text) : null;
+  const row = bytes && (await env.DB.prepare("SELECT person FROM own_identity WHERE id = 1").first());
+  return row && delegationFits(bytes, url, String(row.person)) ? bytes : null;
+}
+
+/** Whether a delegation's bytes are for `person`, at this site's address, for a browser key, for 30 days at most. */
+function delegationFits(bytes, url, person) {
   const d = bytes && decode(bytes);
-  if (!d || d.v !== 2 || d.kind !== "delegation" || d.origin !== url.origin || !KEY_RE.test(d.key ?? "")) return null;
-  if (!Number.isSafeInteger(d.expires) || d.expires > now() + DELEGATION_SECONDS + 600 || d.expires < now()) return null;
-  const row = await env.DB.prepare("SELECT person FROM own_identity WHERE id = 1").first();
-  return row && d.person === row.person ? bytes : null;
+  if (!d || d.v !== 2 || d.kind !== "delegation" || d.person !== person || d.origin !== url.origin || !KEY_RE.test(d.key ?? "")) return false;
+  return Number.isSafeInteger(d.expires) && d.expires <= now() + DELEGATION_SECONDS + 600 && d.expires >= now();
 }
 
 /**
@@ -209,6 +215,7 @@ async function finish(request, env, url, owner, { identity: identityText, delega
   const proof = { credential: String(response?.id ?? ""), nonce, statements,
     response: { authenticatorData: r.authenticatorData, clientDataJSON: r.clientDataJSON, signature: r.signature, ...(r.userHandle ? { userHandle: r.userHandle } : {}) } };
   const state = await readIdentity([{ bytes: identity, sig: { passkey: proof } }], () => now(), now());
+  if (state && !delegationFits(delegation, url, state.id)) return json({ error: "That didn't work. Try again." }, 400);
   const key = state && (await checkDelegation(delegation, proof, state, now()));
   if (!state || !key) return json({ error: "Your passkey's signature didn't check. Try again." }, 400);
   if (!(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
@@ -466,17 +473,21 @@ async function enrolStart(env, url, { link }) {
   const found = await env.DB.prepare("SELECT 1 FROM device_links WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?")
     .bind(await sha256Hex(token), now()).first();
   if (!found) return json({ error: "That link has expired or been used." }, 404);
-  const statement = encode({ v: 2, kind: "enrol", person: own.person, token: b64url(await sha256(utf8(token))) });
+  // Names the document the new device's will follow, and the key the link's token stands for (signed.js enrolKey).
+  const statement = encode({ v: 2, kind: "enrol", person: own.person, prev: await fingerprintOf("identity", own.chain.at(-1).bytes),
+    key: (await enrolKey(token)).publicKey });
   const nonce = randomToken();
   return withChallenge(env, "enrol", nonce, json({ nonce, statement: b64url(statement), allow: own.state.current.passkeys.map((p) => p.id) }));
 }
 
-async function enrolFinish(request, env, { statement: text, response }) {
+async function enrolFinish(request, env, { link, statement: text, response }) {
   const nonce = await readChallenge(request, env, "enrol");
   const own = await ownIdentity(env.DB);
+  const token = TOKEN_RE.exec(typeof link === "string" ? link : "")?.[1];
   const statement = typeof text === "string" ? fromB64url(text) : null;
   const enrol = statement && decode(statement);
-  if (!nonce || !own || !enrol || enrol.kind !== "enrol" || enrol.person !== own.person || typeof enrol.token !== "string") {
+  if (!nonce || !own || !token || !enrol || enrol.kind !== "enrol" || enrol.person !== own.person
+    || enrol.prev !== (await fingerprintOf("identity", own.chain.at(-1).bytes)) || enrol.key !== (await enrolKey(token)).publicKey) {
     return json({ error: "That didn't work. Try again." }, 400);
   }
   const proof = proofFrom(response, nonce, [await fingerprintOf("enrol", statement)]);
@@ -484,10 +495,8 @@ async function enrolFinish(request, env, { statement: text, response }) {
   if (!passkey || !(await checkPasskeyProof(proof, passkey, proof.statements[0])) || !(await spendChallenge(env, nonce))) {
     return json({ error: "Your passkey's signature didn't check. Try again." }, 400);
   }
-  // The statement names the token by its SHA-256 in base64url; the link is kept by the same hash in hex.
-  const hex = [...(fromB64url(enrol.token) ?? [])].map((b) => b.toString(16).padStart(2, "0")).join("");
   const done = await env.DB.prepare("UPDATE device_links SET enrolment = ? WHERE token_hash = ? AND used_at IS NULL")
-    .bind(JSON.stringify({ statement: text, proof }), hex).run();
+    .bind(JSON.stringify({ statement: text, proof }), await sha256Hex(token)).run();
   return done.meta.changes ? json({ ok: true }) : json({ error: "That link has expired or been used." }, 404);
 }
 
@@ -499,6 +508,12 @@ async function enrolmentOf(env, owner) {
   try { return row ? { id: String(row.id), key: String(row.public_key), enrolment: JSON.parse(String(row.enrolment)) } : null; } catch { return null; }
 }
 
+/** The enrolment statement a device's enrolment carries, decoded; null if it can't be read. */
+function enrolled(mine) {
+  const bytes = typeof mine?.enrolment?.statement === "string" ? fromB64url(mine.enrolment.statement) : null;
+  return bytes && decode(bytes);
+}
+
 async function joinStart(env, url, owner, { browserKey }) {
   const own = await ownIdentity(env.DB);
   const mine = await enrolmentOf(env, owner);
@@ -507,22 +522,26 @@ async function joinStart(env, url, owner, { browserKey }) {
   if (busy) return busy;
   if (own.state.current.passkeys.some((p) => p.id === mine.id)) return json({ error: "This device already signs for you." }, 409);
   const doc = await nextDocument(own, { passkeys: [...own.state.current.passkeys, { id: mine.id, key: mine.key, origin: url.origin }] });
+  // The enrolment is for one place in the chain: if the owner's identity has changed since the link was made, it's spent.
+  if (decode(doc).prev !== enrolled(mine)?.prev) return json({ error: "Your devices have changed since that link was made. Let this device sign from one that already does." }, 409);
   const delegation = encode({ v: 2, kind: "delegation", person: own.person, key: browserKey, origin: url.origin, expires: now() + DELEGATION_SECONDS });
   const nonce = randomToken();
   return withChallenge(env, "join", nonce, json({ nonce, doc: b64url(doc), delegation: b64url(delegation), allow: [mine.id] }));
 }
 
-async function joinFinish(request, env, url, owner, { doc: docText, delegation: delegationText, token, response }) {
+async function joinFinish(request, env, url, owner, { doc: docText, delegation: delegationText, signature, response }) {
   const nonce = await readChallenge(request, env, "join");
   const own = await ownIdentity(env.DB);
   const mine = await enrolmentOf(env, owner);
   const bytes = typeof docText === "string" ? fromB64url(docText) : null;
-  const delegation = typeof delegationText === "string" ? fromB64url(delegationText) : null;
-  if (!nonce || !own || !mine || !bytes || !delegation || typeof token !== "string") return json({ error: "That didn't work. Try again." }, 400);
+  const delegation = await sentDelegation(env, url, delegationText);
+  if (!nonce || !own || !mine || !bytes || !delegation || typeof signature !== "string" || signature.length > 200) {
+    return json({ error: "That didn't work. Try again." }, 400);
+  }
   const statements = [await fingerprintOf("identity", bytes), await fingerprintOf("delegation", delegation)];
   const proof = proofFrom(response, nonce, statements);
   if (proof.credential !== mine.id || !(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
-  const state = await appendDocument(env, own, { bytes, sig: { enrolment: { ...mine.enrolment, token }, passkey: proof } });
+  const state = await appendDocument(env, own, { bytes, sig: { enrolment: { ...mine.enrolment, signature }, passkey: proof } });
   const key = state && (await checkDelegation(delegation, proof, state, now()));
   if (!state || !key) return json({ error: "That didn't check. Let this device sign from one that already does." }, 400);
   const { expires } = decode(delegation);

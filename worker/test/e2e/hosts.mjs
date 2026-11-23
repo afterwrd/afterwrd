@@ -440,6 +440,27 @@ check("…a pull sends only who's new, and her site asks for the delegation it's
   await waitFor(() => n(stateC, `copies WHERE id = ${q(coast)}`) === 1), "");
 check("…and her site keeps it again", n(stateC, `known_delegations WHERE key = ${q(bobKey)}`) === 1);
 
+// --- someone else's identity, given by a site that isn't theirs -----------------------------------------------------------
+
+// Zed's identity is at another address; a site at 8786 hands it out as if it were its own, and calls the group as Zed.
+// The group's site fetches from 8786 to check the call, and must not learn Zed's identity from there.
+const zed = await madeUp("http://localhost:8791", "Zed Madeup");
+const MAL = "http://localhost:8786";
+const mal = createServer((req, res) => {
+  req.resume();
+  if (req.url === "/.well-known/afterwrd") res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ v: 2, chain: zed.chain }));
+  else res.writeHead(404).end();
+}).listen(8786);
+const malKey = await newKeyPair();
+for (const path of ["/_group/rejoin/point", "/_join/x/accept"]) {
+  const url = `${G}${path}`;
+  const body = JSON.stringify({});
+  const headers = await signCall({ method: "POST", url, body, person: zed.id, from: MAL, privateKey: malKey.privateKey });
+  await fetch(url, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body }).catch(() => null);
+}
+check("a site handing out someone else's identity as its own doesn't get it learnt", n(stateG, `identities WHERE person = ${q(zed.id)}`) === 0);
+mal.close();
+
 // --- the end -----------------------------------------------------------------------------------------------------------------
 
 for (const s of standIns) s.close();

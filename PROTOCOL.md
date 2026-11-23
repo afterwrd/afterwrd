@@ -198,9 +198,9 @@ The result is `{person, from}`: who signed the call, and the address they signed
 
 - If the receiver already holds that person's identity, it isn't frozen, it reads with no problem, and the address in
   effect is `from`, the receiver uses the hosting key in effect (section 4) without fetching anything.
-- Otherwise it fetches `GET <from>/.well-known/afterwrd` (8 s timeout, no redirects) and learns the chain (section 4).
-  It uses the hosting key only if the identity's id is `person`, it isn't frozen, and the address in effect is exactly
-  `from`. What it learns is kept (the `identities` table) and used for later calls.
+- Otherwise it fetches `GET <from>/.well-known/afterwrd` (8 s timeout, no redirects) and learns the chain (section 4),
+  if it is `from`'s to give (4.6). It uses the hosting key only if the identity's id is `person`, it isn't frozen, and
+  the address in effect is exactly `from`. What it learns is kept (the `identities` table) and used for later calls.
 
 A frozen identity (one seen in two versions, section 4) can't make signed calls at all.
 
@@ -700,8 +700,8 @@ A proof is valid for every statement in its list, so one prompt can sign several
 **By the recovery key.** `sig` is `{recovery: signature}`: an Ed25519 signature (64 bytes, base64url) by the key in
 `recovery`, over `"afterwrd identity 2\n" + bytes` (section 3 `signAs("identity", …)`).
 
-**By a new device, with an enrolment.** `sig` is `{passkey: proof, enrolment: {statement, proof, token}}`. Only for
-adding one passkey: see 4.9.
+**By a new device, with an enrolment.** `sig` is `{passkey: proof, enrolment: {statement, proof, signature}}`. Only
+for adding one passkey: see 4.9.
 
 Source: `src/identity.js` `checkPasskeyProof`, `checkEnrolment`; `public/static/signed.js` `statementsChallenge`, `checkAs`.
 
@@ -797,8 +797,11 @@ Source: `src/identities.js` `handleIdentity`; `src/app.js` (both routers).
 
 **Fetching.** To learn the identity at an address, a site fetches `GET <origin>/.well-known/afterwrd` without following
 redirects (a redirect is a failure), with an 8-second timeout, and refuses a reply over 512 KiB. The `chain` is decoded
-(1–200 documents, each with base64url `bytes` and an object `sig`). The site then learns it (below), and accepts it as
-the identity at that address only if it reads, is not frozen, and its document in effect names exactly that `origin`.
+(1–200 documents, each with base64url `bytes` and an object `sig`). The site first reads it without keeping anything,
+and learns it (below) only if some document in it, in effect or waiting, names that `origin`: a site can't hand out
+someone else's identity as if it were its own. A group's chain is read with the `owner` chain beside it. The site then
+accepts it as the identity at that address only if it reads, is not frozen, and its document in effect names exactly
+that `origin`. (An address someone has moved away from still gives their identity, so their friends can follow them.)
 
 **Identities passed along.** Sites also hand each other identities they know: as `people: {<id>: {chain, profile?}}`
 beside lists, notes and group pages (sections 6, 8, 9, 10). A reader learns each one the same way, and uses it only if
@@ -886,29 +889,35 @@ Source: `public/static/signed.js` `newRecoveryCode`, `tidyRecoveryCode`, `recove
 A new device's passkey can sign straight away if a device that already signs vouches for it. Two signatures are needed:
 one from a current passkey, given when the device link is made, and one from the new passkey itself.
 
-1. On a device that signs, the owner makes a device link (a one-time token in its path). One of the identity's passkeys
-   signs an `enrol` statement:
+1. On a device that signs, the owner makes a device link (a one-time token in its path). The token stands for an
+   Ed25519 key (`enrolKey(token)`: the private key's 32-byte seed is SHA-256 of `"afterwrd enrol 2\n" + token` in
+   UTF-8). One of the identity's passkeys signs an `enrol` statement naming the document in effect now and that key's
+   public half:
 
    ```json
-   {"v":2,"kind":"enrol","person":"5ZlwuPHaLz8_MkVydNmRkhkDh_ca2f9LOgW7ciEBP0w","token":"<SHA-256 of the link's token, base64url>"}
+   {"v":2,"kind":"enrol","person":"5ZlwuPHaLz8_MkVydNmRkhkDh_ca2f9LOgW7ciEBP0w","prev":"<fingerprint of the document it follows>","key":"<the token's public key, base64url>"}
    ```
 
    The passkey signs its fingerprint, `fingerprintOf("enrol", bytes)`, as the only statement.
 2. The new device opens the link and makes its passkey. Then one prompt with the new passkey signs both the identity
-   document that adds it and the device's delegation.
-3. That document's `sig` is `{passkey: <the new passkey's proof>, enrolment: {statement, proof, token}}`. `statement`
-   is the enrol bytes in base64url, `proof` the current passkey's proof of it, and `token` the link's token itself
-   (at most 128 characters).
+   document that adds it and the device's delegation, and the device's browser signs that document with the token's key.
+3. That document's `sig` is `{passkey: <the new passkey's proof>, enrolment: {statement, proof, signature}}`.
+   `statement` is the enrol bytes in base64url, `proof` the current passkey's proof of it, and `signature` the token
+   key's signature over the document (`signAs("identity", …)`). The token itself never leaves the new device's browser.
 
-A reader accepts it, at once, when (`checkEnrolment`): the statement is `v` 2, `kind` `"enrol"`, and names this
-identity's id; SHA-256 of the UTF-8 `token`, in base64url, equals the statement's `token`; a passkey in the document in
-effect signed the statement; the new document adds exactly one passkey and is otherwise fast; and that added passkey
-signed the new document. A group's chain never accepts an enrolment, and a document carrying `enrolment` is never
-accepted as an ordinary passkey-signed one.
+A reader accepts it, at once, when (`checkEnrolment`): the statement is `v` 2, `kind` `"enrol"`, names this identity's
+id, and its `prev` is the new document's `prev`; a passkey in the document in effect signed the statement; `signature`
+is the statement's `key`'s signature of the new document; the new document adds exactly one passkey, whose `origin` is
+the document's own, and changes nothing else (the hosting key included); and that added passkey signed the new
+document. A group's chain never accepts an enrolment, and a document carrying `enrolment` is never accepted as an
+ordinary passkey-signed one.
 
-The token is published in the chain once used. That is harmless: it is single-use, and the site marks it used.
+So an enrolment counts once, in one place: copying it into another document needs the token, which is never published.
+If the owner's identity changes between making the link and the new device joining, the enrolment no longer fits, and
+the new device is let sign from a device that already does instead.
 
-Source: `src/identity.js` `checkEnrolment`; `src/keys.js` `enrolStart`, `enrolFinish`, `joinStart`, `joinFinish`.
+Source: `src/identity.js` `checkEnrolment`; `public/static/signed.js` `enrolKey`; `src/keys.js` `enrolStart`, `enrolFinish`,
+`joinStart`, `joinFinish`.
 
 ### 4.10 Browser keys and delegations
 

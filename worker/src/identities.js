@@ -116,10 +116,32 @@ export async function fetchIdentity(env, origin) {
   const bytes = await readBytesLimited(response, MAX_REPLY).catch(() => new Uint8Array());
   const data = bytes.length ? decode(bytes) : null;
   const chain = parseChain(data?.chain);
-  const state = chain && (await learnIdentity(env, chain, { owner: parseChain(data?.owner) }));
+  const owner = parseChain(data?.owner);
+  // Learnt only if it's that site's to give: an identity that has been at that address (now, before a move, or moving
+  // there). Otherwise any site could hand this one someone else's chain, as if from them.
+  if (!chain || !(await givenBy(env.DB, chain, owner, site))) return null;
+  const state = await learnIdentity(env, chain, { owner });
   if (!state || state.frozen || state.current.origin !== site) return null;
   await env.DB.prepare("UPDATE identities SET origin_checked_at = ? WHERE person = ?").bind(now(), state.id).run();
   return state;
+}
+
+/**
+ * Whether `chain` (with a group's `owner` chain beside it) reads as an identity that has been at `site`: the address
+ * of a document in effect, or of one waiting. Read here without keeping anything.
+ * @param {D1Database} db @param {any[]} chain @param {any[] | null} owner @param {string} site
+ */
+async function givenBy(db, chain, owner, site) {
+  const at = now();
+  const ownerId = ownerOf(chain);
+  let ownerState = null;
+  if (ownerId) {
+    ownerState = owner && !ownerOf(owner) ? await readIdentity(owner, await seenTimes(db, owner), at) : null;
+    if (ownerState?.id !== ownerId) ownerState = await stateIn(db, ownerId);
+    if (!ownerState) return false;
+  }
+  const state = await readIdentity(chain, await seenTimes(db, chain), at, { owner: ownerState });
+  return Boolean(state) && [...state.history.map((h) => h.doc), state.pending].some((d) => d?.origin === site);
 }
 
 /**

@@ -281,7 +281,9 @@ export function joinPage() {
     const challenge = await S.statementsChallenge(start.nonce, [await S.fingerprintOf("identity", doc), await S.fingerprintOf("delegation", delegation)]);
     const credential = await navigator.credentials.get({ publicKey: { challenge: dec(challenge), userVerification: "required",
       allowCredentials: start.allow.map((id) => ({ type: "public-key", id: dec(id) })) } });
-    const done = await post("/_admin/keys/join/finish", { doc: start.doc, delegation: start.delegation, token, response: credentialJSON(credential) });
+    // The link's token stays here: what goes back is the document signed with the key it stands for.
+    const signature = await S.signAs("identity", (await S.enrolKey(token)).privateKey, doc);
+    const done = await post("/_admin/keys/join/finish", { doc: start.doc, delegation: start.delegation, signature, response: credentialJSON(credential) });
     await keys.keyAllowed(key, done.person, done.expires);
     afterPasskey(false);
   });`);
