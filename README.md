@@ -88,8 +88,10 @@ and can be done any time.
    an hour and nothing is kept), asks your name (and makes your address from it, `afterwrd.<your-name>.workers.dev`,
    if the account hasn't one yet), and puts afterwrd there.
 3. **Make yourself the owner.** The installer sends you straight to your new site: give your name and create a
-   passkey (your face, fingerprint or device PIN; there's no password). It then asks whether your site may keep
-   itself up to date and let friends' sites check it's genuine. Then write a post, add photos, and connect with friends
+   passkey (your face, fingerprint or device PIN; there's no password). Next comes your recovery code: it's made in
+   your browser and shown once, and your site doesn't keep it, so write it down somewhere safe. One more face,
+   fingerprint or PIN then sets up your identity, the keys everything you write is signed with. It then asks whether
+   your site may keep itself up to date and let friends' sites check it's genuine. Then write a post, add photos, and connect with friends
    from *Friends*.
 4. **Optional: bring your Facebook years.** On Facebook's *Download your information* page, choose your
    profile, *All available information*, format **JSON**, media quality *High*. Facebook emails you when it's
@@ -100,8 +102,8 @@ and can be done any time.
 
 Connecting uses Cloudflare's own sign-in for apps: afterwrd is a registered app there, and you can see or revoke what
 you've allowed under *My Profile* → *Connected Applications*. The installer runs in the maintainer's Cloudflare account,
-so it's one more thing to trust; it checks every file it downloads against the release's published fingerprints, so
-what's installed is exactly the published release. Cloudflare's free plan allows 5 GB of photos and videos. To check a
+so it's one more thing to trust; it installs only a release signed with afterwrd's own key, and checks every file it
+downloads against that release's signed list, so what's installed is exactly the signed release. Cloudflare's free plan allows 5 GB of photos and videos. To check a
 release for yourself, see [Check it yourself](SECURITY.md#check-it-yourself).
 
 ### On your own server
@@ -116,8 +118,11 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
 
 - **Turn on two-factor authentication for your Cloudflare account** (My Profile → Authentication). Anyone who gets
   into that account can see your whole site.
-- **Only open a device link on your own phone or computer**: whoever opens it first gets owner access, so it works
-  once and lasts an hour. *Your devices* can cancel unused links, remove a passkey or sign out everywhere.
+- **Keep your recovery code somewhere safe**, away from your devices. It's what gets you signing again if you lose
+  every device that signs for you (see *Your devices*, below), and only it can cancel a change made with it.
+- **Only open a device link on your own phone or computer**: whoever opens it first can sign in as you, so it works
+  once and lasts an hour. It can't post or comment as you until a device that already signs for you lets it.
+  *Your devices* can cancel unused links, remove a passkey or sign out everywhere.
 - **Approve only friends you know.** A friend link can be passed on, so each one only asks: nothing is
   shared until you approve the request on *Friends*.
 - **Photo locations are removed** from photos you post, and left out of a Facebook import unless you tick *Photo
@@ -131,11 +136,14 @@ it), so keeping it safe is up to you. See [worker/selfhost/README.md](worker/sel
   checks yours is exactly a signed release, with nothing else uploaded in its place since the last check. A finding
   shows on both your Homes.
 - **Watch for new devices.** When a passkey is added, Home on your other devices says so for two weeks. If it
-  wasn't you, remove it in *Your devices*.
+  wasn't you, remove it in *Your devices*. Removing a device that signs for you, or using your recovery code, takes 7
+  days, and every device says so until then, with a way to cancel, so someone who gets hold of one of your devices
+  can't quietly lock you out.
 - **Lost every device you sign in with?** *Lost your device?* on the sign-in page gets you back in, as long as you
   can still sign in to the Cloudflare account your site is in: Cloudflare is asked for an hour's access to change its
   Workers (your site uses it only to prove it's in that account, by making its running version live again), then it
-  signs every device out and lets you make a passkey on the one you're using.
+  signs every device out and lets you make a passkey on the one you're using. That gets you signed in; to sign posts
+  and comments again, use your recovery code in *Your devices*.
 - **Use a Cloudflare account just for afterwrd** if you use Cloudflare for anything else (see step 1).
 
 (On your own server, some of this is different: see [worker/selfhost/README.md](worker/selfhost/README.md).)
@@ -155,19 +163,28 @@ Once it's installed, nothing needs the terminal:
 - **Import** again whenever you have a newer download, or to change what's published. Files already on the
   site aren't uploaded again, and files the new import doesn't use are deleted. Friends see the old version
   until the new one is complete.
-- **Your devices** adds another phone or computer (a one-time link to open on it), removes a passkey (never your
-  last one) and signs out everywhere. Only the owner signs in; there's no inviting others to your site, because
-  friends see it from their own.
+- **Your devices** adds another phone or computer: make a one-time link there and open it on the new device, which
+  makes its passkey; then press *Let it sign for you* on the device you made the link with, and the new one asks once
+  more so its browser can sign too. It also removes a passkey (never your last one), signs out everywhere, and keeps
+  your recovery code: *Use my recovery code* if you've lost every device that signs for you (the passkeys on your site
+  then become the ones that sign, after 7 days), or make a new one. Only the owner signs in; there's no inviting
+  others to your site, because friends see it from their own.
+- **Signed, and checked.** Everything you post, comment, vote or answer is signed in your own browser before it
+  leaves it, and the site that keeps a conversation signs the order it took things in. Your site checks every
+  signature and the whole conversation when it shows you a friend's or group's post: a comment someone's site has
+  changed is hidden and says it didn't pass its check, and one quietly left out makes the conversation say it doesn't
+  add up. So no site, yours included, can change what someone else wrote or put words in their mouth.
 - **Photos and albums.** *Add photos* (on Photos) puts photos into a new or existing album, optionally shared
   as a post so friends see them on their Home. Albums you make can be renamed, described or deleted, and photos added
   here can be deleted. Any photo can be made your profile picture or cover, or upload one for it; they head
   your profile, and friends see your picture beside your posts.
-- **New posts.** Write posts with up to 20 photos from the box on *Home* (or your profile). A post can carry a poll,
-  mention friends by typing @, and be shown to all your friends or only those you choose. You can change a post or
+- **New posts.** Write posts with up to 20 photos from the box on *Home* (or your profile). A post can carry a poll
+  (polls are open: everyone who can see one sees who chose what), mention friends by typing @, and be shown to all
+  your friends or only those you choose. Each photo in a post has its own page and comments. You can change a post or
   comment for 15 minutes, until someone else replies; it's marked *Edited*, with what it said before. Photos are resized to at most 2560px in the browser before uploading, which also removes the
   details phones hide in them (such as where a photo was taken), and they're collected in a *Posted on
   afterwrd* album. Importing again keeps them; deleting a post deletes its photos and comments.
-- **Update** (marked when a new version is out) shows what's new and installs it: press *Connect Cloudflare*,
+- **Update** (marked when a new signed release is out) shows what's new and installs it: press *Connect Cloudflare*,
   *Allow* on Cloudflare's page, and it goes ahead, switching straight back if the new version doesn't work, and your
   groups follow. With automatic updates on, it says when the release will install itself, with *Install it now*. It's
   also where automatic updates and friends' checks are turned on or off, with what's coming next, what last happened,
@@ -177,11 +194,14 @@ Once it's installed, nothing needs the terminal:
   albums, comments (those written here, and yours on friends' sites), polls, events, earlier versions of edited posts
   and comments, likes, friends and connections, as
   [ActivityStreams](https://www.w3.org/TR/activitystreams-core/) JSON, the open format the fediverse uses, with
-  every photo and video. Everything has a permanent address (`https://<site>/posts/<key>`,
-  `…/photos/sha256/<fingerprint>`, `…#c<n>` for a comment), so two friends' downloads agree on which comment
-  replied to which post. The README inside explains the files. Keys and sign-in details are never included. The zip
-  also moves your site: *Import* → *Bring everything over* on a new site (one on your own server, say) takes it all
-  in, apart from friends and groups, which you add again.
+  every photo and video, and `signed.json`: what proves your posts and comments are as you wrote them. Everything
+  has a permanent address on your site, so two friends' downloads agree on which comment replied to which post. The
+  README inside explains the files. Keys and sign-in details are never included.
+- **Moving your site** to a new address (one on your own server, say) keeps who you are. On the new site, *Import* →
+  *Bring everything over* asks to move your identity there; you agree on your old site, and after 7 days (you can
+  cancel until then) your Download everything zip brings your posts, comments and friends in, every post checked on
+  the way. Friends' sites follow you to the new address, and your old site says where you've gone. Groups don't come:
+  join them again from the new site.
 - **Friends** (the owner's alone) is one list: friends on afterwrd first, each with their posts and photos, then
   everyone from the Facebook download, marked *on afterwrd*, *invited*, or with an *Invite* button. Invite makes a
   friend link for that person (it lasts 30 days) and a message to send; when it's used you'll see who the invite
@@ -209,10 +229,14 @@ Once it's installed, nothing needs the terminal:
   there makes it). It runs afterwrd in group mode: it holds the group and nothing else, and no one signs in to it.
   You and its members use it from your own sites, so being in a group isn't being friends, and a group can do nothing
   on its members' sites but send them notes about the group and say when they've been removed. Make an invite link on its *Members* page and send it round: anyone with an afterwrd site
-  can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 40 besides its
-  owner). The owner can make members admins, and admins can remove people and delete anything in the group.
-  Members read the group from their own sites when they open it, and can post (with up to 8 photos, which are copied
-  to the group) and comment; a copy of their own words stays on their site. Nothing is sent round when someone posts,
+  can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 1,000
+  members). Joining, letting people in, admins and leaving are each signed by whoever did them, so anyone in the group
+  can check who's in and who decided. The owner can make members admins, and admins can remove people and delete
+  anything in the group, signed, so it says who removed what. Members can post (with up to 8 photos, which are copied
+  to the group), comment and vote, all signed by whoever wrote it, and a copy of their own words stays on their site.
+  Your site keeps a group's newest posts, asking it what's new in the background, and checks each conversation when
+  you open it. Polls in a group are open to everyone in it. The owner can close a group: everyone in it is told, it
+  stays readable for 30 days so people can delete what they wrote, and then it goes. Nothing is sent round when someone posts,
   unless it mentions someone (and *@here*, for the group's admins, tells everyone): a comment sends a quiet note only to the people who wrote that post or commented on it, which shows in their
   *Notifications*. Each group has a *Calendar*: any member can add an event, and members say whether they're
   going. Adding one sends nothing to anyone; if you've said you're going, or might, you're told when its time, place
@@ -224,15 +248,28 @@ Once it's installed, nothing needs the terminal:
   Worker and database. A free Cloudflare account holds about 9 groups besides your site (10 databases in all).
 - **Events.** *Events → Make an event* makes one on your own site and invites the friends you tick: only they see
   it, from their own sites, where it shows in *Notifications* and on their *Events* page. They answer Going, Maybe or
-  Can't go; everyone invited sees who's going and who might, and only you see who can't, or hasn't answered (or whose
-  site didn't take the invitation). Change it or call it off, and everyone invited who hasn't said no is told. You can
+  Can't go, and everyone invited sees who's going, who might and who can't. Change it or call it off, and everyone invited who hasn't said no is told. You can
   invite more people later, or quietly take an invitation back. *Events* also shows a calendar of everything you could
   go to, your own events, friends' and your groups', by month, week or as a list.
 - **Comments.** You and your friends (from their own sites) can comment under a post or photo made on afterwrd;
-  comments show straight away. Friends can delete their own, and you can delete any. *Notifications* lists comments on
+  they sit behind *Comments* and open where you are. Friends can delete their own, and you can delete any; a deleted
+  comment's words are gone for good. *Notifications* lists comments on
   your posts and photos, comments on friends' posts and photos you've commented on too, mentions, invitations, changes
   to events you're going to, and comments in your groups, with a count in the menu of those that are new to you.
   Comments stay if you remove a friend, until you delete them.
+- **What you wrote elsewhere.** Your site keeps its own signed record of what you've written on friends' posts and in
+  groups, and checks on it in the background (daily for a week, weekly for three months, then monthly). If something
+  of yours was removed, *Notifications* says who removed it, from what they signed, or that the site left it out with
+  nothing signed saying why. Home warns you if something signed as you turns up that your site never sent.
+- **People you don't know, and blocking.** On friends' posts, people you don't know are shown as "friend of"
+  your friend, and a name that looks like one of your friends' is flagged. You can block someone from a comment, a
+  group's members or a friend request: you stop seeing what they write and hearing from them, quietly, and blocking a
+  friend ends the friendship.
+- **Fair shares.** Each friend's, member's or group's site may make 2,000 calls a day to yours and have 50,000 rows
+  read for it, and one person can leave at most 200 posts, comments, votes and answers a day on one site (deleting
+  their own always goes through). Mentions and replies from any one person reach your *Notifications* at most 20
+  times a day, and your phone 5. If your Cloudflare account has been over half a free daily limit on 3 days in a
+  week, Home says so, with how much your site and each of your groups used.
 - **Keeping up, quietly.** When you post or comment, your site sends your friends' sites a short note (a new post
   to all of them; a comment only to those who commented on the same thing), in batches of 40, trying again for a
   few hours if a site is down. Home shows each friend's newest posts as their site last sent them, and asks again in
@@ -259,6 +296,9 @@ A GitHub Action (`.github/workflows/release.yml`) builds the release from the ta
 every file attached, and another (`image.yml`) builds and publishes the self-hosted image. To build a release locally
 instead:
 `npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v<version>` in `worker/`.
+Then the release is signed with afterwrd's release key: from a checkout at the tag,
+`npm ci --ignore-scripts && node scripts/sign.mjs <version>` in `worker/` adds it to `signatures/index.json`, which is
+committed to `main`. Until it's signed, no site installs or offers it, and the installer doesn't use it.
 
 **Licences.** After adding, removing or upgrading a dependency, run `npm run notices` in `worker/` and commit the
 updated `public/static/licenses.txt`, which carries the licences of everything installed with afterwrd. The release
@@ -289,27 +329,29 @@ and import at `http://localhost:8787/_admin/import`. Passkeys work on `localhost
 
 ## Data model
 
-Posts, photos and albums written on afterwrd and those from your Facebook download share their tables, told apart by
-`source` (`afterwrd` or `facebook`). An import replaces only the Facebook ones.
+What's written on afterwrd is signed records, kept in signed lists ([PROTOCOL.md](PROTOCOL.md) says exactly how);
+your Facebook download stays as it came, in tables of its own, and an import replaces only those.
 
 | Table                    | What                                                                          |
 |--------------------------|-------------------------------------------------------------------------------|
-| `posts`                  | Your posts; each keeps its permanent address in `key`                         |
-| `media`                  | Photos and videos, linked to an album, post or (Facebook) comment             |
-| `albums`                 | Your photo albums                                                             |
-| `comments`               | Comments on your afterwrd posts and photos, from you or friends' sites        |
-| `polls`, `poll_votes`    | Polls in your afterwrd posts, and who answered                                |
-| `events`, `event_answers`| Your events, and your friends' answers                                        |
-| `post_audience`          | Who a post shared with chosen friends is shown to                             |
-| `post_versions`, `comment_versions` | What edited posts and comments said before                         |
-| `comments_elsewhere`     | Your comments on friends' posts, kept here too                                |
+| `own_identity`, `delegations` | Your identity (your passkeys', recovery code's and site's keys), and the browsers that may sign for you |
+| `identities`             | Other people's identities, as checked                                         |
+| `items`, `item_photos`   | Posts, photos, polls and events: yours, or on a group's site, the group's     |
+| `lists`, `list_pages`, `checkpoints` | Each item's records (comments, edits, deletes, votes, answers) in the order its site took them, with that site's signed running fingerprint |
+| `copies`                 | Friends' and groups' items and conversations, kept as your site checked them  |
+| `sent`                   | What you've signed and sent elsewhere, with the receipt that it was taken     |
+| `connections`            | Your friends, by identity                                                     |
+| `groups`, `group_members`| Groups you're in or run; on a group's site, its members                       |
+| `notices`, `blocks`      | Notifications, and people you've blocked                                      |
+| `media`, `albums`        | Photos and videos (by fingerprint), and your albums                           |
 | `facebook_people`        | Everyone named in the download; `friend_since` set for current friends        |
 | `facebook_post_tags`     | People tagged in your Facebook posts                                          |
 | `facebook_comments`      | Your comments and replies on Facebook, with whose thing they were on          |
 | `facebook_reactions`     | Your likes and reactions on Facebook                                          |
 | `facebook_tagged_photos` | Other people's photos you're tagged in (links only, no images)                |
 
-Friends, groups, sign-in and the rest are in [worker/migrations/](worker/migrations/).
+The rest are in [worker/migrations/](worker/migrations/). Tables from afterwrd 1 (`posts`, `comments`, `polls` and
+the like) are there only to bring things over to afterwrd 2, and are cleared out once the 30 days for that are up.
 
 ## Known limitations
 
