@@ -34,17 +34,19 @@ export const helpBody = ({ version = null } = {}) => html`<nav class="contents" 
   On your own posts, the ⌄ menu lets you remove anyone's comment, or turn comments off.</p>
   <h3>Groups</h3>
   <p>Start a group from <strong>Groups</strong>, or join one with an invite link someone sends you. Its admins decide who's in,
-  and can write the group's rules. Each group has a site of its own, in its owner's Cloudflare account.</p>
+  and can write the group's rules. Each group has a site of its own, in its owner's Cloudflare account (or on their
+  server).</p>
   <h3>Events</h3>
   <p>Make an event from <strong>Events</strong> and invite the friends you choose; only they see it, and say whether they're
   going. Groups can have events too, for everyone in them.</p>
   <h3>Notifications</h3>
   <p>Replies, mentions, invitations and changes to events show under <strong>Notifications</strong>. Your phone buzzes only for
-  events and when someone mentions you, and only if you've said yes, in <strong>Your devices</strong>. afterwrd never nags.</p>
+  events and when someone mentions you, and only if you've said yes on that device, in <strong>Events</strong>. afterwrd
+  never nags.</p>
   <h3>Your devices</h3>
   <p>Each phone or computer you sign in on is listed in <strong>Your devices</strong>. What you write is signed by the device
-  you write it on, so nobody else, not even your site's host, can write as you. A new device asks once to <strong>let this
-  browser sign</strong>.</p>
+  you write it on, so nobody else, not even your site's host, can write as you. To add a device, make a link in <strong>Your
+  devices</strong> and open it there; then, on a device that already signs, choose <strong>Let it sign for you</strong>.</p>
   <h3>Updates</h3>
   <p>afterwrd keeps itself up to date if you let it: <strong>Update</strong> (behind your picture) installs only releases signed
   with afterwrd's own key, a few days after they're out. If you let them, your friends' sites check that yours is running a real release.</p>
@@ -62,15 +64,16 @@ export const helpBody = ({ version = null } = {}) => html`<nav class="contents" 
   <h3>Your recovery code</h3>
   <p>If you lose every phone and computer that signs for you, your recovery code lets you sign again (it takes 7 days, and
   any devices you still have are told, in case it isn't you). Your site doesn't keep it: write it down, or keep it in your
-  password manager. You'll find it, and can make a new one, in <strong>Your devices</strong>.</p>
+  password manager. You can use it, or make a new one, in <strong>Your devices</strong>.</p>
   <h3>Your devices</h3>
   <p>Open device links only on your own phones and computers. If <strong>Your devices</strong> lists one you don't recognise,
   remove it, or sign out everywhere.</p>
   <h3>Updates and friends' checks</h3>
   <p>Let afterwrd update itself, and let your friends' sites check yours: both are on the <strong>Update</strong> page. A
-  check looks at three things: that your site is running exactly a signed afterwrd release; that every version put live
-  since the last check was one too; and that apps and API tokens in your Cloudflare account did only what installing,
-  updating and groups do.</p>
+  check looks at whether your site is running exactly a signed afterwrd release, set up as afterwrd sets it up, and
+  whether every version of its code uploaded since the last check was one too. A check you ask a friend for by link
+  also reads your Cloudflare account's log, to see that apps and API tokens did only what installing, updating and
+  groups do.</p>
   <h3 id="checks">If a check finds something</h3>
   <p>Home tells you, and <strong>Update</strong> shows what it found.</p>
   <ul>

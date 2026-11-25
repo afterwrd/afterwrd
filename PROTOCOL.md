@@ -51,10 +51,10 @@ with no body and `POST` for a call with one. The calling site picks the method f
 | What | Value |
 |---|---|
 | Request body | UTF-8 JSON text, sent with `Content-Type: application/json`. Receivers don't check the content type; they parse the bytes. |
-| Request body cap | 64 KiB (65,536 bytes) for every `POST` under `/_p/`, `/_member/` and `/_group/`, and for `/_connect/…/accept`, and `/_connect/ask`. Checked first from `Content-Length`, then from the bytes actually read. Over it: `413 {"error": "That's too big."}`, before any signature is looked at. `/_join/…/accept` reads at most 64 KiB too, but answers an oversized body with a `400`. |
+| Request body cap | 64 KiB (65,536 bytes) for every `POST` under `/_p/`, `/_member/` and `/_group/`, and for `/_connect/…/accept`, and `/_connect/ask`. Checked first from `Content-Length`, then from the bytes actually read. Over it: `413 {"error": "That's too big."}`, before any signature is looked at. `/_join/…/accept` reads at most 64 KiB too, but answers an oversized body with a `400`. The exceptions are `/_p/before` and `/_group/before`, which bring things over from afterwrd 1: 1,000,000 bytes. |
 | Reply body | A JSON object. A reply that isn't valid JSON, or is JSON but not an object (`null`, a list, a number), counts as `{}`. A reply over the caller's cap counts as no answer at all (status `0`). |
-| Reply size cap (caller side) | 2,000,000 bytes by default; 8,000,000 for a group's members lists; 524,288 bytes for `/.well-known/afterwrd`; 1,000 characters for `/_version`. |
-| Timeouts (caller side) | 8 s by default. 25 s for a member's site calling its group and for asking to be friends; 5 s for a group's ping; 15 s for checking records; 5 s for notes (the outbox) and for check notices; 20 s for ending a group. |
+| Reply size cap (caller side) | 2,000,000 bytes by default; 8,000,000 for a group's members lists; 524,288 bytes for `/.well-known/afterwrd`; 1,000 characters for `/_version`; under 65,536 characters for `/_p/reports/check`. |
+| Timeouts (caller side) | 8 s by default. 25 s for a member's site calling its group and for asking to be friends; 5 s for a group's ping; 15 s for checking records; 5 s for notes (the outbox) and for check notices; 10 s for asking what became of reports; 20 s for ending a group. |
 | Redirects | Never followed. A `3xx` reply is an error with that status, like any other non-`2xx`. |
 
 A caller treats any non-`2xx` reply as a refusal. It takes the reply's `error` (cut to 300 characters) as the message
@@ -206,24 +206,27 @@ The result is `{person, from}`: who signed the call, and the address they signed
 A frozen identity (one seen in two versions, section 4) can't make signed calls at all.
 
 If the signature doesn't check with the hosting key the receiver knows, it fetches the identity again from
-`Afterwrd-From` (at most once every 10 minutes for any identity) and, if the hosting key has changed, checks once more
-with the new one.
+`Afterwrd-From`, at most once every 10 minutes for each identity. It does so after it has answered: the call is
+refused, and a later call is checked with the new hosting key if it has changed. (Only where there is no request to
+finish work after does it fetch at once and check once more.) So how long a refusal takes says nothing about whom the
+receiver knows.
 
 **Who may call, and what is refused.** Receivers never fetch anything for a caller they have no reason to hear from.
 They look up `Afterwrd-From` among the sites they know first, and only then check the signature.
 
 | Receiver path | Who it accepts | Refused with |
 |---|---|---|
-| Friends' calls (`src/calls.js` `friendCalling`): `/_p/items…`, `/_p/records…`, `/_p/notes`, the calls in `src/friendcalls.js` | A connected friend at `Afterwrd-From`, signing as the identity tied to that connection (it's tied at the first signed call if it wasn't already). Also a friend calling from the new address their identity is moving to, once that move is in effect here. | `401 {"error": "Not connected."}`. This is the same for a stranger, an unsigned call and a call signed by anyone else, so nobody can learn who the owner is friends with (the `409`s below come before the signature is checked). `403` if the owner hasn't approved the friend yet (except `POST /_p/disconnect`). `409 {"error": "Not moved here yet.", "moving": true}` for a move not yet in effect here. `410 {"error": "Moved.", "moved": "<new address>"}` once this site's owner has moved away; this is sent before any check. |
-| Sites not yet known (`siteCalling`): asking to be friends, mention receipts, claiming a group, joining by invite link | Any identity whose address in effect is `Afterwrd-From`. Used only after the call has earned a fetch: a working link, a reason to ask, or a matching record. | Each handler's own answer: `400` or `403` when asking to be friends, `401` when joining a group, a quiet `202` for receipts. |
+| Friends' calls (`src/calls.js` `friendCalling`): `/_p/items…`, `/_p/records…`, `/_p/report`, `/_p/notes`, the calls in `src/friendcalls.js` | A connected friend at `Afterwrd-From`, signing as the identity tied to that connection (it's tied at the first signed call if it wasn't already). Also a friend calling from the new address their identity is moving to, once that move is in effect here. | `401 {"error": "Not connected."}`. This is the same for a stranger, an unsigned call and a call signed by anyone else, so nobody can learn who the owner is friends with (the `409`s below come before the signature is checked). `403` if the owner hasn't approved the friend yet (except `POST /_p/disconnect`). `409 {"error": "Not moved here yet.", "moving": true}` for a move not yet in effect here. `410 {"error": "Moved.", "moved": "<new address>"}` once this site's owner has moved away; this is sent before any check. |
+| Sites not yet known (`siteCalling`): asking to be friends, claiming a group and sending its identity, joining by invite link | Any identity whose address in effect is `Afterwrd-From`. Used only after the call has earned a fetch: a working link, a reason to ask, or a matching record. | Each handler's own answer: `400` or `403` when asking to be friends, `401` when joining a group. |
+| Mention receipts (`knownCalling`): `POST /_p/mention` | An identity the receiver already holds, whose address in effect is `Afterwrd-From`. Nothing is fetched, so a stranger's call can't make the receiver reach out. | A quiet `202`, whatever happens. |
 | A group's site (`src/groupmembers.js` `signedMember`) | A member at `Afterwrd-From` who joined with an identity, signing as that identity. | `401 {"error": "Not a member of this group."}` |
 | A member's site called by a group (`src/groupjoin.js` `signedGroup`): `/_member/…`, `/_p/notes` | A joined group at `Afterwrd-From`, signing as the group's identity. | `401 {"error": "Not a member."}` |
 
 > Note: the profile is deliberately narrow. A general RFC 9421 library that orders parameters differently, uses
 > another label, adds `expires` or `nonce`, or sends two signatures will be refused.
 
-Source: `src/signedcalls.js` `signCall`, `checkCall`; `src/calls.js` `friendCalling`, `siteCalling`;
-`src/identities.js` `hostingKeyFor`, `fetchIdentity`; `src/groupmembers.js` `signedMember`, `callMember`;
+Source: `src/signedcalls.js` `signCall`, `checkCall`; `src/calls.js` `friendCalling`, `siteCalling`, `knownCalling`;
+`src/identities.js` `hostingKeyFor`, `knownHostingKey`, `fetchIdentity`; `src/later.js`; `src/groupmembers.js` `signedMember`, `callMember`;
 `src/groupjoin.js` `signedGroup`.
 
 ### 2.4 Calls that aren't signed
@@ -236,14 +239,15 @@ could know yet:
 | `GET /.well-known/afterwrd` | A site's identity: `{v: 2, chain, owner?}` (section 4). Public. |
 | `GET /_version` | `{id}`: which uploaded version of the Worker is answering. With `?health=1`, also `ok`. Used to tell that a site is an afterwrd site, and by site checks (section 11). |
 | `GET /_connect/<token>/info` | `{name}`: the owner's name, for the page a friend link opens on the friend's own site (section 8). |
-| `GET /_join/<token>/info` | A group invite link's group: `{id, name, about, owner, person, members}` (section 10). |
+| `GET /_join/<token>/info` | A group invite link's group: `{id, name, about, rules, owner, person, members}` (section 10). |
 | `GET /_group/ping` | A group's site saying what it is: `{afterwrd: "group", version, protocol, hosting}` (section 10). |
 | `GET /files/<sha256>?exp=…&sig=…` | One photo or video by a link the serving site made and signed for itself (section 8). |
+| `POST /_p/reports/check` | What became of reports, asked by their secret ids alone, so asking doesn't say again who reported (8.15). On a person's site and a group's. |
 
 `POST /_group/claim` is signed, and also carries the group's setup key (section 10).
 
 Source: `src/app.js` `route`, `routeGroup`; `src/sites.js` `callSite`; `src/connect.js` `handleConnectLink`;
-`src/groups.js` `handleJoinLink`, `handleGroupApi`.
+`src/groups.js` `handleJoinLink`, `handleGroupApi`; `src/reports.js` `handleReportCheck`.
 
 ### 2.5 Errors
 
@@ -276,7 +280,7 @@ Statuses used between sites:
 | `404` | No such thing, or not for this caller (an expired link, an item the caller may not see). |
 | `409` | A conflict: `duplicate`, already done, not ready yet, or a move not yet in effect. |
 | `410` | Gone: the owner has moved, or the group has closed. |
-| `413` | The request body is over 64 KiB. |
+| `413` | The request body is over 64 KiB, or over a call's own smaller limit. |
 | `429` | Too much: over an allowance or a cap (section 2.6). |
 | `502` | This site couldn't reach a third site it needed. |
 | `503` | The site is being updated. Comes with `Retry-After` (`120`, or `1` just after a new version starts; `60` while its database is being moved). |
@@ -300,7 +304,7 @@ HTTP/1.1 429
 { "error": "This site has had a lot of requests from yours today. Try again tomorrow.", "retry": 1795046400 }
 ```
 
-Counted: calls through `friendCalling`, `siteCalling`, `signedMember` and `signedGroup`. Not counted: a group's owner
+Counted: calls through `friendCalling`, `siteCalling`, `knownCalling`, `signedMember` and `signedGroup`. Not counted: a group's owner
 calling their own group's site once it has an identity (claiming it and sending its identity are counted), a friend's
 call refused because they aren't approved yet, unsigned calls, and calls refused before the signature checked.
 
@@ -376,7 +380,7 @@ kinds (`KINDS`) are fixed:
 |---|---|---|
 | `record` | Records (section 5): signatures, and their fingerprints, which are their ids | A browser key; a host's hosting key for its own `remove` and `close` |
 | `head` | Signed heads and receipts (section 6), and the running head hash | A hosting key |
-| `delegation` | A browser key's delegation (section 4): its fingerprint is a passkey statement | A passkey |
+| `delegation` | A browser key's delegation (section 4): its fingerprint is a passkey statement | A passkey; also the browser key it names, as `possession`, for the owner's own site only (4.10) |
 | `identity` | Identity documents (section 4): the fingerprint of the first is the person id; each fingerprint is a passkey statement | A passkey (by statement); the recovery key (signed directly as `identity`) |
 | `profile` | A signed profile, the owner's name (section 4) | A browser key |
 | `statements` | Making the WebAuthn challenge from a list of statements (section 3.6). Nothing is signed with it directly. | |
@@ -800,7 +804,10 @@ that `origin`. (An address someone has moved away from still gives their identit
 **Identities passed along.** Sites also hand each other identities they know: as `people: {<id>: {chain, profile?}}`
 beside lists, notes and group pages (sections 6, 8, 9, 10). A reader learns each one the same way, and uses it only if
 its id is the one it was given under. Whoever passes an identity along is not trusted for anything: the chain checks
-or it does not.
+or it does not. A reader learns only the people who signed a record in that same answer or note, and someone it
+doesn't know yet only once one of their records there checks against the chain given (read first, keeping nothing).
+It learns at most 1,100 new identities from one answer, and 3,000 a day (UTC) from one sending site. So a host can't
+fill a reader with identities nobody signed anything with.
 
 **First seen.** For every document in the clean part of a chain it is given (below), the reader notes the time it
 first saw that document's fingerprint, once, in its own clock. These times are what the 7 days run from, and they are
@@ -823,7 +830,8 @@ someone holding one of its keys is fighting the owner.
 
 The reader also keeps, beside the identity, where it is moving or has moved (4.13).
 
-Source: `src/identities.js` `fetchIdentity`, `learnIdentity`, `parseChain`, `cleanest`, `seenTimes`; `src/identity.js` `forked`.
+Source: `src/identities.js` `fetchIdentity`, `learnIdentity`, `learnPeopleIn`, `signersIn`, `parseChain`, `cleanest`,
+`seenTimes`; `src/identity.js` `forked`.
 
 ### 4.7 Changes the owner's site makes
 
@@ -1054,7 +1062,7 @@ signed by the owner's current recovery key. The rules for fast, slow, pending an
 the group's own documents.
 
 **Reading needs the owner.** A reader reads a group's chain with the owner's identity beside it, as that reader knows
-it. It refuses the group (no identity at all) if it does not know the owner, or the owner's identity is frozen or is
+it. It refuses the group (no identity at all) if it does not know the owner, or the owner's identity is frozen, closed or
 itself a group's.
 
 **`/.well-known/afterwrd` on a group's site** returns the group's chain and, as `owner`, its owner's chain. A reader
@@ -1108,11 +1116,11 @@ A record travels as a `sent` object:
   characters) of SHA-256 of `"afterwrd record 2\n"` followed by the bytes. The same bytes sent twice are the same record.
 - `content` is the UTF-8 JSON of what the record carries (words, a vote, a role), at most 16,384 bytes
   (`MAX_CONTENT`). It is not inside the signed bytes. The record holds `body` instead: base64url of SHA-256 of the
-  16-byte `salt` followed by the content's bytes (plain SHA-256, with no `afterwrd` prefix). So content can be thrown
-  away for good while the record and its signature still check, and nobody holding only the record can guess short
-  content.
-- A record whose kind carries content must have `body`. Content sent beside a record whose kind has none, or content
-  that doesn't match `body`, makes the whole record fail its check.
+  16-byte `salt` followed by the content's bytes (plain SHA-256, with no `afterwrd` prefix). So nobody holding only the
+  record can guess short content.
+- A record whose kind carries content must have `body`, and is always sent with its content: words go only with the
+  whole record, when its entry is emptied (6.7). Such a record sent without its content, content sent beside a record
+  whose kind has none, or content that doesn't match `body`, makes the whole record fail its check.
 
 The key that signed it is vouched for separately. A browser key is vouched for by a **delegation** (section 4), sent
 beside the record, never inside it: in a write call as `delegation: {bytes, proof}`, and in a list read as a
@@ -1145,12 +1153,14 @@ Every record is a JSON object with these fields. "Required" is what `parseRecord
 | `audience` | `{kind: "invited", fp}` | optional, `item` and `change` only | Who an event is for, as a salted fingerprint, never the list of people (section 7). `kind` must be `"invited"`. |
 | `body` | id | for kinds with content, and only for them | Salted SHA-256 of the content (5.1). |
 | `at` | integer | yes | When the writer says they signed it, Unix seconds. Shown nowhere; hosts' "taken" times are shown. |
+| `before` | integer | optional, `item` and `comment` only | Only for what's brought over from afterwrd 1: when it was first written, Unix seconds, above 0 and below `at`. Shown in place of the host's taken time when earlier (`writtenAt`). A host takes it only while bringing its own old rows over, and refuses it otherwise. |
+| `old` | integer | optional, `item` with `before` only | A group post brought over from afterwrd 1: its number there, above 0. |
 
 `parseRecord` does not refuse fields it doesn't know. They are signed, so they can't be added or taken away, but
 nothing reads them.
 
-Source: `public/static/records.js` `parseRecord`, `KINDS`, `WITH_CONTENT`, `ABOUT`, `VERSIONED`, `DATED`,
-`writtenAt`.
+Source: `public/static/records.js` `parseRecord`, `KINDS`, `WITH_CONTENT`, `ABOUT`, `VERSIONED`, `DATED`, `BROUGHT`,
+`writtenAt`; `src/hosted.js` `takeRecord`.
 
 ### 5.3 When a record checks
 
@@ -1166,8 +1176,8 @@ when all of these hold (`src/records.js` `checkRecord`, which never throws):
    - a browser key with a delegation that checks against the author's identity at time `at` (`checkDelegation`,
      section 4) and names this key.
 4. `sig` is that key's signature of the record bytes as kind `record`.
-5. If `content` was sent: the kind carries content, the salt is 16 bytes, the content is at most 16,384 bytes, its
-   salted SHA-256 equals `body`, and it parses as JSON.
+5. `content` is sent exactly when the kind carries content, and then the salt is 16 bytes, the content is at most
+   16,384 bytes, its salted SHA-256 equals `body`, and it parses as JSON.
 
 `at` here is the time the check is made for: the host uses its clock now; a reader uses the entry's `taken` time, so a
 record stays good after the delegation behind it has expired, as long as it was good when the host took it.
@@ -1282,7 +1292,8 @@ A writer's site sends its owner's record to the host in a signed call (section 8
 2. Checks access: the caller may see the item (404 otherwise); the caller isn't blocked; for a group, the caller is a
    member and the kind is one a member may send on a post.
 3. Applies the daily cap (6.8; 429).
-4. Checks the delegation against the author's identity now, and keeps it to pass on to readers.
+4. Checks the delegation against the author's identity now. It keeps it, to pass on to readers, only once the record
+   is taken (step 7): a delegation shows that a passkey vouched for a key, not that the sender holds it.
 5. Checks content rules for the kind: comment and edit lengths, mentions, poll and event rules (`kindPlan`: version,
    guest, closing time, called off, over).
 6. Runs `checkRecord` (5.3) at the host's time now; refuses with "That didn't check." if it fails, or if `host` isn't
@@ -1310,8 +1321,9 @@ Source: `src/friendhost.js` (`POST /_p/records`); `src/groupposts.js` `memberRec
 
 A reader is shown a record only inside a list (6.9) or a note carrying one entry (section 9). For each record it runs
 `checkRecord` at the entry's taken time, then the same list rules the host used (6.10). A record that fails
-`checkRecord` is hidden and counted as "failed", not trusted. A record that checks but breaks a list rule means the host
-took something no honest host would: the reader stops there and says so.
+`checkRecord` because its writer can't be judged there (unknown, frozen or closed) is hidden and counted as "failed",
+not trusted. Any other failure, or a record that checks but breaks a list rule, means the host took or passed on
+something no honest host would: the reader stops there and says so.
 
 Source: `src/lists.js` `checkList`.
 
@@ -1482,7 +1494,7 @@ Source: `src/hosted.js` `take`, `readList`, `tombstone`; `src/lists.js` `checkLi
 
 | Cap | Value | Applies to | Refusal |
 |---|---|---|---|
-| Entries in an item's or date's list | 2,000 (`MAX_ENTRIES`) | every record | "This is as long as a list gets." |
+| Entries in an item's or date's list | 2,000 (`MAX_ENTRIES`); 2,010 for a `close`, or a `delete` or `remove` of the item itself | every record | "This is as long as a list gets." |
 | Entries in a members list | 20,000 (`MAX_MEMBER_ENTRIES`); 22,000 for `leave`, `remove` and `close` | every record | "This group's list is as long as it gets." |
 | Records by one writer on an item's or date's list | 20 (`PER_AUTHOR`) | all but `delete`, the owner's `change`, records by host, and, in groups, `remove` and `calloff` | "That's as many as anyone can add here." |
 | Records by one writer on one host a day | 200 (`LIMITS.records`) over the last 24 hours | all but `delete`, `leave`, `remove`, `calloff`; not the members list; not the owner's own records on their own site | 429 "That's a lot for one day here. Try again tomorrow." |
@@ -1490,7 +1502,7 @@ Source: `src/hosted.js` `take`, `readList`, `tombstone`; `src/lists.js` `checkLi
 A writer's `delete`s count towards their 20 but are never refused by it. Readers check the 20-per-writer cap and the
 list caps; the daily cap is the host's alone. A local test site may set smaller daily limits.
 
-Source: `src/lists.js` `MAX_ENTRIES`, `PER_AUTHOR`, `Rules.refuse`; `src/members.js` `MAX_MEMBER_ENTRIES`;
+Source: `src/lists.js` `MAX_ENTRIES`, `MAX_ENDINGS`, `PER_AUTHOR`, `Rules.refuse`; `src/members.js` `MAX_MEMBER_ENTRIES`;
 `src/hosted.js` `overDailyRecords`; `src/limits.js` `LIMITS`.
 
 ### 6.9 Reading a list
@@ -1839,7 +1851,8 @@ The host refuses a vote in these cases:
 Anyone who may see the post may vote: any friend on a person's site, any member in a group.
 
 **Ending.** The post's author may send one `end` record, which has no content. After it, no more votes are taken, but
-comments carry on. Only the item's owner may end a poll, and only once (`Rules.refuse`).
+comments carry on. Only the item's owner may end a poll, and only once (`Rules.refuse`). The host also refuses an `end`
+once the poll is past `closes_at` ("That poll has closed.").
 
 **Counting.** The count is worked out from the list, never kept separately (`workOut`). Going through the entries in
 order, a vote counts if all of these hold:
@@ -2129,9 +2142,9 @@ site, writing is a record the reader's site passes on. Nothing secret is exchang
 signed call (section 2) made with the calling site's hosting key, and the receiver works out who is calling from the
 caller's identity at the caller's own address.
 
-This section covers every call between friends' sites except notes (`POST /_p/notes`, `POST /_p/mention`: section 9)
-and site checks (`POST /_p/check-request`, `/_p/check-token`, `/_p/check-soon`, `/_p/check-failed`, `/_p/checked`:
-section 11).
+This section covers every call between friends' sites except notes (`POST /_p/notes`, `POST /_p/mention`: section 9),
+site checks (`POST /_p/check-request`, `/_p/check-token`, `/_p/check-soon`, `/_p/check-failed`, `/_p/checked`:
+section 11), and `POST /_p/before`, which only brings comments over from afterwrd 1 and isn't specified here.
 
 | Call | Caller | Purpose |
 |---|---|---|
@@ -2145,6 +2158,8 @@ section 11).
 | `GET /_p/items/<id>` | an approved friend, signed | one item's whole list |
 | `POST /_p/records` | an approved friend, signed | the caller's owner's record on one of the owner's items |
 | `POST /_p/records/check` | an approved friend, signed | what became of the caller's owner's records |
+| `POST /_p/report` | an approved friend, signed | tell the owner about someone else's comment |
+| `POST /_p/reports/check` | anyone, unsigned | what became of reports, by their ids |
 | `GET /_p/posts`, `/_p/posts/<key>` | an approved friend, signed | the owner's Facebook posts |
 | `GET /_p/albums`, `/_p/albums/<key>` | an approved friend, signed | the owner's albums |
 | `GET /_p/photos/<sha256>` | an approved friend, signed | one photo or video |
@@ -2154,7 +2169,8 @@ Source: `src/app.js` `route`; `src/friendcalls.js`; `src/friendhost.js`; `src/co
 
 ### 8.1 The friend gate
 
-Every call from a friend's site under `/_p/` except `/_p/mention` passes through one gate
+Every call from a friend's site under `/_p/` except `/_p/mention` and the unsigned `/_p/reports/check` (8.15) passes
+through one gate
 (`friendCalling`) before anything else is read. All
 `POST /_p/*` bodies over 64 KB are refused with 413 `{"error": "That's too big."}` before the gate (`src/app.js`
 `route`).
@@ -2423,7 +2439,7 @@ or only entries after `n`, for a reader that has already checked up to `n` (`src
 | Deleted or removed whole (the item has gone, so the caller can't see it) | 404 `{"error": "Not found."}` |
 
 Answer, 200: the list, in the form section 6.9 gives (`v`, `owner`, `entries`, `signedHead`, `checkpoint`,
-`delegations`, `people`). Without `after`, a list longer than 500 entries is sent from its latest checkpoint (6.6).
+`commentsOff` when the owner has turned comments off, `delegations`, `people`). Without `after`, a list longer than 500 entries is sent from its latest checkpoint (6.6).
 `people` carries the identity chain and signed profile of every writer in the entries, as far as this site knows
 them, so the reader can check and name people it doesn't know.
 
@@ -2467,8 +2483,8 @@ it and their signed profile. Body:
 | `delegation.bytes` is a delegation (at most 1024 bytes) from the caller's identity, good now, for `record.key` | 400 `That isn't signed by them.` |
 | The record itself, the list's rules and the kind's rules (sections 5 and 6) | 409 with the reason; `duplicate` if the list already has it |
 
-Once the delegation checks, it is kept (whether or not the record is then taken), so the host can pass it on with the
-list. If `profile` checks against the caller's identity, it is kept and passed on with the list in `people`; if not,
+Once the record is taken, the delegation is kept, so the host can pass it on with the list; a delegation sent with a
+record that's refused isn't kept. If `profile` checks against the caller's identity, it is kept and passed on with the list in `people`; if not,
 it is ignored.
 
 Answer, 200:
@@ -2645,7 +2661,8 @@ Body of `POST /_p/report`:
 { "item": "<the list it's on>", "about": "<the record's fingerprint>", "reason": "unkind", "note": "…", "named": true }
 ```
 
-`reason` is one of `unkind`, `wrong`, `spam`, `illegal`, `other`; `note` at most 500 characters. On a person's site
+`reason` is one of `unkind`, `wrong`, `spam`, `illegal`, `other`; `note` is trimmed and cut to 500 characters;
+`named` is true unless it's `false`. On a person's site
 `about` must be a `comment` by someone other than the owner; on a group's, a `comment` or an `item` (a post or photo),
 by anyone but the caller. A group sends it to its owner and admins **apart from whoever wrote it**, and never lists it
 to them or lets them leave it; with nobody else running the group, it's refused (400). The host keeps a copy of what
@@ -2659,19 +2676,27 @@ reports about one thing are kept open; another is answered with the id of one al
 | Status | When |
 |---|---|
 | 200 `{"ok": true, "id": "<report id>"}` | kept |
-| 400 | not a reason; `about` not on `item`; the caller's own; a kind this host doesn't take reports about |
-| 404 | the caller may not see `item`, or `about` isn't there any more |
-| 409 `You've told them about this already.` | the same person, about the same record |
-| 429 | more than 10 from one person in a day (UTC) |
+| 400 `That didn't work.` | `about` (on a group's site, `item` too) isn't a 43-character id, or `reason` isn't one of the five |
+| 400 `That's yours.` | the record is the caller's own |
+| 400 | a kind this host doesn't take reports about (`That can't be reported here.`), or nobody but its writer runs the group |
+| 404 | the caller may not see `item` (`That post isn't here any more.`), or `about` isn't on it, or has been emptied (`That isn't there any more.`) |
+| 409 `You've told them about this already.` | the same person, about the same record: today, or ever for a named report |
+| 409 `This group has closed.` | a group's site, once it's closed (10.13) |
+| 429 `That's a lot for one day. Try again tomorrow.` | more than 10 from one person in a day (UTC) |
+
+On a person's site, an `illegal` report also tells the owner's phones, for the first 3 such reports in 24 hours; other
+reasons wait quietly for the owner to look.
 
 A site from before reports answers 404 `Not found.`: the reporter's site says theirs needs updating.
 
 A report is dealt with when what it's about is removed (a `remove` of it, or of the post it's on), when its writer is
 removed from the group, or when whoever runs the space leaves it, with an optional word back (300 characters).
 
-`POST /_p/reports/check` `{ids: [<report id>…]}` (at most 50, body at most 8 KB) is **unsigned**: a report's id is a
-256-bit secret only its sender's site has, so asking needn't say again who's asking. It answers `{reports: [{id,
-outcome, word}]}`: `outcome` is null while open, else `removed`, `left` or `member`. A report whose post or comment has
+`POST /_p/reports/check` `{ids: [<report id>…]}` is **unsigned**: a report's id is a 256-bit secret only its sender's
+site has, so asking needn't say again who's asking. A body over 8,192 characters is 413 `{"error": "Too much."}`; ids
+that aren't 16 to 64 base64url characters are dropped, and only the first 50 left are looked at. It answers `{reports:
+[{id, outcome, word}]}`, leaving out ids it doesn't know: `outcome` is null while open, else `removed`, `left` or
+`member`. A report whose post or comment has
 gone with its list (a whole post deleted or removed, its photos with it) counts as removed. The reporter's site asks
 hourly at most, the longest-unasked first, and says what became of it in Notifications; for `illegal` still open after
 3 days, it says where else to turn. Reports to a friend or group it no longer has are marked gone and not asked about.
@@ -2715,7 +2740,7 @@ A site that has moved answers `410`, and one part-way through a move answers `40
 |---|---|---|
 | `202` | `{"ok": true}` | the note was taken; also when it checked but was dropped quietly (the writer is blocked, it's the owner's own, it isn't for them) |
 | `400` | `{"error": "That didn't work."}` | not JSON, `v` isn't `2`, unknown kind, malformed fields, or the receiver has no hosting key yet |
-| `400` | `{"error": "That isn't a post of theirs."}` / `"That receipt doesn't check."` / `"That comment doesn't check."` / `"That isn't theirs to change."` / `"That isn't a change to an event."` | a check failed (below) |
+| `400` | `{"error": "That isn't a post of theirs."}` / `"Their identity couldn't be checked."` / `"That receipt doesn't check."` / `"That comment doesn't check."` / `"That isn't theirs to change."` / `"That isn't a change to an event."` | a check failed (below; a group's wording is in 9.3) |
 | `401`, `403`, `409`, `410`, `413`, `429` | `{"error": …}` | refused before the note was looked at (section 2) |
 
 The sender reads only the status. 2xx means delivered. Retries are described in 9.6.
@@ -2778,11 +2803,13 @@ theirs."`. A post that checks is kept as a copy at once, whatever the owner's no
 **`comment` and `change`.** The receiver checks:
 1. `item` is an id. `entry.n` is a safe integer ≥ 2, `entry.taken` a safe integer, `entry.fp` an id, `entry.prev` a
    string. Otherwise `400 "That didn't work."`.
-2. The host took it there. It works the head out again,
+2. The host took it there. The host's identity must be known here (`400 "Their identity couldn't be checked."`). It
+   works the head out again,
    `headOf({host: caller, list: item, prev, n, fp, taken})` (section 6). It checks `receipt` against the caller's
    current hosting key for that host and list. The receipt's `n` and `head` must equal `entry.n` and the head just
    worked out. Otherwise `400 "That receipt doesn't check."`.
-3. It learns the identities in `people` (only the first two entries are looked at), and a signed name from each.
+3. It learns the writer's identity from `people` (only the entry for the record's `author` is read), and their signed
+   name.
 4. The record checks (section 5), with delegations looked up only in `delegations`, as at `entry.taken`. Its
    fingerprint must be `entry.fp`, its kind must be the note's kind, `host` must be the caller and `item` must be
    `item`. Otherwise `400 "That comment doesn't check."`.
@@ -2818,10 +2845,13 @@ common with 9.2:
 | `calloff` | group only: an admin, or the event's writer, calling an event off. With `date` (`YYYY-MM-DD`), one date of a repeating event, on that date's own list, where `entry.n` may be 1. The record's `date` must equal the note's. |
 | `gone` | as from a friend |
 | `closed` | group only: the owner's `close` on the group's members list (the list whose id is the group's person id), with the group's receipt. It must be by the group's owner. The receiver marks the group closed. |
+| `report` | group only: `{v: 2, kind: "report", id, illegal}`, something raised with the admins (8.15). Nothing in it is signed or checked. The receiver keeps it only if the group's last word on its own role was `owner` or `admin`, and `id` is 16 to 64 base64url characters: as a notice in a budget of its own, 20 a day from one group, and on the phones for `illegal: true`, 3 a day from one group. |
 
 Checks 1, 2 and 4 of 9.2 apply, with the group's hosting key and the group as host. Any member's comment is accepted
 (the writer needn't be a friend), and the writer is named from what the receiver knows, else their signed name, else
-`names`.
+`names`. A comment also makes a "comment" notice when the owner here wrote the post. The refusals are worded
+differently: `"That isn't a post in this group."` for an `item`, `"That doesn't check."` for a record, and `"The
+group's identity couldn't be checked."`.
 
 Source: `src/groupcopies.js` `receiveGroupNote`, `groupClosed`, `dateCalledOff`; `src/groupposts.js` `groupNoteFor`,
 `queueToPeople`.
@@ -2864,11 +2894,11 @@ once the caller has used its day's allowance (section 2).
 **Checks, in order.** Each one stops quietly if it fails:
 1. `v` is `2`, `kind` is `"receipt"`, and `host` and `item` are ids.
 2. `host` is an approved, connected friend of the owner here, or a group with an identity that the owner has joined.
-   Nothing is fetched before this point.
 3. The record (parsed, not yet verified) is a `comment` with that `host` and `item`. It isn't by the owner here, and
    its `mentions` includes the owner here.
-4. The call is signed (section 2) by the record's author, whose identity is now fetched from the calling address. The
-   author isn't blocked.
+4. The call is signed (section 2) by the record's author, whose identity this site must know already (from a thread
+   they wrote in, say): nothing is fetched to check the call, so a stranger's call can't make the receiver reach out.
+   Someone it doesn't know is told by the host's note instead. The author isn't blocked.
 5. The record checks (section 5) as at now, with `delegation` accepted only for the record's own key.
 6. The host's identity is known here and isn't frozen. `receipt` checks as the host's signed head for list `item`
    under the host's current hosting key.
@@ -2884,7 +2914,7 @@ the owner gets a notice saying the host isn't showing them what it told the writ
 reached, it is asked again next time. After 2 days it is left unchecked.
 
 Source: `src/receipts.js` `queueReceipts`, `receiptFor`, `sendReceipt`, `receiveReceipt`, `checkReceipts`,
-`checkGroupReceipts`.
+`checkGroupReceipts`; `src/calls.js` `knownCalling`.
 
 ### 9.5 Mentions and @here on the wire
 
@@ -2916,7 +2946,8 @@ checked in the same statement that keeps the notice (a notice over a limit isn't
 
 | Limit | Value | Counted per |
 |---|---|---|
-| notices | 60 in 10 minutes, 500 in a day | sending friend's site, or group |
+| notices | 60 in 10 minutes, 500 in a day (not counting `report` notices) | sending friend's site, or group |
+| `report` notices (9.3) | 20 a day; on phones, `illegal` ones only, 3 a day | group |
 | notices set off by one writer | 20 a day | writer (record author), across all friends and groups |
 | mentions reaching phones | 5 in 10 minutes, 20 a day | sending friend's site, or group |
 | mentions and @here reaching phones by one writer | 5 a day | writer, across all friends and groups |
@@ -2925,7 +2956,7 @@ checked in the same statement that keeps the notice (a notice over a limit isn't
 
 Phones are told only by the owner's own site, never by a friend's. The site sends Web Push messages, signed with its
 own VAPID key and encrypted for each device, to the devices the owner has turned on. They are sent only for mentions,
-@here, and invitations, changes and calling off of events. A friend's note can at most make the receiving site decide
+@here, invitations, changes and calling off of events, and reports that something might be illegal (8.15, 9.3). A friend's note can at most make the receiving site decide
 to do this, within the limits above.
 
 Source: `src/notes.js` `keepNotice`, `tellMention`; `src/notify.js` `pushAllowed`, `writerMayBuzz`, `MENTION_PUSH`;
@@ -2944,12 +2975,12 @@ address. The address is looked up at sending, so a friend removed or a member wh
 | timeout | 5 s for `/_p/notes`; 8 s for `/_p/mention` |
 | redirects | not followed (a 3xx counts as refused) |
 | sent from | a person's site: the address the note was queued at; a group's site: the group's own address |
-| tried again | no answer, a timeout, `5xx`, `429`, `409` (a move not yet in effect there), or the body couldn't be built just then |
+| tried again | no answer, a timeout, `5xx`, `429`, `409` (a move not yet in effect there; notes only, not receipts), or the body couldn't be built just then |
 | not tried again | any other non-2xx answer (`400`, `401`, `403`, `404`, `410`, `413`, …) |
 | back-off | 60 s, 5 min, 30 min, 2 h, 6 h, 12 h, 24 h between tries: 8 tries over about 44.6 hours, then given up |
 | nothing to send | the recipient is no longer a friend or member, they aren't invited (any more) to the event, or the thing is gone: dropped, not retried |
 
-A note to every friend (or, for @here, every member) walks the friend list in id order, 40 at a time, as it stands
+A note to every friend (or, for @here and `closed`, every member) walks the friend list in id order, 40 at a time, as it stands
 when sent. A note to chosen people walks a fixed list. Receivers must not rely on order: notes about one item can
 arrive in any order, more than once, or not at all.
 
@@ -2993,7 +3024,10 @@ anything else:
 | `POST /_group/records` | members, and people waiting | a signed record for the members list (10.7) |
 | `GET /_group/admin/members`, `POST /_group/admin/*` | admins | running the group (10.8) |
 | `GET /_p/items…`, `POST /_p/items`, `POST /_p/records`, `POST /_p/records/check`, `POST /_p/people` | members | its posts (10.9) |
+| `POST /_p/report` | members | telling the admins (8.15) |
+| `POST /_p/reports/check` | anyone, unsigned | what became of reports (8.15) |
 | `GET /files/<sha256>?exp=…&sig=…` | a member's link | one photo (10.10) |
+| `POST /_group/rejoin/point`, `POST /_group/rejoin`, `POST /_group/before` | sites of people in a group from afterwrd 1, for 30 days after it came over | bringing its members and posts over; not specified here |
 
 POST bodies to `/_group/…` and `/_p/…` are refused with 413 above 64 KB before anything is read, as on a person's site
 (section 2). `/_join/<token>/accept` reads at most 64 KB itself, and answers a bigger body with 400. A group's site has no daily run.
@@ -3011,7 +3045,7 @@ Limits that apply throughout:
 | An invite link lasts | 14 days | `LINK_SECONDS` |
 | Requests one invite link can carry | 100 | `LINK_REQUESTS` |
 | Entries in a members list | 20,000 | `src/members.js` `MAX_MEMBER_ENTRIES` |
-| Group name / about | 100 / 1,000 characters | `MAX_GROUP_NAME`, `MAX_GROUP_ABOUT` |
+| Group name / about / rules | 100 / 1,000 / 2,000 characters | `MAX_GROUP_NAME`, `MAX_GROUP_ABOUT`, `MAX_GROUP_RULES` |
 | A post's text | 5,000 characters | `MAX_GROUP_TEXT` |
 | A comment's text | 2,000 characters | `src/archive/comments.js` `MAX_COMMENT` |
 | Photos in one post | 8 | `MAX_GROUP_PHOTOS` |
@@ -3174,11 +3208,11 @@ there. On their own site they confirm, and their site goes on from there.
 **`GET /_join/<token>/info`.** Not signed. Answers:
 
 ```json
-{ "id": 1, "name": "Walkers", "about": "Sunday walks", "owner": "Ann Example",
+{ "id": 1, "name": "Walkers", "about": "Sunday walks", "rules": "Be kind.", "owner": "Ann Example",
   "person": "<group's person id>", "members": { "n": 12, "h": "<running fingerprint at 12>" } }
 ```
 
-`members` is null while the members list is empty. The joiner's site refuses a group whose `person` isn't a 43-character
+`rules` is null when the group has none (10.15). `members` is null while the members list is empty. The joiner's site refuses a group whose `person` isn't a 43-character
 id. Its browser then signs a `join` with `host` and `item` = `person`, `seen` = `members`, `prev` = the fingerprint of
 this site's newest record on that list the group took (or null), and content `{name}`. Before sending, the joiner's site
 fetches the group's identity from the link's address and checks its person id is `person`.
@@ -3202,8 +3236,9 @@ Checks, in order:
 7. The record's `author` is the caller's person id, and `delegation` is a delegation from their identity that's
    current now and names the record's `key`; else 400.
 8. It's a `join` with `item` the group's id, else 400.
-9. Fewer than 50 are waiting, else 429.
-10. The members list takes it (10.3), else 409 with the reason.
+9. Its author hasn't been removed from the group (10.15), else 403 `You can't join this group.`
+10. Fewer than 50 are waiting, else 429.
+11. The members list takes it (10.3), else 409 with the reason.
 
 The joiner's name comes from the `join`'s checked content: trimmed and cut to 100 characters, or "Someone". A valid
 `profile` is kept to pass on to other members. The answer:
@@ -3220,8 +3255,9 @@ Source: `src/groups.js` `linkedGroup`, `handleJoinLink`; `src/groupmembers.js` `
 
 ### 10.5 Members' sites and the group, calling each other
 
-**A member calling the group.** Every call except ping, claim, identity and invite links must be a signed call
-(section 2) whose `Afterwrd-From` address is a member's row that has an identity. The signature must check against the
+**A member calling the group.** Every call except ping, claim, identity, invite links, `/_p/reports/check` and the
+calls for groups from afterwrd 1 must be a signed call (section 2) whose `Afterwrd-From` address is a member's row
+that has an identity. The signature must check against the
 hosting key of that same identity at that same address. The group never fetches anything for an address that isn't a
 member's, so a stranger can't make it call out. The caller then comes under the day's allowance (section 2), charged to
 their person id. The group's owner is exempt on their own group.
@@ -3247,12 +3283,17 @@ hosting key. The call then comes under the allowance, charged to the group's per
 The group makes two kinds of call:
 
 - `POST /_p/notes`: notes (10.12).
-- `POST /_member/removed`, body `{}`: an admin removed this member, or turned down their request. The group sends it,
-  once, without retrying, just before it drops their row. The member's site forgets the group, its copies and notices,
-  unless it's the site that made the group. It answers `{"ok": true}`.
+- `POST /_member/removed`: an admin removed this member, or turned down their request. The group sends it, once,
+  without retrying, just before it drops their row. Body: `{sent, entry: {n, fp, taken, prev}, receipt, roles,
+  delegations, people}`: the signed `remove`, where the group took it on the members list and its receipt, and for an
+  admin's removal their `roles` proof (10.9) with the delegations and identities behind it. The member's site forgets
+  the group, its copies and notices, only if this shows the removal for sure: a `remove` by the group's owner, or by
+  an admin as the `roles` proof shows, of the newest `join` this site sent there, whose head worked out from `entry`
+  is the one in `receipt`, signed by the group's current hosting key. It never forgets a group it made itself. It
+  answers `{"ok": true}` either way.
 
-Source: `src/groupmembers.js` `signedMember`, `callMember`; `src/groupjoin.js` `signedGroup`; `src/membership.js`
-`handleMember`; `src/notes.js` `receiveNotes`.
+Source: `src/groupmembers.js` `signedMember`, `callMember`; `src/groups.js` `tellRemoved`; `src/groupjoin.js`
+`signedGroup`; `src/membership.js` `handleMember`, `removedForSure`; `src/notes.js` `receiveNotes`.
 
 ### 10.6 Reading who's in
 
@@ -3274,8 +3315,9 @@ Source: `src/groupmembers.js` `signedMember`, `callMember`; `src/groupjoin.js` `
 ```
 
 `items` is ordered owners and admins first, then by name. Members see only those in. Admins also see those waiting, and
-each item gets `afterwrd:member` (the group's row number for them) and `afterwrd:waiting` (true or false). Fields with
-no value are left out.
+each item gets `afterwrd:member` (the group's row number for them) and `afterwrd:waiting` (true or false), and
+`afterwrd:before: true` for someone waiting who was in the group on afterwrd 1. Admins' answer also has
+`afterwrd:removed`, who can't ask to join again (10.15). Fields with no value are left out.
 
 The `context`, the Group object, also comes with every `GET /_p/items` pull (10.9):
 
@@ -3283,6 +3325,7 @@ The `context`, the Group object, also comes with every `GET /_p/items` pull (10.
 |---|---|
 | `type`, `id` | `"Group"`, `<group origin>/groups/1` |
 | `name`, `summary` | name and about (unsigned: the group's word) |
+| `afterwrd:rules` | its rules, if it has any (10.15) |
 | `published` | when it was claimed (ISO 8601) |
 | `attributedTo` | the owner: `{type: "Person", id: "<their site>/", name}` |
 | `afterwrd:members` | how many are in, the owner included |
@@ -3327,7 +3370,8 @@ Source: `src/groups.js` `groupObject`, `groupMembers`; `src/groupmembers.js` `si
 ### 10.7 `POST /_group/records`
 
 A member's (or a waiting person's) signed record for the members list: `approve`, `remove`, `role`, `leave` or `close`.
-Body: `{"sent": {record, sig, content?, salt?}, "delegation": {bytes, proof}}`.
+Body: `{"sent": {record, sig, content?, salt?}, "delegation": {bytes, proof}}`, and for a `remove`, optionally
+`"clear": true` (10.15).
 
 Before signing, the member's site works out the record's `seen`, `prev` and `role_at` from the list as it last checked
 it: `seen` = `role_at` = its last checked point, `prev` = its owner's newest record there. Someone still waiting can't
@@ -3348,7 +3392,9 @@ Checks, in order:
 8. The members list takes it (10.3), else 409 with the reason. A refusal for a record already taken says `"duplicate"`.
 
 Then the group's table follows the list: `approve` lets them in, `role` sets their role, and `remove` and `leave` drop
-their row. A `remove` first sends `POST /_member/removed` to them (10.5). A `close` closes the group (10.13). The answer
+their row. A `remove` first sends `POST /_member/removed` to them (10.5), deals with any open reports about what they
+wrote (8.15), and, if they were in, keeps them as removed and clears up if asked (10.15). A `close` closes the group
+(10.13). The answer
 is `{"ok": true, "receipt": <signed head>, "n": <entry number>}`.
 
 The member's site keeps what it sent with the receipt (10.14). If a `leave` doesn't get through, it's kept and sent
@@ -3361,15 +3407,18 @@ Source: `src/groupmembers.js` `takeMemberRecord`; `src/groups.js` `handleGroupAp
 ### 10.8 Admin calls
 
 Admins are the owner and members whose role is `admin` in the group's table. That table follows the signed list. The
-calls below other than `GET /_group/admin/members` and `end` are refused with 409 `{"error": "This group has closed."}` once it's closed. Name, about,
+calls below other than `GET /_group/admin/members`, `end` and the two reports calls are refused with 409 `{"error": "This group has closed."}` once it's closed. Name, about,
 @here and invite links are not signed records: they're the group's own settings, changed on an admin's signed call.
 
 | Call | Body | Answer | Notes |
 |---|---|---|---|
 | `GET /_group/admin/members` | | as 10.6, with those waiting | |
 | `POST /_group/admin/link` | `{}` | `{"link": "<origin>/_join/<token>"}` | replaces any earlier link |
-| `POST /_group/admin/about` | `{"name", "about"}` | `{"ok": true}` | name trimmed, cut to 100, required (400); about as in claim |
+| `POST /_group/admin/about` | `{"name", "about", "rules"?}` | `{"ok": true}` | name trimmed, cut to 100, required (400); about as in claim; `rules` as about, cut to 2,000, left as they were if absent (10.15) |
 | `POST /_group/admin/here` | `{"on": true \| false}` | `{"ok": true}` | whether any member may use @here; anything but `true` means no |
+| `GET /_group/admin/reports` | | `{"reports": [...]}` | what members have raised (8.15): one entry for each thing, every open one first, then those dealt with in the last 30 days, at most 200 things; never what's about the asker's own posts and comments |
+| `POST /_group/admin/reports/leave` | `{"about", "word"?}` | `{"ok": true}` | looked at and left, with an optional word back (cut to 300); not for the asker's own |
+| `POST /_group/admin/unremove` | `{"person"}` | `{"ok": true}` | someone removed may ask to join again (10.15) |
 | `POST /_group/admin/end` | `{}` | `{"ok": true}` | owner only (403 otherwise); see 10.13 |
 
 Anything else under `/_group/` is 404 `{"error": "Not found."}`.
@@ -3394,6 +3443,7 @@ signed by its owner. The calls have the same paths as a person's site's (section
     author must be an admin there now, `role_at.h` must be the list's running fingerprint at `role_at.n`, and their role
     unchanged since.
   - An admin can't remove, or call off, what the owner wrote.
+  - The group itself, signing with its hosting key, may `remove` (clearing up, 10.15), but never `calloff`.
   - Removals and call-offs don't count towards the 20 records per person on a list.
 - **`GET /_p/items?since=<t>`** answers as a person's does (50 a page, `more`, `until`, `gone`, `delegations`,
   `mine`), plus `people`, and:
@@ -3441,6 +3491,8 @@ signed by its owner. The calls have the same paths as a person's site's (section
   `{"ok": true, "deleted": true, "n"}` when a whole post went.
 - **`POST /_p/records/check`** answers as on a person's site (section 8). It also works while the group is closing.
   Removals by admins come with their `roles` proof.
+- **`POST /_p/report`** and **`POST /_p/reports/check`** are as in 8.15. A member may report any member's post or
+  comment but their own.
 
 Source: `src/groupposts.js` `handleGroupItems`, `postTrouble`, `newPost`, `takeGroupPost`, `memberRecord`,
 `memberItem`, `roleProofs`, `groupRules`; `src/lists.js` `GroupRules`; `src/groupcopies.js` `pullGroup`, `fillGaps`,
@@ -3517,8 +3569,8 @@ The member's site answers 202 `{"ok": true}`, and ignores notes about its own ow
 | `item` with `here: true` | a new post with @here | every member | as above |
 | `comment` | a comment on a post or photo | the post's writer, everyone who has commented there, and those mentioned, not the writer | `item`, `photo?`, `entry`, `receipt`, `delegations`, `people`, `names` |
 | `change` | an event's writer moved it, or called it off with `change` | those going or who might | as `comment` |
-| `calloff` | an admin called off an event, or one date of one | those going or who might (to that date) | as `comment`, with `date` for one date |
-| `report` | a member raised something with the admins (8.15) | the owner and admins | `id`, `illegal` (true for "might be illegal": the admin's site may buzz their phones, 3 a day from a group at most). What it is, and who raised it, only from `GET /_group/admin/reports` |
+| `calloff` | an admin called off an event, or one date of one (which the event's writer may also do) | those going or who might (to that date), not the writer | as `comment`, with `date` for one date |
+| `report` | a member raised something with the admins (8.15) | the owner and admins, apart from whoever wrote what was raised | `id`, `illegal` (true for "might be illegal": the admin's site may buzz their phones, 3 a day from a group at most). What it is, and who raised it, only from `GET /_group/admin/reports` |
 | `gone` | a whole event still to come was deleted or removed | those going or who might | `item`, `cancelled: true` |
 | `closed` | the owner closed the group | every member | `item` (the group's id), `entry`, `receipt`, `delegations`, `people` |
 
@@ -3537,7 +3589,10 @@ A member's site checks a `comment`, `change` or `calloff` note:
   hosting key signed for that list;
 - the record checks (section 5) as of `taken`, its fingerprint is `entry.fp`, and its kind, host, item and date match
   the note's;
-- a `change` must come from the event's writer, as its copy has it.
+- a `change` must come from the event's writer, as its copy has it;
+- a `calloff` is applied only if it's by the event's writer or the group's owner, or by an admin whom `roles` in the
+  note proves (10.9). A group doesn't send `roles` in notes, so an admin's call-off is answered 202 and left for the
+  next pull, which checks the whole post.
 
 It checks a `closed` note the same way on the members list, and its record must be a `close` by the group's owner (as
 the group's identity names them). An `item` note's item is checked as a pull's are (section 8 `keepCopy`).
@@ -3558,11 +3613,14 @@ takes it:
   `afterwrd:close` in the next pull;
 - for the next 30 days it's read-only. Members can still read who's in, posts, threads and dates, ask what became of
   their records, and delete their own records with `delete`. Everything else is refused: a new post, other records,
-  members-list records (`leave` included) and admin calls other than reading the members. A refused call gets 409 `{"error": "This group has closed."}`;
-- after those 30 days, the first request other than ping, identity or `/.well-known/afterwrd` empties it. Its posts,
-  photos, lists, members and links all go. Only a mark that it's closed stays, so it can't be claimed again. From then
-  on, `/_join/…` answers 404, and `/_group/…` (apart from ping, claim and identity) and `/_p/…` answer 410 `{"error": "This group has
-closed."}`.
+  members-list records (`leave` included), `POST /_p/report`, and admin calls other than reading the members and the
+  reports calls. A refused call gets 409 `{"error": "This group has closed."}`;
+- after those 30 days, the first call to `/_join/…`, to `/_group/…` (other than ping, claim, identity and the calls
+  for groups from afterwrd 1) or to `/_p/…` (other than `/_p/reports/check`) empties it. Its posts, photos, lists,
+  members and links all go, with reports made there (8.15), their caps, and the list of who was removed (10.15); a mark
+  that it's closed stays, so it can't be claimed again. `/_p/reports/check` still answers, with nothing. From then on,
+  `/_join/…` answers 404, and the rest of `/_group/…` and `/_p/…` answer 410
+  `{"error": "This group has closed."}`.
 
 `POST /_group/admin/end` from the owner answers 409 while the 30 days are running. Once they're over it answers
 `{"ok": true}`, because the group has emptied itself already. The owner's site calls it just before deleting the group's
@@ -3612,7 +3670,7 @@ Added for safety (docs/safety-plan.md 3.4); a group's site from before answers a
 - **Removed stays removed.** When an admin's `remove` takes out a member who was in (not someone only asking), the
   group keeps their person id. A later `join` from it is refused: `POST /_join/<token>/accept` answers 403 `You can't
   join this group.`, whatever the link. Leaving doesn't count. Admins see who's there in `GET /_group/admin/members`
-  as `"afterwrd:removed": [{"afterwrd:person", name, "afterwrd:removedAt"}]`, and `POST /_group/admin/unremove`
+  as `"afterwrd:removed": [{"afterwrd:person", name, "afterwrd:removedAt"}]` (the newest 200), and `POST /_group/admin/unremove`
   `{person}` lets them ask again.
 - **Clearing up.** `POST /_group/records` with a member's `remove` may carry `clear: true`. Once the removal is taken,
   the group removes everything that person wrote there with its own hosting key, as `GroupRules` lets a host: each of
@@ -3631,7 +3689,7 @@ a check by link, and never sees the checker's working in either kind of check. T
 signed with afterwrd's release key.
 
 Checks apply only to sites on Cloudflare, at `https://<script>.<account-subdomain>.workers.dev`. A self-hosted site
-can't be checked, and every `/_p/check-*` call from a friend whose address isn't on workers.dev gets `404
+can't be checked, and every `/_p/check-*` or `/_p/checked` call from a friend whose address isn't on workers.dev gets `404
 {"error": "Not found."}`, as if the call didn't exist. A self-hosted site answers every one of them with a plain-text
 `404 Not found`.
 
@@ -3766,7 +3824,8 @@ never one it checked in the last day:
 For each friend picked:
 1. It calls `POST /_p/check-token`. A refusal, a `409 {off: true}` or a missing token is recorded as "couldn't check".
    Three in a row after an earlier success show on the checking owner's Home. A `429` (the site's checks for the day
-   are used up, or it is busy) is not a refusal: nothing is recorded, and the friend is asked again at the next run.
+   are used up, or it is busy) is recorded the same way but marked busy: a run made only of busy answers shows on Home
+   only once it's five long.
 2. It checks the code and setup (11.2), with the account tie. It doesn't read the audit log.
 3. It reads every version uploaded, and every deployment made, since the start of the last complete check of that
    friend. It looks no further back than the first release signed with an etag. It reads at most 100 listed versions,
@@ -3785,8 +3844,8 @@ Source: `src/friendchecks.js` `handleChecksConnect`, `letOn`, `giveCheckToken`, 
 
 ### 11.5 The calls
 
-All are signed calls from a friend's site (section 2), answered only to approved friends on Cloudflare. They are
-answered with `[body, status]`.
+All are signed calls from a friend's site (section 2), answered only to approved friends on Cloudflare. Each answers
+`400` if `type` isn't the one shown.
 
 | Call | Body | Answer | Effect and limits |
 |---|---|---|---|
@@ -3938,6 +3997,13 @@ friends and small groups, private by default, each site on a free plan.
 | **WebAuthn** (passkeys) | The owner's devices sign identity changes and delegations, so the site itself can't | Several statements are signed with one passkey prompt (section 3.6) |
 | **ActivityStreams 2.0** | The shapes used for the shared Facebook archive and albums (section 8) | Not ActivityPub: no inboxes, outboxes, actors, WebFinger or public objects. Posts and comments are signed records, not ActivityStreams |
 | **Matrix** | One conversation as an ordered, signed list that several servers read | One host per item decides the order, and readers check the host; there's no state resolution between servers |
+| **Diaspora\* relayables** | Comments signed by their author and passed on by the post's author, who is the only one others take them from | Read by friends' sites, not pushed as copies; exact signed bytes, not a joined string; the post's host also orders the comments and signs where the list is up to |
+| **FEP-171b** (Conversation Containers; Streams, Hubzilla, Mitra) | A conversation as an ordered collection owned by whoever started it; only what the owner takes is part of it; removals open, not silent | Nothing in FEP-171b signs the collection, so a reader can't tell what was left out or reordered; afterwrd's running head, `seen`, `prev` and signed heads let readers check that |
+| **FEP-8c13** (Context-Authority Routing, draft, June 2026) | The server hosting the first post as the authority for its thread; each reply carrying its writer's own proof; restricted threads read only by signed, actor-bound requests | Its order is "implementation-defined" and the thread isn't signed as a whole; afterwrd's readers pull and check the whole list rather than being sent copies |
+| **Nostr NIP-29** (relay-based groups) | A group living on one host that signs its state; admins acting by signed events; private and closed groups | NIP-29's order is the relay's say-so and its roles are relay policy; afterwrd's members list is built from members' own signed joins and admins' signed decisions, checked by every reader |
+| **FEP-1b12** (group federation; Lemmy) | A group passing on its members' posts exactly as they signed them, so it can't speak for them | Membership in FEP-1b12 is a plain follow, with no signed list; afterwrd groups are private |
+| **Atproto Spaces** (permissioned data, alpha, August 2026) | Data that isn't public, read straight from where it's kept rather than through relays; honest that it's access control, not encryption | Spaces keep records in each author's own repository; afterwrd keeps a conversation with the item it's under, so one host's signed list says what's in it |
+| **Interaction policies** (GoToSocial; FEP-5624, draft) | Saying who may reply, per post | afterwrd's answer to "whose policy counts" is the item's host: comments off is its own choice, refused at the host (section 5.7) |
 
 ## Appendix: every call
 
@@ -3969,7 +4035,9 @@ owner's browser and their own site, and aren't part of the protocol.
 | `POST /_p/notes` | an approved friend, or a group the owner has joined | 9.1 |
 | `POST /_p/mention` | the site of someone whose comment mentions the owner | 9.4 |
 | `POST /_p/check-request`, `/_p/check-token`, `/_p/check-soon`, `/_p/checked`, `/_p/check-failed` | an approved friend on Cloudflare | 11.5 |
+| `GET /_check/<token>`, `POST /_check/<token>/start`, `GET /_check/done`, `POST /_check/finish`, `POST /_check/audit` | the browser of whoever opens a check link (on Cloudflare only) | 11.3 |
 | `POST /_member/removed` | a group the owner has joined | 10.5 |
+| `POST /_p/before` | an approved friend, bringing comments over from afterwrd 1 | not specified (section 8) |
 
 ### On a group's site
 
@@ -3985,8 +4053,8 @@ owner's browser and their own site, and aren't part of the protocol.
 | `GET /_group/members`, `GET /_group/members/list[?after=<n>]` | members | 10.6 |
 | `POST /_group/records` | members, and people waiting | 10.7 |
 | `GET /_group/admin/members`, `POST /_group/admin/link`, `/about`, `/here`, `/end` | admins (`end`: the owner) | 10.8 |
-| `GET /_group/admin/reports`, `POST /_group/admin/reports/leave` `{about, word?}` | admins | 8.15 |
-| `POST /_group/admin/unremove` `{person}` | admins | 10.15 |
+| `GET /_group/admin/reports`, `POST /_group/admin/reports/leave` `{about, word?}` | admins | 8.15, 10.8 |
+| `POST /_group/admin/unremove` `{person}` | admins | 10.8, 10.15 |
 | `GET /_p/items?since=<t>`, `?before=<t>`, `?id=<id>` | members | 10.9 |
 | `GET /_p/items/<id>[?after=<n>]`, `GET /_p/items/<id>/dates/<date>[?after=<n>]` | members | 10.9 |
 | `POST /_p/items` | members | 10.9 |
@@ -3996,3 +4064,4 @@ owner's browser and their own site, and aren't part of the protocol.
 | `POST /_p/reports/check` | anyone, unsigned (by report id) | 8.15 |
 | `POST /_p/people` | members | 10.9 |
 | `GET` or `HEAD /files/<sha256>?exp=<t>&sig=<s>` | a browser with a link the group signed for a member | 10.10 |
+| `POST /_group/rejoin/point`, `POST /_group/rejoin`, `POST /_group/before`, `GET /_p/items?old=<n>` | for a group from afterwrd 1: its old members' and writers' sites (30 days after it came over), and members | not specified (10.1) |

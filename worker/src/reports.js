@@ -22,6 +22,7 @@
 import { safeNext } from "./auth.js";
 import { callFriend } from "./calls.js";
 import { listEntries } from "./hosted.js";
+import { readLimited } from "./sites.js";
 import { keepNotice } from "./notes.js";
 import { html, json, now, randomToken, sha256 } from "./util.js";
 import { messagePage } from "./views/pages.js";
@@ -291,8 +292,8 @@ export async function checkSentReports(env, from) {
     try {
       const res = await fetch(`${origin}/_p/reports/check`, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: rows.map((r) => String(r.id)) }), redirect: "manual", signal: AbortSignal.timeout(10_000) });
-      const text = res.ok ? await res.text() : "";
-      answer = text && text.length < 65_536 ? JSON.parse(text) : null;
+      // Read no further than a short answer could be (sites.js readLimited stops early).
+      answer = res.ok ? JSON.parse(await readLimited(res, 65_536)) : null;
     } catch { answer = null; }
     const outcomes = new Map((Array.isArray(answer?.reports) ? answer.reports : []).map((x) => [String(x.id), x]));
     for (const r of rows) {

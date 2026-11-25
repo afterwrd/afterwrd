@@ -31,15 +31,15 @@ That's it. Bringing your Facebook years, friends and everything else work as on 
 
 ## Moving from a site on Cloudflare
 
-Your posts, photos, comments, polls, events and Facebook years can come with you:
+Who you are, your friends, and your posts, photos, comments, polls, events and Facebook years can come with you:
 
 1. Update your old site, and run the same version here (`docker compose pull && docker compose up -d`).
-2. On your old site, *Download everything*, with *Include photos and videos* ticked.
-3. On this one, before you post or import anything: *Import* → *Bring everything over*, and choose that zip.
+2. On this one, before you post or import anything: *Import* → *Bring everything over*. It asks to move your identity
+   here, and you agree on your old site. The move takes 7 days, and you can cancel it until then.
+3. Then, on your old site, *Download everything*, with *Include photos and videos* ticked, and choose that zip here.
 
-Friends and groups don't come with it: the keys that let their sites know it's you never leave your old site. Add your
-friends again from *Friends*, and ask your groups to invite your new address. Your old site keeps working until you
-delete it.
+Your friends' sites follow you to the new address. Groups don't come with it: ask your groups to invite your new
+address. Your old site stays, saying where you've gone, until you delete it.
 
 ## Day to day
 

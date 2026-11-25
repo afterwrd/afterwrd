@@ -56,7 +56,7 @@ Don't change `src/` or rebuild while a run is going: the processes read `out/bui
 
 ## On a rented server
 
-For networks too big for this computer (2,000 sites take about 55 GB), `vm.sh` runs everything on a Linux server with
+For networks too big for this computer (1,000 sites take about 95 GB: see Memory, below), `vm.sh` runs everything on a Linux server with
 Docker, from a copy of `worker/`, as root: `test/scale/vm.sh rehearse` first (a small network end to end), then
 `test/scale/vm.sh section8` (about 1,000 sites, a day squeezed into an hour, on four servers). Each step is marked done, so running it again carries on after a failure. It logs to
 `out/<mode>/run.log` and leaves everything in `out/<mode>.tgz`.
@@ -74,7 +74,7 @@ Docker, from a copy of `worker/`, as root: `test/scale/vm.sh rehearse` first (a 
 
 ## On several machines
 
-One server only goes so far (2,000 sites take about 55 GB), and the biggest sizes have to be switched on by the
+One server only goes so far (1,000 sites take about 95 GB), and the biggest sizes have to be switched on by the
 provider. Instead, the network can be spread over several: `net.mjs --machines` gives each process a machine (their
 addresses, in order), and each machine runs `scale.sh up` with `SCALE_MACHINE` set to its own address, starting only
 its own processes.

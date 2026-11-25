@@ -15,7 +15,7 @@ can be published with credit to you, if you'd like.
 ## What's in scope
 
 - A person's afterwrd site, and a group's site (the code in `worker/`).
-- The installer and the pages at afterwrd.app (`worker/installer/`).
+- The installer and the pages at afterwrd.app (`worker/central/`, which serves the pages in `worker/installer/`).
 - How sites talk to each other ([PROTOCOL.md](PROTOCOL.md)).
 
 Problems in Cloudflare itself, or in someone's Cloudflare account settings, are outside it, though if afterwrd could
@@ -23,8 +23,9 @@ do something to protect people better, that's worth hearing.
 
 ## Versions
 
-Only the latest release is supported. Every site can update itself from its Update page, so fixes go out as new
-releases. When a release fixes a security problem, each older site says so to its owner on Home.
+Only the latest release is supported. Every site on Cloudflare can update itself from its Update page, and a
+self-hosted one by pulling the new image, so fixes go out as new releases. When a release fixes a security problem,
+each older site says so to its owner on Home.
 
 Sites with automatic updates turned on install a release by themselves once it has been **signed** and has been out
 for three days (one day for a security fix), or at once on a site whose owner chose *Get updates first* (for people
@@ -88,10 +89,10 @@ You don't have to take the published files on trust. Two independent checks:
 
 ```sh
 git clone https://github.com/afterwrd/afterwrd && cd afterwrd/worker
-git checkout v0.23.0        # the release you want to check
+git checkout v2.2.0         # the release you want to check
 npm ci --ignore-scripts
-npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v0.23.0
-shasum -a 256 release/0.23.0/manifest.json
+npm run release -- --base https://github.com/afterwrd/afterwrd/releases/download/v2.2.0
+shasum -a 256 release/2.2.0/manifest.json
 ```
 
 The fingerprint should match the `manifest.json` attached to [that
@@ -109,12 +110,15 @@ log, so it can't be quietly changed later. With the [GitHub CLI](https://cli.git
 gh attestation verify manifest.json --repo afterwrd/afterwrd
 ```
 
+The self-hosted image has one too:
+`gh attestation verify oci://ghcr.io/afterwrd/afterwrd:<version> --repo afterwrd/afterwrd`.
+
 **Check what your site is running.** With a read-only API token (*Workers Scripts: Read*), download the code your
 site is running from Cloudflare and compare it, file by file, with a release or with your own rebuild:
 
 ```sh
 read -rs CF_TOKEN && export CF_TOKEN       # paste the token; nothing shows
-node worker/scripts/check-site.mjs afterwrd --manifest worker/release/0.23.0/manifest.json
+node worker/scripts/check-site.mjs afterwrd --manifest worker/release/2.2.0/manifest.json
 ```
 
 The code carries the SHA-256 of every static file the site serves (scripts, stylesheet, fonts) and refuses to send

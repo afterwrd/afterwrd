@@ -11,13 +11,15 @@ gives you; it never signs in to Facebook or fetches anything from it.
 
 **Finding your way round.** *Home* is your posts and your friends' together, with a box to write in; *Photos*,
 *Friends*, *Groups*, *Events* and *Notifications* sit beside it. Your picture (top right) opens your profile, *Memories*
-(everything from Facebook, with "On this day"), and your tools: *Your devices*, *Add to home screen*, *Import*,
-*Download everything* and *Update*.
+(everything from Facebook, with "On this day"), your tools: *Your devices*, *Add to home screen*, *Import*,
+*Download everything* and *Update*, and *Help*: how afterwrd works, where to turn when something's wrong, and what to
+do when something isn't working (it's on <https://afterwrd.app/help/> too).
 
 **The app, and events on your phone.** Add afterwrd to your phone's home screen and it opens like an app. Turn on
 notifications on the *Events* page and it can tell you, even with the phone locked, when a friend invites you to an
-event, or one you haven't said no to changes or is called off, and when someone mentions you (each phone can turn
-mentions off). Nothing else: never posts, comments or likes. (There are no messages between friends: WhatsApp, Signal and the like do that better.) The
+event, or one you haven't said no to changes or is called off, when someone mentions you (each phone can turn
+mentions off), and when someone thinks something on your post, or in a group you help run, might be illegal (a few a
+day at most). Nothing else: never posts, comments or likes. (There are no messages between friends: WhatsApp, Signal and the like do that better.) The
 notification is encrypted for your phone by your own site, so the phone's push service (Apple's or Google's) passes it
 on without being able to read it; there's no afterwrd server in between.
 
@@ -232,7 +234,9 @@ Once it's installed, nothing needs the terminal:
   can use it for 14 days, but each use is only a request, and the group's admins let people in (up to 1,000
   members). Joining, letting people in, admins and leaving are each signed by whoever did them, so anyone in the group
   can check who's in and who decided. The owner can make members admins, and admins can remove people and delete
-  anything in the group, signed, so it says who removed what. Members can post (with up to 8 photos, which are copied
+  anything in the group, signed, so it says who removed what; *Remove and clear up* also removes everything that
+  person wrote there, and someone removed can't ask to join again unless an admin lets them. A group can have rules,
+  shown to anyone before they ask to join. Members can post (with up to 8 photos, which are copied
   to the group), comment and vote, all signed by whoever wrote it, and a copy of their own words stays on their site.
   Your site keeps a group's newest posts, asking it what's new in the background, and checks each conversation when
   you open it. Polls in a group are open to everyone in it. The owner can close a group: everyone in it is told, it
@@ -252,8 +256,9 @@ Once it's installed, nothing needs the terminal:
   invite more people later, or quietly take an invitation back. *Events* also shows a calendar of everything you could
   go to, your own events, friends' and your groups', by month, week or as a list.
 - **Comments.** You and your friends (from their own sites) can comment under a post or photo made on afterwrd;
-  they sit behind *Comments* and open where you are. Friends can delete their own, and you can delete any; a deleted
-  comment's words are gone for good. *Notifications* lists comments on
+  they sit behind *Comments* and open where you are. Friends can delete their own. On your own posts and photos you
+  can remove anyone else's comment from its menu (everyone who can see the post sees that you did), and turn comments
+  off, or back on, for any post. A deleted or removed comment's words are gone for good. *Notifications* lists comments on
   your posts and photos, comments on friends' posts and photos you've commented on too, mentions, invitations, changes
   to events you're going to, and comments in your groups, with a count in the menu of those that are new to you.
   Comments stay if you remove a friend, until you delete them.
@@ -264,7 +269,12 @@ Once it's installed, nothing needs the terminal:
 - **People you don't know, and blocking.** On friends' posts, people you don't know are shown as "friend of"
   your friend, and a name that looks like one of your friends' is flagged. You can block someone from a comment, a
   group's members or a friend request: you stop seeing what they write and hearing from them, quietly, and blocking a
-  friend ends the friendship.
+  friend ends the friendship. Lighter than that, *Mute* leaves someone's posts off Home, and folds them away in groups,
+  without unfriending them; they aren't told, and *Friends* lists who you've muted.
+- **Telling someone.** In a group, *Tell the admins* (in the menu on a post or comment) tells them something's wrong,
+  with a note if you like, and you choose whether they see it was you; on a friend's post you can tell your friend
+  about someone else's comment the same way. It goes to them alone, never to anyone central. They see it under *Things
+  to look at* and can remove it or leave it with a word back, and you hear in *Notifications* what they did.
 - **Fair shares.** Each friend's, member's or group's site may make 2,000 calls a day to yours and have 50,000 rows
   read for it, and one person can leave at most 200 posts, comments, votes and answers a day on one site (deleting
   their own always goes through). Mentions and replies from any one person reach your *Notifications* at most 20
@@ -342,16 +352,19 @@ your Facebook download stays as it came, in tables of its own, and an import rep
 | `sent`                   | What you've signed and sent elsewhere, with the receipt that it was taken     |
 | `connections`            | Your friends, by identity                                                     |
 | `groups`, `group_members`| Groups you're in or run; on a group's site, its members                       |
-| `notices`, `blocks`      | Notifications, and people you've blocked                                      |
+| `notices`, `blocks`, `mutes` | Notifications, and people you've blocked or muted                         |
+| `reports`, `reports_sent`| What's been raised with you (or a group's admins), and what you've raised     |
 | `media`, `albums`        | Photos and videos (by fingerprint), and your albums                           |
+| `posts`                  | Your Facebook posts (`source` says where each came from)                      |
 | `facebook_people`        | Everyone named in the download; `friend_since` set for current friends        |
 | `facebook_post_tags`     | People tagged in your Facebook posts                                          |
 | `facebook_comments`      | Your comments and replies on Facebook, with whose thing they were on          |
 | `facebook_reactions`     | Your likes and reactions on Facebook                                          |
 | `facebook_tagged_photos` | Other people's photos you're tagged in (links only, no images)                |
 
-The rest are in [worker/migrations/](worker/migrations/). Tables from afterwrd 1 (`posts`, `comments`, `polls` and
-the like) are there only to bring things over to afterwrd 2, and are cleared out once the 30 days for that are up.
+The rest are in [worker/migrations/](worker/migrations/). What was written on afterwrd 1 (in `posts`, `comments`,
+`polls` and the like) is there only to bring things over to afterwrd 2, and most of it is cleared out once the 30 days
+for that are up.
 
 ## Known limitations
 

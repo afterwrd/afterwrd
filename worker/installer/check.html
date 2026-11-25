@@ -70,11 +70,11 @@ same browser, with the account you installed into.</p>
   <h2>1. What should be there</h2>
   <ul>
     <li><b><a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener">Workers &amp; Pages</a></b>:
-    your site, under the name you chose (<code>afterwrd</code> unless you changed it). If you used Cloudflare's Deploy page,
-    nothing called <code>afterwrd-installer-…</code>: that installer removes itself once your site is running. Each group you
-    start later appears here as a Worker of its own.</li>
+    your site, under the name you chose (<code>afterwrd</code> unless you changed it). Each group you start later appears
+    here as a Worker of its own.</li>
     <li><b><a href="https://dash.cloudflare.com/?to=/:account/workers/d1" target="_blank" rel="noopener">D1</a></b>: one database with
-    your site's name (and later one per group).</li>
+    your site's name (and later one per group). On a new site it stays empty: your site keeps its data in its Worker's own
+    storage (Durable Objects).</li>
     <li>Nothing else you didn't make yourself. afterwrd doesn't use custom domains or any other Cloudflare product.
     The one scheduled (cron) trigger it sets, once a day on your site's Worker, is there only if you've turned on
     automatic updates.</li>
@@ -94,8 +94,6 @@ same browser, with the account you installed into.</p>
     <li>Upload Worker</li>
     <li>Update Worker Script Subdomain</li>
   </ol>
-  <p>If you used Cloudflare's Deploy page instead, it starts with the Deploy page making the installer (marked
-  <i>Dashboard</i>) and ends with one more: Delete Worker, the installer removing itself.</p>
   <p>An update leaves a shorter trail: the upload session, the file uploads, Upload Version (the new version, not yet
   live), then a deployment making it live (and a second one putting the old version back, if the new one didn't work).
   Automatic updates leave the same trail, around the same time each day, and setting the daily schedule when you turn
@@ -120,8 +118,8 @@ same browser, with the account you installed into.</p>
 
 <section id="friend">
   <h2>Or ask a friend to check it</h2>
-  <p>If a friend has an afterwrd site, theirs can do the careful part for you. On your site, go to <i>Update</i> and, under
-  <b>Get your site checked</b>, press <b>Ask</b> by their name. Their site shows them your request, with a button that
+  <p>If a friend has an afterwrd site, theirs can do the careful part for you. On your site, go to <i>Update</i>, open
+  <b>More about checks</b> under <b>Friends' checks</b>, and press <b>Ask</b> with their name. Their site shows them your request, with a button that
   makes a check link, and they send it to you by message. Open it and press <b>Allow</b> when Cloudflare asks: that gives
   their site read-only access to your account for the check. Their site then downloads your site's code from Cloudflare,
   compares every file with the published release, checks how it's set up, and reads your account's log for anything

@@ -59,7 +59,8 @@
 <h1>How it works</h1>
 <p class="lede">afterwrd is a social network with no company in the middle. Each person's site runs in their own
 Cloudflare account, holds only their own data, and talks to nothing but Cloudflare, the place it gets updates from,
-and the friends they've chosen. This page explains how, and how to check it for yourself. (For the short,
+the friends they've chosen and the groups they're in (and, if they turn notifications on, their phone's notification
+service). This page explains how, and how to check it for yourself. (For the short,
 non-technical version, see <a href="/compared/">how afterwrd is different from Facebook</a>.)</p>
 
 <nav class="contents" aria-label="Contents">
@@ -88,9 +89,9 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <div class="box"><strong>No company in the middle</strong><p>Your things live in your own Cloudflare account. There's
     no afterwrd server holding everyone's photos, so nobody who makes afterwrd can read them, sell them, train AI on them
     or lose them in a hack.</p></div>
-    <div class="box"><strong>Private from the start</strong><p>Nothing on your site is public. Nobody sees anything until
-    you've approved them as a friend or joined a group with them, and then only what you've shared. Your Facebook archive
-    is never shared at all.</p></div>
+    <div class="box"><strong>Private from the start</strong><p>Nothing you put on your site is public. Nobody sees anything
+    until you've approved them as a friend or joined a group with them, and then only what you've shared. Of your Facebook
+    download, friends see only the posts and photos you chose to publish.</p></div>
     <div class="box"><strong>No passwords</strong><p>You sign in with a passkey, using your phone's face, fingerprint or
     PIN. There's no password to guess, steal or be tricked out of.</p></div>
     <div class="box"><strong>Sent securely</strong><p>Everything between your browser, your site and your friends' sites
@@ -121,8 +122,9 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   <p>Two ways to check what the code talks to, without reading all of it:</p>
   <ul>
     <li><b>Search it for <code>fetch(</code>.</b> That's the only way a Cloudflare Worker or a web page can call out to the
-    internet. Every call in afterwrd goes to one of three places: Cloudflare (its sign-in and its API, for installing and
-    updating), GitHub (downloading releases and checking for new ones), or a site you've connected with. There are
+    internet. Every call in afterwrd goes to one of four places: Cloudflare (its sign-in and its API, for installing and
+    updating), GitHub (downloading releases and checking for new ones), another afterwrd site (a friend's, a group's, or
+    one asking to be friends), or, if you turn notifications on, the push service your phone or browser uses. There are
     no analytics, no error-reporting services, no embedded scripts from anyone else, and no fonts fetched from elsewhere.</li>
     <li><b>Read the installer.</b> The installer at install.afterwrd.app is <code>worker/central/index.js</code> in the
     repository: it checks every file it installs against the manifest of the <a href="__RELEASE_PAGE__">published release
@@ -139,24 +141,27 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
 
 <section id="where">
   <h2>Where your site lives</h2>
-  <p>An afterwrd site is a Cloudflare Worker plus two kinds of storage, all inside your Cloudflare account and all on
-  the free plan:</p>
+  <p>An afterwrd site is a Cloudflare Worker and its storage, all inside your Cloudflare account and all on the free
+  plan:</p>
   <div class="boxes">
     <div class="box"><strong>The Worker</strong><p>Small JavaScript that answers every request to your address: it checks
-    who's asking, reads the database, and builds the pages. It runs in Cloudflare's data centres, near whoever is looking.</p></div>
-    <div class="box"><strong>D1: the database</strong><p>An SQLite database holding your posts, comments, albums, the
-    people named in your Facebook download, your connections, and the site's own keys.</p></div>
+    who's asking and hands the request to your site's own object, next to its database.</p></div>
+    <div class="box"><strong>Durable Objects: the database</strong><p>An SQLite database, in one of Cloudflare's
+    SQLite-backed objects, holding your posts, comments, albums, the people named in your Facebook download, your
+    friends, and the site's own keys. Another object keeps the notes waiting to go to friends' sites. (Your account also
+    has a D1 database with your site's name: older sites kept their data there, and on a new site it stays empty.)</p></div>
     <div class="box"><strong>Durable Objects: the photos</strong><p>Photos and videos, stored by the fingerprint of their
-    contents in Cloudflare's SQLite-backed objects, which the free plan includes. They're only ever served through the Worker.</p></div>
+    contents in objects of their own. They're only ever served through the Worker.</p></div>
     <div class="box"><strong>Static files</strong><p>The stylesheet, fonts and the browser-side scripts (import,
     posting, download), published with each release and checked against its fingerprint.</p></div>
   </div>
   <p>There is no afterwrd server. The address <code>afterwrd.app</code> serves only these pages and the installer,
   from afterwrd's own Cloudflare account; it never hears from your site. Nobody who works on afterwrd can see your site, reset your password (there
   isn't one), or sign in as you. The flip side is that nobody can recover your site for you either: your Cloudflare
-  account is the only key, which is why the install page asks you to turn on two-factor authentication there.</p>
-  <p class="meta">Costs: Cloudflare's free plan covers a personal site comfortably, including the 5 GB of photos and videos the
-  free Durable Objects storage allows. Cloudflare may change its plans; afterwrd deliberately uses nothing that needs a card.</p>
+  account and your recovery code are the only keys, which is why the install page asks you to turn on two-factor
+  authentication there and keep the code safe.</p>
+  <p class="meta">Costs: Cloudflare's free plan covers a personal site comfortably, including the 5 GB the free Durable
+  Objects storage allows, which photos, videos and the database share. Cloudflare may change its plans; afterwrd deliberately uses nothing that needs a card.</p>
 </section>
 
 <section id="talks">
@@ -164,9 +169,11 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   <table>
     <thead><tr><th>Your site calls</th><th>When</th><th>What's sent</th></tr></thead>
     <tbody>
-      <tr><td>Cloudflare (its sign-in, then its API)</td><td>Installing, updating, and making or deleting a group</td><td>The release's files, and the hour's token Cloudflare gave when you pressed Allow (over HTTPS, to Cloudflare only)</td></tr>
-      <tr><td>GitHub (afterwrd's releases)</td><td>Installing, updating, and a check for a newer version about once an hour</td><td>Nothing about you: it's a download</td></tr>
-      <tr><td>A friend's afterwrd site</td><td>Only once you've both connected: when you open Home or their page, when you comment, and when you post or reply</td><td>The key for that connection, your comments on their posts, and a short note when there's something new (the start of a new post, or of a comment on something they've commented on too)</td></tr>
+      <tr><td>Cloudflare (its sign-in, then its API)</td><td>Installing, updating (by hand, or once a day if automatic updates are on), making or deleting a group, friends' checks, and getting back in after losing every device</td><td>The release's files, and the access Cloudflare gave when you pressed Allow (over HTTPS, to Cloudflare only)</td></tr>
+      <tr><td>GitHub (afterwrd's releases)</td><td>Installing, updating, and, while you're using your site, a look for a newer version at most every 15 minutes</td><td>Nothing about you: it's a download</td></tr>
+      <tr><td>A friend's afterwrd site</td><td>Once you've connected: in the background from Home (each friend's site at most once an hour), when you open one of their posts, when you comment, and when you post</td><td>Calls signed with your site's own key, your signed comments on their posts, and a short note when there's something new (a new post, or a comment on something they've commented on or are mentioned in)</td></tr>
+      <tr><td>A group's site</td><td>Only for groups you're in: reading the group, and posting or commenting there</td><td>Calls signed with your site's own key, and your signed posts and comments</td></tr>
+      <tr><td>Your phone's or browser's push service (Apple's, Google's, Mozilla's or Microsoft's)</td><td>Only on devices where you've turned notifications on: a friend invites you to an event, one changes, or someone mentions you</td><td>The notification, encrypted for that device alone, so the push service can pass it on but not read it</td></tr>
     </tbody>
   </table>
   <div class="never">
@@ -179,7 +186,7 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     </ul>
   </div>
   <p>Browsers help you check this: open your site, open the browser's developer tools (<i>Network</i>), and watch. Every
-  request goes to your own address, except photos from friends' sites, which come from <i>their</i> addresses.</p>
+  request goes to your own address, except photos from friends' sites and groups, which come from <i>their</i> addresses.</p>
 </section>
 
 <section id="signin">
@@ -196,10 +203,20 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li>Your first passkey is made during setup, from a link the installer gives you that holds a random 192-bit code known
     only to your site. Adding another device makes a one-time link that works for an hour; <i>Your devices</i> can cancel
     links, remove a passkey (which signs that device out) or sign out everywhere.</li>
+    <li>What you post and comment is <b>signed in your browser</b>, by a key there that one of your passkeys allows for
+    30 days at a time. So nobody can change your words or put new ones in your mouth: not other sites, and not whoever
+    runs yours. The passkeys that sign for you are listed in your <b>identity</b>, a chain of signed documents your site
+    publishes at <code>/.well-known/afterwrd</code> (keys and your address, no name or picture), which other sites check
+    your signatures against.</li>
+    <li>At setup your browser makes a <b>recovery code</b> and shows it once; your site never sees it. If you lose every
+    device that signs for you, the code lets the passkeys you have now sign instead. Changes like that, or removing a
+    passkey, take effect only 7 days after each site first sees them, and can be cancelled meanwhile, so someone who
+    steals a device can be stopped in time.</li>
     <li>Lost every device? <i>Lost your device?</i> on the sign-in page lets you in again if you can sign in to the
     Cloudflare account your site is in (which can already change your site): Cloudflare gives your site an hour's
-    read-only access, your site checks it's the account serving it, signs every device out and makes a one-time link
-    for the device you're on. Nothing is kept.</li>
+    access to change its Workers, which your site proves by making the version that's running live again (changing
+    nothing). Then it signs every device out and makes a one-time link for the device you're on. Nothing is kept. To
+    sign what you write again from there, use your recovery code.</li>
     <li>A signed-in session is a random token in a cookie the browser won't share with scripts or other sites
     (<code>HttpOnly</code>, <code>Secure</code>, <code>SameSite</code>, <code>__Host-</code>), valid for 30 days.</li>
   </ul>
@@ -210,12 +227,15 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
 <section id="locked">
   <h2>How it's locked down</h2>
   <p>The Worker checks every request before it does anything else. Without the owner's session, the only things it will
-  serve are the sign-in and setup pages, the fonts, and photo links that carry a valid signature. Everything else
+  serve are the sign-in and setup pages, the fonts and the code for signing in, your site's public identity, photo links
+  that carry a valid signature, and calls from other afterwrd sites, which must be signed (below). Everything else
   redirects to sign-in or is refused.</p>
   <ul>
     <li><b>Photos and videos are never public files.</b> Each is served by the Worker, which checks the session first. The
-    only exception is a signed link: a link your site makes for a friend's browser, signed with a key unique to your site,
-    that expires after an hour or two. Without a valid signature, a photo address is useless.</li>
+    only exception is a signed link: a link your site makes for one friend's browser, signed with a key unique to your
+    site, that expires within a day or two and stops working at once if you remove that friend. (Your profile picture
+    and cover get links that last up to a week, so friends' sites can keep showing them.) Without a valid signature, a
+    photo address is useless.</li>
     <li><b>Every change needs to come from your own site.</b> Each form and request that changes anything is checked
     against the browser's <code>Origin</code> header, so another website open in the same browser can't post, delete or
     connect on your behalf.</li>
@@ -223,9 +243,10 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     referrer, not to index it, and not to guess at file types.</li>
     <li><b>Everything shown is escaped.</b> Names and comments, including ones from friends' sites, are treated as text,
     never as HTML or script.</li>
-    <li><b>Keys are made on your site and stay there.</b> The signing key for photo links, the key for sign-in challenges,
-    and the key for each connection are random bytes generated by your site on first use. They're never in a download,
-    never shown on a page, and never sent anywhere.</li>
+    <li><b>Keys are made where they're used, and stay there.</b> The key for photo links, the key for sign-in
+    challenges, and your site's hosting key, which signs its calls to other sites, are made by your site on first use.
+    They're never in a download, never shown on a page, and never sent anywhere (only the hosting key's public half is
+    published, in your identity). The private halves of your passkeys and browser keys never leave your devices.</li>
     <li><b>Limits on the free plan are limits on abuse.</b> Comments and other writes are rate-limited in the same
     database statement that stores them, so a runaway script can't slip past by sending everything at once.</li>
   </ul>
@@ -240,17 +261,19 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   <p>Two afterwrd sites connect directly to each other. There's no directory, no central account, and no third site
   involved.</p>
   <ol class="flow">
-    <li>You make a one-time friend link on your site and send it to a friend however you like.</li>
+    <li>You make a friend link on your site (it works once, for 30 days) and send it to a friend however you like.</li>
     <li>Your friend pastes it into <i>Add a friend</i> on their own site (or opens it and says where their site is), and confirms there. (If they haven't a site yet, opening it
     offers to set one up: the link goes with them to the installer and on to their new site, always after the
     <code>#</code> in the address, which browsers never send to any server. So the installer passes on invitations
-    only inside your friend's browser, and never receives or keeps them.) Their site makes a random key for
-    yours and hands it over; your site checks, by calling their site back, that the key is really theirs and meant for you,
-    then gives them a key in return.</li>
+    only inside your friend's browser, and never receives or keeps them.) Their site reads your site's public
+    identity, then asks yours in a call signed with its own hosting key; your site checks the signature against
+    their identity, at their address. Each site then ties the friendship to the other's identity, and checks every
+    later call against it. Nothing secret is exchanged.</li>
     <li>Nothing is shared yet. The request appears on your <i>Home</i> and <i>Friends</i> pages with their site's address; you approve or
     decline. A link that was passed on to a stranger gets them no further than this.</li>
-    <li>Once approved, each site can ask the other, using its key, for posts and photos written on afterwrd, and can leave
-    comments. Each key works for one connection only, and disconnecting from either side ends it at once.</li>
+    <li>Once approved, each site can ask the other for posts and photos, in signed calls, and pass on its owner's
+    comments. A call from anyone else gets the same refusal as a call from a stranger, so nobody can find out from your
+    site who your friends are. Removing a friend, from either side, ends it at once.</li>
   </ol>
   <p>Two other ways to ask need no link, and go through the same steps and the same approval:</p>
   <ul>
@@ -263,21 +286,32 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li>Decline a request made either way, or remove a friend, and that site can't ask you again like that (you still can).</li>
   </ul>
   <ul>
-    <li><b>Only what you wrote on afterwrd is shared</b>: your posts, albums and photos made here, and the comments on
-    them. Your imported Facebook archive is never shared with anyone.</li>
-    <li><b>Your site decides what to believe.</b> Data from a friend's site is treated as untrusted: names are cut to size
-    and escaped, photo links must be exactly the signed form from that site, and only your own copy of a comment is used to
-    decide which comments are yours.</li>
-    <li><b>Photos load straight from your friend's site</b> into your browser, by those short-lived signed links. They
-    don't pass through yours.</li>
+    <li><b>What's shared</b>: your posts, albums and photos made here, and the comments on them (an event only with those
+    you invite), and, of your Facebook download, the posts and photos you chose to publish, without where they were
+    taken. Your Facebook comments, likes and friends list are never shared.</li>
+    <li><b>A post and its comments are kept by whoever posted it.</b> Your site keeps each of your posts as a numbered
+    list of signed records (the post, each comment, each edit or delete), and signs where the list is up to. Friends'
+    sites check the whole list, every signature in it, each time they read it. So your site can turn a comment away, but
+    can't change one, make one up, or quietly drop or reorder one without it showing; and the same holds for your
+    friends' sites with your comments on their posts.</li>
+    <li><b>Your site decides what to believe.</b> Data from a friend's site is treated as untrusted: every post and
+    comment must check against its writer's identity, names are cut to size and escaped, and photo links must be exactly
+    the signed form from that site.</li>
+    <li><b>Photos load straight from your friend's site</b> into your browser, by those signed links. They don't pass
+    through yours.</li>
     <li><b>Something new is passed on as a short note</b>, so friends' pages can say so: a new post goes to your friends,
-    and a comment goes only to friends who commented on the same post or photo. A friend's site keeps a note only if it's
-    about your own post or photo, cuts it to size, and limits how many it takes. Notes are sent in batches, so a post
-    reaches any number of friends, and tried again for a few hours if a friend's site is down. While a page is open, it checks your own
-    site for news every 30 seconds and offers to show it; nothing is fetched while the tab is hidden, and nothing
-    is pushed to your phone.</li>
-    <li>Posts and comments travel between sites as <a href="https://www.w3.org/TR/activitystreams-core/">ActivityStreams</a>,
-    the open format the fediverse uses, with a permanent address for every post, photo and comment.</li>
+    and a comment goes to friends it mentions and friends who commented on the same post or photo. Each note carries the
+    signed post or comment it's about, so the friend's site checks it on the spot; it cuts what it keeps to size, and
+    limits how many it takes. Notes are sent in batches, so a post reaches any number of friends, and tried again for
+    about two days if a friend's site is down. While a page is open, it checks your own site for news every 30 seconds
+    and offers to show it; nothing is fetched while the tab is hidden. The only things pushed to your phone are
+    notifications about events and mentions, and only if you turn them on.</li>
+    <li><b>Groups are sites of their own</b>: a Worker that the owner's site makes in their own Cloudflare account, which
+    nobody signs in to. A group keeps its members' posts and comments the same way, and its list of members is made of
+    each member's own signed join and its admins' signed decisions, so the group's site can't speak for its members.</li>
+    <li>What sites send each other is written down in full in
+    <a href="__REPO_PAGE__/blob/main/PROTOCOL.md">PROTOCOL.md</a>, in the repository, for anyone who wants to check it or
+    build a compatible site.</li>
   </ul>
 </section>
 
@@ -290,14 +324,15 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li>You pick the zip file(s) on the Import page. The browser opens them locally and works out your posts, photos,
     comments, likes and friends from the JSON inside.</li>
     <li>You tick which sections to publish. The default is posts and photos; likes, the friends list and the rest stay on
-    your computer unless you tick them. Only what the ticked sections need is sent to your site.</li>
+    your computer unless you tick them. Only what the ticked sections need is sent to your site. Friends you've
+    approved can see the posts and photos you publish; the rest is yours alone.</li>
     <li>Each photo and video is fingerprinted and a thumbnail made, in the browser. Only files your site doesn't already
     have are uploaded, so importing a newer download sends almost nothing.</li>
     <li>The new import replaces the old one in a single step, so your site never shows a half-finished archive.</li>
   </ol>
   <ul>
     <li><b>Photo locations are left out by default.</b> Facebook's download includes where some photos were taken; afterwrd
-    only keeps that if you tick <i>Photo locations</i>.</li>
+    only keeps that if you tick <i>Photo locations</i>, and never shows it to friends.</li>
     <li><b>Photos you post on afterwrd itself</b> are resized in your browser before upload, which also strips the hidden
     details phones put in them (location, device, time).</li>
     <li>Nothing in this process contacts Facebook or any third party. The only place the data goes is your own site.</li>
@@ -377,13 +412,16 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   <h2>Your data stays yours</h2>
   <ul>
     <li><b>Download everything</b> gives you the whole site as one zip, built in your browser: posts, photos and videos,
-    albums, comments (yours and friends'), likes, friends and connections, as ActivityStreams JSON with every photo. The
-    README inside explains the files. Keys and sign-in details are never included.</li>
+    albums, comments (yours and friends'), what you've said on friends' sites and in groups, your Facebook download,
+    and your friends, as ActivityStreams JSON with every photo, along with the signed records that prove who wrote what.
+    The README inside explains the files. Private keys and sign-in details are never included.</li>
     <li><b>Leaving is deleting the Worker and its database</b> in your Cloudflare dashboard. There's no account with
     afterwrd to close, because there isn't one.</li>
-    <li><b>Moving</b> is installing afterwrd elsewhere and importing your download. The permanent addresses in it
-    (<code>https://&lt;your site&gt;/posts/&lt;key&gt;</code> and so on) are how two friends' downloads agree on which
-    comment replied to which post.</li>
+    <li><b>Moving</b> is installing afterwrd elsewhere (another Cloudflare account, or a server of your own) and, on the
+    new site, starting from <i>Moving here from another afterwrd site?</i> on its Import page. Your identity moves first,
+    by a change of address your passkey signs on the old site, which takes effect after 7 days; your friends' sites then
+    follow you to the new address. Then the new site takes in your Download everything, checking every signed list in it
+    against your identity. Groups don't come with you: ask them to invite your new site.</li>
   </ul>
 </section>
 
@@ -405,13 +443,14 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     <li><b>A friend's check is a friend's word.</b> A friend's site whose own code had been tampered with could say all is
     well when it isn't. Several friends checking makes that much harder; and the checks can't see a change made
     straight to your database (only your account's log of changes shows that, which a check by link reads).</li>
-    <li><b>Your Cloudflare account.</b> Anyone who gets into it can read your database and change your Worker. Use a
-    strong password and two-factor authentication there, and ideally an account used for nothing else.</li>
+    <li><b>Your Cloudflare account.</b> Anyone who gets into it can read your database and change your Worker (though
+    not sign as you: that takes your passkey or your recovery code). Use a strong password and two-factor
+    authentication there, and ideally an account used for nothing else.</li>
     <li><b>Your devices.</b> A passkey is as safe as the phone or computer it's on. If one is lost, remove its passkey from
     <i>Your devices</i>, which signs it out. If it was your only one, <i>Lost your device?</i> on the sign-in page gets
-    you back in through your Cloudflare account.</li>
-    <li><b>Your friends.</b> Anything you share with a connected site is on that site, under its owner's control, the same
-    as telling a friend something. Choose who you approve.</li>
+    you back in through your Cloudflare account, and your recovery code lets you sign again.</li>
+    <li><b>Your friends.</b> Anything you share with a connected site, or post in a group, is on that site, under its
+    owner's control, the same as telling a friend something. Choose who you approve.</li>
     <li><b>Cloudflare itself.</b> Your site runs on Cloudflare's computers, under Cloudflare's terms. afterwrd doesn't
     encrypt the database against Cloudflare; it keeps your data away from everyone else.</li>
   </ul>
