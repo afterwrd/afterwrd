@@ -76,9 +76,13 @@ export function remoteCard(ctx, c, p, { back = `${ctx.url.pathname}${ctx.url.sea
 </article>`;
 }
 
-/** Why someone's asking to be friends: a group they're both in, a friend's introduction, or a link the owner made. */
+/**
+ * Why someone's asking to be friends: a group they're both in, a friend in common (they asked through them), a
+ * friend's introduction, or a link the owner made.
+ */
 export function askedBecause(r) {
   if (r.via_kind === "group") return html`They're in <strong>${r.via_name}</strong> with you.`;
+  if (r.via_kind === "friend") return html`You're both friends with <strong>${r.via_name}</strong>.`;
   if (r.via_kind === "introduction") return html`Introduced by <strong>${r.via_name}</strong>.`;
   return r.invited_as ? html`Used the invite you made for <strong>${r.invited_as}</strong>.` : "Used a friend link you made.";
 }

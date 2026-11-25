@@ -360,6 +360,10 @@ check("Bob's say who commented on his post, and where", bobNews.includes("Cat Ex
   && bobNews.includes("Ann Example commented on your post"), bobNews.slice(0, 300));
 await Promise.all([bob.waitForNavigation(), bob.click(`a[href="/groups/${bobGroup}/posts/${bobPost}"]`)]);
 check("…and link to the post's own page, with its comments", (await cards(bob))[0]?.comments.length === 3, JSON.stringify(await cards(bob)));
+const askMenus = await bob.$$eval(".comment:not(.gone) .bubble details.who", (l) => l.map((d) => ({ name: d.querySelector("summary").textContent,
+  group: d.querySelector('form[action="/_admin/connections/ask"] input[name="group"]')?.value ?? null })));
+check("…where a member's name offers asking them to be friends, as someone in the group", askMenus.some((m) => m.name === "Cat Example"
+  && m.group === String(bobGroup)), JSON.stringify(askMenus));
 
 // Live: Bob has his post open; Cat comments on it; a quiet bar offers it. Times are in seconds and the bar counts from
 // the second the page was made, so the earlier comments' notes are let fall into an earlier second first.

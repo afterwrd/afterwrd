@@ -2,6 +2,7 @@
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
 import { blockedAmong, blockedList } from "../blocks.js";
+import { friendshipsOf } from "../connect.js";
 import { isMuted, mutedList } from "../mutes.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, namesFor, ownHost } from "../items.js";
@@ -684,14 +685,18 @@ async function friendComments(ctx, connection, id, owner) {
   // How each is known here (names.js): "friend of Ann", "not your friend Bob", a friend's new name.
   const tags = new Map(t.entries.filter((e) => e.by).map((e) => [e.by, { label: e.label, warn: e.warn, renamed: e.renamed }]));
   const blocked = await blockedAmong(ctx.db, comments.map((c) => c.author));
-  for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; Object.assign(c, tags.get(c.author)); c.blocked = blocked.has(c.author); if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; }
+  // How the owner here stands with each commenter: a friend's name leads to their page; anyone else can be asked to be
+  // friends through this friend (connect.js passOnAsk; views/items.js commenterName).
+  const ties = await friendshipsOf(ctx.db, comments.map((c) => c.author));
+  for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; Object.assign(c, tags.get(c.author)); c.blocked = blocked.has(c.author); if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; c.tie = ties.get(c.author) ?? null; }
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${connection.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${connection.name}'s site has changed this conversation since you last saw it.` : null;
   // What was checked, for counting a poll again (only from the start: a thread read from a checkpoint can't be). In one
   // that doesn't add up, only what's before the break: never the host's own totals, which may count what's after it.
   const counted = read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null;
-  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine, commentsOff: t.commentsOff === true }, problem, counted, admins: t.admins };
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine, commentsOff: t.commentsOff === true,
+    askVia: connection.reached_at ? { through: connection.id } : null }, problem, counted, admins: t.admins };
 }
 
 /** A photo in a friend's signed post, from the post (afterwrd 2): its own comments, read from their site. */
@@ -781,11 +786,12 @@ async function activity(ctx, params) {
   return { items, paging };
 }
 
-// Introductions from friends still here, to people the owner isn't connected with (or asking) yet (connect.js).
+// Introductions from friends still here, to people the owner isn't connected with (or asking) yet (connect.js). Not
+// one a friend passed on for someone asking (ask-through): their request follows it at once.
 const INTRODUCTION_DAYS = 60;
 const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_name FROM introductions i
       JOIN connections c ON c.id = i.connection_id AND c.approved_at IS NOT NULL AND c.reached_at IS NOT NULL
-      WHERE i.created_at > ? AND NOT EXISTS (SELECT 1 FROM connections k WHERE k.origin = i.origin AND k.connected_at IS NOT NULL)
+      WHERE i.created_at > ? AND i.asked IS NULL AND NOT EXISTS (SELECT 1 FROM connections k WHERE k.origin = i.origin AND k.connected_at IS NOT NULL)
       ORDER BY i.created_at DESC`;
 
 /**
@@ -1325,11 +1331,15 @@ async function groupComments(ctx, g, id, owner, people = []) {
     if (c.removedBy) c.removedByName = c.removedBy === t.host ? "the group" : c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}`
       : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
   }
+  // As on a friend's post: a friend's name leads to their page, and any other member can be asked to be friends.
+  const ties = await friendshipsOf(ctx.db, comments.map((c) => c.author));
+  for (const c of comments) c.tie = c.author ? ties.get(c.author) ?? null : null;
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${g.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`
     : t.changed ? `${g.name}'s site has changed this conversation since you last saw it.` : null;
   const counted = read[0]?.n === 1 ? read.map((e) => ({ e, r: e.failed ? null : e.r })) : null; // as friendComments
-  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine, commentsOff: t.commentsOff === true }, problem, counted, admins: t.admins };
+  return { thread: comments, list: { host: t.host, me: me?.person, seen: t.seen, mine: t.mine, commentsOff: t.commentsOff === true,
+    askVia: { group: g.id } }, problem, counted, admins: t.admins };
 }
 
 /** Changing an event the owner here added to a signed group. */

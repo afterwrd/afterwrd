@@ -346,11 +346,11 @@ function page(connected, go, error) {
   make a separate account for afterwrd.</p>
   <a class="button secondary" href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener">Make a free Cloudflare account</a>
   <h2>2. Install</h2>
-  <p class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd to set up your site. That access ends after an hour,
-  and nothing is kept.</p>
+  <p class="meta">Cloudflare will ask you to <b>Allow</b> afterwrd to set up your site, which takes a few minutes.
+  afterwrd's access runs out by itself, and nothing is kept.</p>
   <a class="button" id="connect" href="/connect">Connect Cloudflare and install</a>
   <details class="meta more"><summary>What does it allow?</summary>
-  <p>For that hour, afterwrd can make and change Workers (the small programs websites run on) and databases in your
+  <p>Until its access runs out (an hour at most), afterwrd can make and change Workers (the small programs websites run on) and databases in your
   Cloudflare account. It uses that only to put your site there.
   <a href="https://afterwrd.app/how-it-works/#install">More about installing</a>.</p></details>
 </section>

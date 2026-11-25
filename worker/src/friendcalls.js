@@ -3,6 +3,8 @@
 //   POST /_p/disconnect           they've removed the owner here, or withdrawn their request, or declined this one's
 //   POST /_p/introduce            {origin, name, content?}: their owner introduces the owner here to someone
 //                                 (connect.js); either can then ask the other to be friends
+//   POST /_p/ask-through          {origin}: their owner would like to be friends with someone who's a friend here
+//                                 too; if they are, that site is introduced to them (connect.js passOnAsk)
 //   POST /_p/check-request        their owner asks the owner here to check their site (checks.js)
 //   POST /_p/check-token          their site asks for a one-hour read-only token to check this one by itself
 //   POST /_p/check-soon           their site was just updated: check it soon (friendchecks.js)
@@ -21,7 +23,7 @@ import { CONTEXT, tidy } from "../public/static/activity.js";
 import { shareAlbum, shareAlbums, sharePhoto, sharePost, sharePosts } from "./share.js";
 import { ownerName } from "./sites.js";
 import { json } from "./util.js";
-import { receiveIntroduction } from "./connect.js";
+import { passOnAsk, receiveIntroduction } from "./connect.js";
 import { receiveChecked, receiveCheckRequest } from "./checks.js";
 import { giveCheckToken, receiveCheckFailed, receiveCheckSoon } from "./friendchecks.js";
 import { friendGone } from "./events.js";
@@ -30,7 +32,7 @@ const CHECKS = /^POST \/_p\/(check-request|check-token|check-soon|check-failed|c
 const SHARED = /^GET \/_p\/(posts|albums|albums\/(\d+|other|videos)|photos\/([0-9a-f]{64})|posts\/(post-\d+-[0-9a-f]{8}))$/;
 
 /** Whether this module answers `route` ("METHOD /path"). */
-export const friendCallRoute = (route) => route === "POST /_p/disconnect" || route === "POST /_p/introduce" || CHECKS.test(route) || SHARED.test(route);
+export const friendCallRoute = (route) => route === "POST /_p/disconnect" || route === "POST /_p/introduce" || route === "POST /_p/ask-through" || CHECKS.test(route) || SHARED.test(route);
 
 export async function handleFriendCalls(request, env, url) {
   const route = `${request.method} ${url.pathname}`;
@@ -55,6 +57,7 @@ export async function handleFriendCalls(request, env, url) {
     return json({ ok: true });
   }
   if (route === "POST /_p/introduce") return json(...(await receiveIntroduction(env, url, peer, body)));
+  if (route === "POST /_p/ask-through") return json(...(await passOnAsk(env, url, peer, body)));
   if (CHECKS.test(route)) {
     if (!onCloudflare(peer.origin, env)) return json({ error: "Not found." }, 404);
     const [answer, status] = route === "POST /_p/check-request" ? await receiveCheckRequest(env, peer, body)

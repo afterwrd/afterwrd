@@ -101,10 +101,25 @@ export const look = () => `<script nonce="${nonce()}">
 })();
 </script>`;
 
+// On the way from one tab to another (ui/tabs.js), a page passed through only to have its place taken: shown from the
+// browser's cache, it goes on to the tab before it's drawn (its main part hidden meanwhile: style.css).
+const onward = () => `<script nonce="${nonce()}">
+(() => {
+  const found = document.cookie.match(/(?:^|; )afterwrd_onward=([^;]*)/);
+  if (!found) return;
+  let way = null;
+  try { way = JSON.parse(decodeURIComponent(found[1])); } catch {}
+  if (!way || way.from !== location.pathname + location.search || typeof way.to !== "string" || !way.to.startsWith("/") || way.to.startsWith("//")) return;
+  document.cookie = "afterwrd_onward=; path=/; max-age=0; samesite=strict";
+  document.documentElement.dataset.onward = "";
+  location.replace(way.to);
+})();
+</script>`;
+
 // The icon in the browser's tab, and the home-screen app's manifest and icon (public/static/app/), for every page;
 // with them, the look (look()), as every page's head has this. Drawn for each page, as the look script carries the
 // page's nonce (nonce.js).
-export const favicon = () => `${look()}
+export const favicon = () => `${look()}${onward()}
 <link rel="manifest" href="/static/app/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/static/app/icon-180.png">
 <meta name="apple-mobile-web-app-title" content="afterwrd">
@@ -187,7 +202,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // The parts public/static/ui/main.js imports, fetched alongside it rather than after it (a slow phone network would
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
-const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app", "back", "viewer"];
+const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app", "back", "viewer", "tabs"];
 const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}" integrity="${integrity(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */

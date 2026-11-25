@@ -8,7 +8,7 @@
 import { handleFriendItems } from "./friendhost.js";
 import { handleReportCheck } from "./reports.js";
 import { withWork } from "./later.js";
-import { contentSecurityPolicy, newNonce, withNonce } from "./nonce.js";
+import { contentSecurityPolicy, newNonce, nonce as pageNonce, withNonce } from "./nonce.js";
 import { BRINGING_BYTES } from "./before.js";
 import { receiveNotes } from "./notes.js";
 import { receiveReceipt } from "./receipts.js";
@@ -242,6 +242,29 @@ function fromElsewhere(request) {
     : new Response(message, { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 }
 
+// Going from one header tab to another, away from Home (ui/tabs.js): the page goes back in its history to the page
+// after Home, and that page's place is taken by the tab, so back from the tab is Home. That page is asked for again on
+// the way (unless the browser kept it), with a short cookie saying which page and where to: instead of drawing it, a
+// page with nothing to show takes the browser straight on, in its place, and the cookie goes. Only to one of the tabs,
+// and only for the page named, opened as a page (not a prefetch).
+const TABS = ["/photos", "/friend", "/groups", "/events", "/activity"];
+const ONWARD_COOKIE = "afterwrd_onward";
+/** Where a tab switch is going, if this request is for the page it's passing through, or null. */
+function onwardTab(request, url) {
+  if (request.headers.get("Sec-Fetch-Dest") !== "document" || request.headers.get("Sec-Purpose")) return null;
+  const header = request.headers.get("Cookie") ?? "";
+  const value = header.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${ONWARD_COOKIE}=`))?.slice(ONWARD_COOKIE.length + 1);
+  let asked = null;
+  try { asked = JSON.parse(decodeURIComponent(value ?? "")); } catch {}
+  return asked?.from === url.pathname + url.search && TABS.includes(asked.to) ? asked.to : null;
+}
+function onwardPage(path) {
+  const answer = html(`<!doctype html><html lang="en-GB"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>afterwrd</title><script nonce="${pageNonce()}">location.replace(${JSON.stringify(path)});</script></head><body></body></html>`);
+  answer.headers.append("Set-Cookie", `${ONWARD_COOKIE}=; Path=/; Max-Age=0; SameSite=Strict`);
+  return answer;
+}
+
 /** The owner's own pages and actions, once signed in (actions only from this site's own pages: see route). */
 async function ownerRoute(request, env, url, user, work) {
   const reading = request.method === "GET" || request.method === "HEAD";
@@ -251,6 +274,10 @@ async function ownerRoute(request, env, url, user, work) {
   // up, moving in, Download everything and Update still open.
   if (reading && !SIGNING_NOT_NEEDED.test(url.pathname) && !(await env.DB.prepare("SELECT 1 FROM own_identity WHERE id = 1").first())) {
     return Response.redirect(`${url.origin}/_admin/keys?next=${encodeURIComponent(url.pathname + url.search)}`, 302);
+  }
+  if (reading) {
+    const onward = onwardTab(request, url);
+    if (onward) return onwardPage(onward);
   }
   if (url.pathname === "/_admin" || url.pathname.startsWith("/_admin/")) return handleAdmin(request, env, url, user);
   // Connecting to Cloudflare, for updating and groups (an hour's token in a cookie; cloudflare.js).

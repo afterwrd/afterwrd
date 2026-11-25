@@ -955,3 +955,15 @@ header.site { view-transition-name: site-header; }
   @view-transition { navigation: none; }
 }
 .notice.said { margin-bottom: 1rem; }
+/* On the way to a tab (ui/tabs.js), a page brought back only to have its place taken isn't shown. */
+html[data-onward] main { visibility: hidden; }
+/* A commenter's name (views/items.js commenterName): a friend's leads to their page; anyone else's opens a small menu
+   to ask them to be friends. Looks like the name, until it's tapped. */
+.comment .bubble a.who-link { color: inherit; text-decoration: none; }
+.comment .bubble a.who-link:hover { text-decoration: underline; }
+.comment .bubble details.more.who { display: block; line-height: inherit; }
+.comment .bubble details.more.who summary { display: inline; width: auto; height: auto; border-radius: 0; color: inherit; }
+.comment .bubble details.more.who summary::after { inset: -0.4rem; }
+.comment .bubble details.more.who summary:hover, .comment .bubble details.more.who[open] summary { background: none; text-decoration: underline; }
+.comment .bubble details.more.who .menu { left: 0; right: auto; min-width: 13rem; }
+.comment .bubble details.more.who .menu p { margin: 0; padding: 0.5rem 0.75rem; }

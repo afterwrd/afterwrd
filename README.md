@@ -210,9 +210,11 @@ Once it's installed, nothing needs the terminal:
   was for, and approving links them to their Facebook self. Otherwise, say which Facebook friend an afterwrd friend
   is (matching names are suggested; nothing is linked without you), and their page links to your Facebook history
   together. Requests to be friends show on *Home* and at the top of *Friends* (with a count in the menu) for *Approve* or
-  *Decline*, with why they came: a link, a group you're both in, or a friend's introduction.
+  *Decline*, with why they came: a link, a group you're both in, a friend in common, or a friend's introduction.
 - **Without a link.** A group's *Members* page has *Ask to be friends* by each member you're not friends with (the site
-  asked checks with the group that you're in it). *Introduce* on a friend's card tells them and another friend about
+  asked checks with the group that you're in it), and so does a member's name on their comment. The name of someone who
+  commented on a friend's post asks them too: your friend's site passes it on, if they're its owner's friend as well,
+  and they see "You're both friends with …" (it never says who isn't). A friend's name leads to their page. *Introduce* on a friend's card tells them and another friend about
   each other, with a note if you like; each sees it on *Home* and *Friends* and can ask. Someone you decline or remove can't ask again
   this way (you still can). There's no "people you may know": it would reveal who your friends' friends are.
 - **Adding friends.** *Friends → Add a friend* makes a one-time friend link (30 days) inside a message to

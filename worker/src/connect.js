@@ -15,10 +15,15 @@
 // of their friends (an introduction this site was sent: POST /_p/introduce, below). Anyone else needs a link. A
 // declined request can't be made again this way; still nothing is shared until the owner approves.
 //
+// Asking a friend's friend (2.3.0): tapping the name of someone who commented on a friend's post (views/items.js)
+// asks that friend's site to pass it on (POST /_p/ask-through, below). If they're its owner's friend too, it
+// introduces this site to theirs, marked `asked`; then this site asks theirs as after any introduction. So no new
+// kind of trust: the friend in common vouches, and nobody can ask a site who its owner's friends are.
+//
 // Without a session:   GET /_connect/<token>  (the page the link opens), GET …/info, POST …/accept, POST /_connect/ask
 // The owner's:         GET /_admin/connections, POST …/link, GET|POST …/new?link=, POST …/<id>/disconnect,
 //                      POST …/<id>/facebook (name, or none=1): which person in the Facebook download they are,
-//                      POST …/ask (origin, group or introduction, back), GET|POST …/<id>/introduce (to, note),
+//                      POST …/ask (origin, group, through or introduction, back), GET|POST …/<id>/introduce (to, note),
 //                      POST …/introductions/<n>/dismiss
 import { isBlocked } from "./blocks.js";
 import { peopleShown } from "./names.js";
@@ -47,6 +52,8 @@ const MEMBERS = { trust: 600, recheck: 60 }; // seconds: a group's member list c
 const MAX_NOTE = 300; // an introduction's note
 // Introductions: from one friend a day, and kept, at most; kept overall at most; for how long.
 const INTRODUCTIONS = { perFriendDay: 20, perFriend: 20, kept: 100, days: 60 };
+// Requests passed on for friends (ask-through): from one friend in a day, and overall in an hour, at most.
+const PASSED_ON = { perFriendDay: 10, hour: 30 };
 const NOT_ALLOWED = "Without a friend link, you can only ask someone you're in a group with, or a friend has introduced you to.";
 
 const cleanName = (name) => (typeof name === "string" && name.trim() ? name.trim().slice(0, 100) : "A friend");
@@ -179,7 +186,7 @@ const LIVE_INTRODUCTION = `JOIN connections c ON c.id = i.connection_id AND c.ap
   WHERE i.origin = ? AND i.created_at > ?`;
 
 /** The introduction to `origin` the owner here holds, as { id, name, by }, or null. */
-export const liveIntroduction = (db, origin) => db.prepare(`SELECT i.id, i.name, c.name AS by FROM introductions i ${LIVE_INTRODUCTION}
+export const liveIntroduction = (db, origin) => db.prepare(`SELECT i.id, i.name, i.asked, c.name AS by FROM introductions i ${LIVE_INTRODUCTION}
   ORDER BY i.created_at DESC LIMIT 1`).bind(origin, now() - INTRODUCTIONS.days * 86400).first();
 
 /**
@@ -191,7 +198,8 @@ async function reasonFor(env, origin, via) {
   const db = env.DB;
   if (via?.introduction === true) {
     const made = await liveIntroduction(db, origin);
-    return made && { kind: "introduction", name: made.by };
+    // One passed on by a friend in common (ask-through) says so: "you're both friends with Ann".
+    return made && { kind: made.asked ? "friend" : "introduction", name: made.by };
   }
   const groupOrigin = siteOrigin(via?.group, env);
   const id = Number(via?.id);
@@ -242,14 +250,47 @@ export async function receiveIntroduction(env, url, peer, body) {
   // Limits checked in the same statement as the insert.
   const [, kept] = await db.batch([
     db.prepare("DELETE FROM introductions WHERE created_at < ?").bind(at - INTRODUCTIONS.days * 86400),
-    db.prepare(`INSERT INTO introductions (connection_id, origin, name, note, created_at)
-      SELECT ?1, ?2, ?3, ?4, ?5 WHERE (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1 AND created_at > ?5 - 86400) < ?6
+    db.prepare(`INSERT INTO introductions (connection_id, origin, name, note, created_at, asked)
+      SELECT ?1, ?2, ?3, ?4, ?5, ?9 WHERE (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1 AND created_at > ?5 - 86400) < ?6
         AND (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1) < ?7 AND (SELECT COUNT(*) FROM introductions) < ?8
       ON CONFLICT (connection_id, origin) DO NOTHING
       RETURNING id`).bind(peer.id, origin, cleanName(body.name), note || null, at, INTRODUCTIONS.perFriendDay, INTRODUCTIONS.perFriend,
-      INTRODUCTIONS.kept),
+      INTRODUCTIONS.kept, body.asked === true ? 1 : null),
   ]);
   return kept.results.length ? [{ ok: true }, 200] : [{ error: "That's a lot of introductions for now. Try again later." }, 429];
+}
+
+/**
+ * A friend's site asking this one to pass on a request to be friends with `origin`, someone they saw comment on its
+ * owner's post (ask-through). If `origin` is a friend here too, both ways, its site is introduced to the asker, marked
+ * `asked`; the asker's site then asks it as after any introduction (8.3). The answer is the same either way, so a friend
+ * can't find out who the owner here is friends with by asking: only a request that then works says so, and that's
+ * a request its owner sees. Returns [body, status].
+ * @returns {Promise<import("./util.js").Answer>}
+ */
+export async function passOnAsk(env, url, peer, body) {
+  const db = env.DB;
+  const origin = siteOrigin(body?.origin, env);
+  if (!origin || origin === url.origin || origin === peer.origin) return [{ error: "That isn't someone to ask." }, 400];
+  // Only for a friend who has approved the owner here too (as for an introduction from them).
+  if (!peer.reached_at && (await pullItems(env, url.origin, peer)) === null) {
+    return [{ error: `You haven't approved ${await ownerName(db)} as a friend yet.` }, 403];
+  }
+  const at = now();
+  const [, counted] = await db.batch([
+    db.prepare("DELETE FROM passed_on WHERE at < ?").bind(at - 86400),
+    db.prepare(`INSERT INTO passed_on (at, origin) SELECT ?1, ?2 WHERE (SELECT COUNT(*) FROM passed_on WHERE origin = ?2 AND at > ?1 - 86400) < ?3
+      AND (SELECT COUNT(*) FROM passed_on WHERE at > ?1 - ?5) < ?4 RETURNING at`).bind(at, peer.origin, PASSED_ON.perFriendDay, PASSED_ON.hour, rateWindow(3600)),
+  ]);
+  if (!counted.results.length) return [{ error: "That's a lot of requests to pass on for now. Try again later." }, 429];
+  const friend = await db.prepare(`SELECT origin FROM connections WHERE origin = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL
+    AND reached_at IS NOT NULL`).bind(origin).first();
+  if (friend) {
+    // Whatever their site says, nothing is said back (it may already know them, or have turned them down).
+    await callFriend(env, url.origin, origin, "/_p/introduce", { body: { type: "Introduce", origin: peer.origin, name: peer.name, asked: true } })
+      .catch(() => null);
+  }
+  return [{ ok: true }, 200];
 }
 
 // --- the owner's side ---------------------------------------------------------------------------------------------
@@ -308,7 +349,8 @@ export async function handleConnections(request, env, url, owner) {
     const form = await request.formData().catch(() => new FormData());
     const back = safeNext(String(form.get("back") ?? "/friend"), url);
     try {
-      const asked = await askToBeFriends(env, url.origin, { origin: form.get("origin"), group: form.get("group") });
+      const asked = await askToBeFriends(env, url.origin, { origin: form.get("origin"), group: form.get("group"),
+        through: form.get("through"), name: form.get("name") });
       // A request from an invite is decided on Friends, which warns if the name isn't the one invited.
       return Response.redirect(`${url.origin}${asked.decideOnFriends ? "/friend" : back}`, 303);
     } catch (error) {
@@ -536,6 +578,23 @@ async function handshake(env, url, origin, path, extra = {}) {
   return { name };
 }
 
+/**
+ * How the owner here stands with each of `people` (person ids whose identity this site knows), by their site: a Map of
+ * person -> {origin, id (the connection, if any), state: "friends" | "asked" (by the owner, not answered yet) | "asking"
+ * (they asked) | "invited" (they asked with an invite, decided on Friends) | "none"}. Not someone whose identity is frozen.
+ * @param {D1Database} db @param {(string | null | undefined)[]} people
+ * @returns {Promise<Map<string, { origin: string, id: number | null, state: string }>>}
+ */
+export async function friendshipsOf(db, people) {
+  const list = [...new Set(people.filter(Boolean))];
+  if (!list.length) return new Map();
+  const { results } = await db.prepare(`SELECT i.person, i.origin, c.id, c.approved_at, c.reached_at, c.invited_as FROM identities i
+    LEFT JOIN connections c ON c.origin = i.origin AND c.connected_at IS NOT NULL
+    WHERE i.person IN (SELECT value FROM json_each(?)) AND i.frozen_at IS NULL`).bind(JSON.stringify(list)).all();
+  return new Map(results.map((r) => [String(r.person), { origin: String(r.origin), id: r.id == null ? null : Number(r.id),
+    state: r.id == null ? "none" : r.approved_at ? (r.reached_at ? "friends" : "asked") : r.invited_as ? "invited" : "asking" }]));
+}
+
 /** Approves someone's request: they're friends now (tied to their identity when they asked). */
 async function approve(env, connection) {
   const db = env.DB;
@@ -553,7 +612,7 @@ async function approve(env, connection) {
  * here), or else someone a friend introduced. If they've already asked, asking back is saying yes, apart from a
  * request from an invite, which is decided on Friends: then { decideOnFriends: true }.
  */
-export async function askToBeFriends(env, here, { origin: asked, group: groupId }) {
+export async function askToBeFriends(env, here, { origin: asked, group: groupId, through = null, name: knownAs = null }) {
   const db = env.DB;
   const url = new URL(here);
   const origin = siteOrigin(asked, env);
@@ -563,7 +622,28 @@ export async function askToBeFriends(env, here, { origin: asked, group: groupId 
   if (theirs && !theirs.approved_at) await approve(env, theirs);
   if (theirs) return {};
   let via;
-  let name = host(origin);
+  let name = typeof knownAs === "string" && knownAs.trim() ? knownAs.trim().slice(0, 100) : host(origin);
+  if (through) {
+    // Someone who commented on a friend's post: that friend's site passes it on (passOnAsk), then it's an introduction.
+    const friend = await db.prepare(`SELECT * FROM connections WHERE id = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL
+      AND reached_at IS NOT NULL`).bind(Number(through)).first();
+    if (!friend) throw new Refusal("You can ask a friend's friends once you've seen that friend's posts here.");
+    try {
+      await callFriend(env, url.origin, String(friend.origin), "/_p/ask-through", { body: { origin } });
+    } catch (error) {
+      throw new Refusal(error.status === 404 ? `${friend.name}'s site needs a newer afterwrd before it can pass this on. Ask ${friend.name} to introduce you instead.`
+        : `Couldn't ask through ${friend.name}: ${error.message}`);
+    }
+    via = { introduction: true };
+    const done = await handshake(env, url, origin, "/_connect/ask", { via });
+    if (done.error) {
+      throw new Refusal(done.gone ? `${name}'s site needs a newer afterwrd before you can ask this way. Send them a friend link instead.`
+        : /already|try again later/i.test(done.error) ? `Couldn't ask ${name}: ${done.error}`
+        : `${name}'s site didn't take the request. Perhaps they're no longer friends with ${friend.name}, or their site needs a newer afterwrd. You could ask ${friend.name} to introduce you, or send ${name} a friend link.`);
+    }
+    await db.prepare("DELETE FROM introductions WHERE origin = ?").bind(origin).run();
+    return {};
+  }
   if (groupId) {
     const group = await db.prepare("SELECT origin, remote_id FROM groups WHERE id = ? AND joined_at IS NOT NULL").bind(Number(groupId)).first();
     if (!group) throw new Refusal("That group isn't here any more.");

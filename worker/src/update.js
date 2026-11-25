@@ -79,7 +79,7 @@ export async function handleUpdate(request, env, url, owner) {
   }
   if (path === "/auto-off") {
     await turnOff(env, url);
-    return Response.redirect(`${url.origin}/_admin/update#auto`, 303);
+    return Response.redirect(`${url.origin}/_admin/update?auto=off#auto`, 303);
   }
   if (path === "/early-on" || path === "/early-off") { // "Get updates first", for people helping to test afterwrd
     // Not turned on while a recovery through Cloudflare waits (recover.js), which turned it off.
@@ -214,6 +214,8 @@ async function updateData(request, env, url, owner) {
     site: url.host, connected: Boolean(connectedToken(request)), oldToken: Boolean(env.UPDATE_TOKEN), groups: await groupsBehind(env.DB),
     go: url.searchParams.get("go"), checked: await lastChecked(env.DB), checkWait: tooSoonToCheck(env),
     auto: await autoData(env, url, latest),
+    // Just turned off (POST /_admin/update/auto-off): the clean-up in Cloudflare is said then, not beside the button.
+    turnedOff: url.searchParams.get("auto") === "off",
     madeGroups: (await env.DB.prepare(`SELECT COUNT(*) AS n FROM groups WHERE joined_at IS NOT NULL AND role = 'owner'
       AND script IS NOT NULL AND script != ''`).first())?.n ?? 0,
     // Friends who could check this site: only those whose sites are on Cloudflare (hosting.js).

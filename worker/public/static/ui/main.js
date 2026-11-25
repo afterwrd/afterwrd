@@ -14,6 +14,7 @@
 //   groupsign.js a group's signed members list: joining, letting in, removing, admins, leaving
 //   back.js      back closes an open menu first, as in an app
 //   viewer.js    the photo viewer: next and previous don't add to history; ✕ goes back where it was opened
+//   tabs.js      the header's tabs work as an app's: back from any of them is Home
 import "./confirm.js";
 import "./look.js";
 import "./menus.js";
@@ -28,3 +29,4 @@ import "./threads.js";
 import "./groupsign.js";
 import "./back.js";
 import "./viewer.js";
+import "./tabs.js";

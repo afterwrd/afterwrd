@@ -728,9 +728,11 @@ await ann.goto(`${A}/memories`);
 check("Memories gathers the Facebook sections", (await ann.$$eval(".memory-tiles strong", (l) => l.map((s) => s.textContent))).join() === "Facebook friends");
 await ann.goto(`${A}/posts`);
 check("the owner has one Friends in the menu", annMenu.filter((l) => l === "Friends").length === 1, annMenu.join());
-await Promise.all([ann.waitForNavigation(), ann.click('header.site nav.main a[href="/friend"]')]);
+await ann.click('header.site nav.main a[href="/friend"]'); // a tab from another page can be two steps (ui/tabs.js)
+await waitFor(async () => new URL(ann.url()).pathname === "/friend" && await ann.evaluate(() => document.readyState === "complete").catch(() => false));
 const friendsText = () => ann.$eval("main", (m) => m.innerText);
-check("Friends lists Bob on afterwrd, and suggests his Facebook self", (await friendsText()).includes("Is this Bob Example from your Facebook download?"));
+check("Friends lists Bob on afterwrd, and suggests his Facebook self", (await friendsText()).includes("Is this Bob Example from your Facebook download?"),
+  `${ann.url()} ${(await friendsText()).slice(0, 300)}`);
 const fbRow = (name) => ann.$$eval("#fb-people tbody tr", (rows, n) => rows.find((r) => r.cells[0].textContent === n)?.cells[2].textContent.trim(), name);
 check("…and everyone from Facebook below, with an Invite button", (await fbRow("John Smith")) === "Invite" && (await fbRow("Bob Example")) === "Invite");
 await Promise.all([ann.waitForNavigation(), ann.click(".fb-link button.chip:not([name])")]);
@@ -928,6 +930,60 @@ check("…and goes from Ann's copy", sql(stateA, `SELECT COUNT(*) AS n FROM copi
     privateKey: bobHosting }), body: "{}" });
   check("a call this site doesn't have gets 404, not 401", unknown.status === 404 && (await fetch(`${A}/_p/nothing`, { redirect: "manual" })).status === 404,
     `${unknown.status}`);
+}
+
+// Asking a friend's friend (connect.js passOnAsk): Cara, Bob's friend but not Ann's, comments on Bob's post. On Ann's
+// site, Cara's name opens a menu to ask her to be friends; Bob's site passes it on, and Cara's site takes the request as
+// from a friend in common. Bob's own name there leads to his page. Then it's all undone, for what follows.
+{
+  const { link: bobLink } = await bob.evaluate(() => fetch("/_admin/connections/link", { method: "POST" }).then((r) => r.json()));
+  await cara.goto(`${C}/_admin/connections/new?link=${encodeURIComponent(bobLink)}`);
+  await Promise.all([cara.waitForNavigation({ timeout: 30_000 }), cara.click("#go")]);
+  await bob.goto(`${B}/friend`);
+  await Promise.all([bob.waitForNavigation(), bob.click('.requests button[formaction$="/approve"]')]);
+  const caraOnBob = sql(stateB, `SELECT id FROM connections WHERE origin = '${C}'`)[0].id;
+  const bobOnCara = sql(stateC, `SELECT id FROM connections WHERE origin = '${B}'`)[0].id;
+  await bob.goto(`${B}/friend/${caraOnBob}`); // each site asks the other: friends both ways
+  await cara.goto(`${C}/friend/${bobOnCara}`);
+  const post = sql(stateC, `SELECT id FROM copies WHERE connection_id = ${bobOnCara} ORDER BY created_at DESC LIMIT 1`)[0]?.id;
+  await cara.goto(`${C}/friend/${bobOnCara}/posts/${post}`);
+  await cara.type(".say textarea", "Hello from Cara");
+  await Promise.all([settled(cara), cara.click(".say button")]);
+  await bob.goto(`${B}/posts/${post}`);
+  await bob.type(".say textarea", "Hi Cara");
+  await Promise.all([settled(bob), bob.click(".say button")]);
+  const onAnn = `${A}/friend/${bobId}/posts/${post}`;
+  await ann.goto(onAnn);
+  const named = await ann.$$eval(".comment:not(.gone)", (l) => l.map((c) => ({ name: c.querySelector("strong").textContent,
+    link: c.querySelector(".bubble a.who-link")?.getAttribute("href") ?? null, menu: Boolean(c.querySelector(".bubble details.who")) })));
+  const caraThere = named.find((c) => c.name === "Cara Example");
+  check("on a friend's post, a friend-of-a-friend's name opens a menu", caraThere?.menu === true && !caraThere.link, JSON.stringify(named));
+  check("…and the friend's own name leads to their page", named.some((c) => c.name === "Bob Example" && c.link === `/friend/${bobId}`), JSON.stringify(named));
+  const caraSel = ".comment:has(details.who summary[title='Cara Example'])";
+  await ann.click(`${caraSel} details.who summary`);
+  check("…offering to ask her", (await ann.$eval(`${caraSel} details.who .menu`, (m) => m.textContent)).includes("Ask Cara Example to be friends"));
+  await Promise.all([ann.waitForNavigation({ timeout: 30_000 }), ann.click(`${caraSel} details.who .menu button`)]);
+  check("asking keeps Ann on the post, and says so", new URL(ann.url()).pathname === new URL(onAnn).pathname
+    && (await ann.$eval("main", (m) => m.textContent)).includes("Asked Cara Example to be friends"), ann.url());
+  check("Bob's site passed it on, as an introduction marked asked", sql(stateB, "SELECT COUNT(*) AS n FROM passed_on")[0].n === 1
+    && sql(stateC, `SELECT asked FROM introductions WHERE origin = '${A}'`)[0]?.asked === 1);
+  check("Cara's site has Ann's request, from a friend in common", sql(stateC, `SELECT via_kind, via_name, approved_at FROM connections WHERE origin = '${A}'`)
+    .some((r) => r.via_kind === "friend" && r.via_name === "Bob Example" && r.approved_at === null), JSON.stringify(sql(stateC, "SELECT origin, via_kind, via_name FROM connections")));
+  await ann.goto(onAnn);
+  await ann.click(`${caraSel} details.who summary`);
+  check("…and Cara's name now says Ann has asked", (await ann.$eval(`${caraSel} details.who .menu`, (m) => m.textContent)).includes("You've asked Cara Example"));
+  await cara.goto(`${C}/friend`);
+  const caraSees = await cara.$eval(".requests", (r) => r.innerText).catch(() => "");
+  check("Cara's Friends says why: they're both friends with Bob", caraSees.includes("Ann Example") && caraSees.includes("You're both friends with Bob Example"), caraSees);
+  check("…and doesn't show it as an introduction too", !(await cara.$eval("main", (m) => m.textContent)).includes("introduced you to"));
+  // Bob's site says the same whoever's named, friend of Bob's or not, so Ann's can't find out who his friends are.
+  const notFriend = await siteCall(stateA, A, `${B}/_p/ask-through`, { origin: "https://nobody.example" });
+  check("passing on for someone who isn't a friend there answers just the same", notFriend.status === 200 && (await notFriend.json()).ok === true);
+  // Undone: Cara declines, and Bob and Cara part.
+  await Promise.all([cara.waitForNavigation(), cara.click('.requests button[formaction$="/decline"]')]);
+  await bob.evaluate((id) => fetch(`/_admin/connections/${id}/disconnect`, { method: "POST" }), caraOnBob);
+  check("(undone)", sql(stateA, `SELECT COUNT(*) AS n FROM connections WHERE origin = '${C}'`)[0].n === 0
+    && sql(stateC, "SELECT COUNT(*) AS n FROM connections")[0].n === 0 && sql(stateB, "SELECT COUNT(*) AS n FROM connections")[0].n === 1);
 }
 
 // Phone view of the Feed, then disconnect.

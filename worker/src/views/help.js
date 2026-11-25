@@ -27,7 +27,8 @@ export const helpBody = ({ version = null } = {}) => html`<nav class="contents" 
   see your things from their own sites, never by signing in to yours.</p>
   <h3>Friends</h3>
   <p>Go to <strong>Friends</strong>, then <strong>Add a friend</strong>: make a link to send someone, or paste a link a friend
-  sent you. Nothing is shared until you've approved them. Once you're friends, you can introduce friends to each other.</p>
+  sent you. Nothing is shared until you've approved them. Once you're friends, you can introduce friends to each other.
+  Someone who comments on a friend's post, or is in a group with you, can be asked from their name: tap it.</p>
   <h3>Posts and comments</h3>
   <p>Write a post on Home or Your profile, with photos if you like: all your friends see it, and nobody else. You can change
   what you wrote for 15 minutes, until someone replies, and delete it any time. Comment on friends' posts from your own Home.

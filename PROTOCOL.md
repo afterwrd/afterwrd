@@ -2153,6 +2153,7 @@ section 11), and `POST /_p/before`, which only brings comments over from afterwr
 | `POST /_connect/<token>/accept` | a site, signed | ask to be friends with a link |
 | `POST /_connect/ask` | a site, signed | ask to be friends without a link |
 | `POST /_p/introduce` | an approved friend, signed | introduce the owner to someone |
+| `POST /_p/ask-through` | an approved friend, signed | pass on a request to be friends with one of the owner's friends |
 | `POST /_p/disconnect` | a friend, approved or waiting, signed | end the friendship, withdraw or decline a request |
 | `GET /_p/items?since=` | an approved friend, signed | the owner's posts changed since a time |
 | `GET /_p/items/<id>` | an approved friend, signed | one item's whole list |
@@ -2270,7 +2271,8 @@ Source: `src/connect.js` `handleConnectLink`, `accept`, `signedName`, `handshake
 ### 8.3 Asking without a link: `POST /_connect/ask`
 
 A may ask B without a link if A's owner is in a group with B's owner, or a friend of B's owner has introduced A's
-owner to them (8.5). Signed call from A. Body:
+owner to them (8.5), which includes a friend in common passing on A's request (`POST /_p/ask-through`, 8.5). Signed
+call from A. Body:
 
 ```json
 { "name": "Sam Taylor", "profile": { "…": "as in 8.2" }, "via": { "group": "https://group.example", "id": 7 } }
@@ -2300,6 +2302,9 @@ so the asker learns nothing about B's friends, groups, introductions or refusals
    429 `<owner name> has a lot of friend requests waiting. Try again later.`
 
 Answer, 200: `{"name", "profile"}` as in 8.2. A's side is the same `handshake`, with `via` added to the body.
+
+B keeps why it was asked, to show its owner: the group, the introducer, or (for an introduction marked `asked`) the
+friend in common, shown as "You're both friends with <name>".
 
 Source: `src/connect.js` `ask`, `reasonFor`, `liveIntroduction`, `askToBeFriends`.
 
@@ -2335,7 +2340,8 @@ each a reason to ask without a link (8.3). Signed call from an approved friend. 
 { "type": "Introduce", "origin": "https://sam.example", "name": "Sam Taylor", "content": "You both love birds." }
 ```
 
-`type` is sent but not read. `content` is optional; the receiver normalises line endings, trims, and cuts it to 300
+`type` is sent but not read. `asked: true` marks an introduction made by passing on a request (below): it is kept the
+same way, but not shown to the owner as an introduction, as the request follows at once. `content` is optional; the receiver normalises line endings, trims, and cuts it to 300
 characters. `name` is trimmed and cut to 100 characters (`"A friend"` if missing); it is the introducer's name for that
 person, unsigned.
 
@@ -2351,6 +2357,25 @@ On the sending side, an owner may introduce up to 10 friends to each other at on
 one other, and a request makes at most 9 calls. Only friends both ways can be introduced.
 
 Source: `src/connect.js` `receiveIntroduction`, `introduceFriend`, `introduceTogether`, `introducible`.
+
+#### Passing on a request: `POST /_p/ask-through`
+
+A's owner sees someone (C) comment on a post of their friend B's, and would like to be friends with them. A asks B's
+site to pass it on. Signed call from A, an approved friend of B. Body: `{ "origin": "https://c.example" }`.
+
+| Check | Answer |
+|---|---|
+| `origin` is a valid origin (as in 8.3), not B and not A | 400 `That isn't someone to ask.` |
+| A's site has answered B (friends both ways); if it never has, B pulls from it once now (8.7) | 403 `You haven't approved <owner name> as a friend yet.` |
+| At most 10 from one friend a day, 30 an hour overall, counted in the same statement that records it | 429 `That's a lot of requests to pass on for now. Try again later.` |
+| Otherwise | 200 `{"ok": true}` |
+
+If `origin` is a friend of B's owner both ways, B's site then introduces A to C (`POST /_p/introduce` to C, with
+`origin` A, B's name for A, and `asked: true`), and doesn't say whether that worked. The answer is the same whether or
+not C is B's friend, so A can't find out who B's owner is friends with by asking: only A's request to C (8.3, with
+`via: { "introduction": true }`), which C's owner then sees, shows it. A site makes that request straight after a 200.
+
+Source: `src/connect.js` `passOnAsk`, `askToBeFriends`.
 
 ### 8.6 Ending it: `POST /_p/disconnect`
 
@@ -4021,6 +4046,7 @@ owner's browser and their own site, and aren't part of the protocol.
 | `POST /_connect/<token>/accept` | a site, signed | 8.2 |
 | `POST /_connect/ask` | a site, signed | 8.3 |
 | `POST /_p/introduce` | an approved friend | 8.5 |
+| `POST /_p/ask-through` | an approved friend | 8.5 |
 | `POST /_p/disconnect` | a friend, approved or waiting | 8.6 |
 | `GET /_p/items?since=<t>` | an approved friend | 8.7 |
 | `GET /_p/items/<id>[?after=<n>]` | an approved friend who may see the item | 8.8 |

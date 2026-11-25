@@ -98,6 +98,29 @@ export function commentsButton(count) {
 export const whoTags = (p) => html`${p.label && html`<span class="from">${p.label}</span>`}${p.warn && html`<span class="from warn">${p.warn}</span>`}${p.renamed
   && html`<span class="from">now calling themselves ${p.renamed}</span>`}`;
 
+/**
+ * A commenter's name (not the owner's own). A friend's leads to their page. Anyone else's, where the owner here could
+ * ask them (on a friend's post, through that friend: `list.askVia.through`, connect.js passOnAsk; in a group, as a
+ * member: `list.askVia.group`), opens a small menu: ask them to be friends, or where that's got to. `c.tie`: how the
+ * owner stands with them (connect.js friendshipsOf).
+ */
+function commenterName(c, name, list, back) {
+  const t = c.tie;
+  if (!t) return html`<strong>${name}</strong>`;
+  if (t.state === "friends") return html`<strong><a class="who-link" href="/friend/${t.id}">${name}</a></strong>`;
+  if (t.state === "none" && !list.askVia) return html`<strong>${name}</strong>`;
+  const what = t.state === "asked" ? html`<p class="meta">You've asked ${name} to be friends.</p>`
+    : t.state === "invited" ? html`<a href="/friend">${name} is asking to be friends: decide on Friends</a>`
+    : t.state === "asking" ? html`<form method="post" action="/_admin/connections/${t.id}/approve?back=${encodeURIComponent(back)}" data-stay
+        data-said="You and ${name} are friends now."><button>Approve ${name}'s friend request</button></form>`
+    : html`<form method="post" action="/_admin/connections/ask" data-stay data-said="Asked ${name} to be friends.">
+        <input type="hidden" name="origin" value="${t.origin}">${list.askVia.through
+          ? html`<input type="hidden" name="through" value="${list.askVia.through}">` : html`<input type="hidden" name="group" value="${list.askVia.group}">`}
+        <input type="hidden" name="name" value="${name}"><input type="hidden" name="back" value="${back}">
+        <button>Ask ${name} to be friends</button></form>`;
+  return html`<details class="more who"><summary title="${name}"><strong>${name}</strong></summary><div class="menu">${what}</div></details>`;
+}
+
 export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null, say = true, report = null } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
   // Telling whoever runs it about a comment (reports.js): a group's admins, or the friend whose post it is (not about
@@ -109,7 +132,7 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
   ${comments.map((c) => (c.state === "ok" && c.blocked ? html`<p class="comment gone meta" id="c-${c.fp}">Hidden: someone you've blocked.</p>`
     : c.state === "ok" ? html`<div class="comment" id="c-${c.fp}"${c.author !== list.me && raw(` data-person="${c.author}"`)}${c.author !== list.me && html` data-name="${name(c)}"`}>
     ${c.author === list.me ? ownerFace(ctx) : html`<span class="who who-${c.n % 6}" aria-hidden="true">${initial(name(c))}</span>`}
-    <div class="bubble"><strong>${name(c)}</strong>${c.author !== list.me && whoTags(c)}<span class="said">${linkify(c.text, c.mentions)}</span></div>
+    <div class="bubble">${c.author === list.me ? html`<strong>${name(c)}</strong>` : commenterName(c, name(c), list, back)}${c.author !== list.me && whoTags(c)}<span class="said">${linkify(c.text, c.mentions)}</span></div>
     <div class="under">
       <time title="${fmtDatetime(c.taken)}">${fmtAgo(c.taken)}</time>
       ${c.author === list.me && moreMenu([c.editable && menuEdit(`edit-c-${c.fp}`),

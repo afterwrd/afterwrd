@@ -345,13 +345,16 @@ release("99.0.5", { signedAgo: 2 * 86400 });
 s = await dailyRun();
 check("a release signed two days ago waits", cf.versions.length === 0 && s.waiting?.version === "99.0.5", JSON.stringify(s.waiting));
 await owner.goto(`${BASE}/_admin/update`);
-check("…and the Update page says when it'll install itself", /99\.0\.5 will install itself after/.test(await text("#auto")));
+check("…and the Update page says when it'll install itself, once", (await text()).match(/99\.0\.5 (is ready\. It'll|will) install itself after/g)?.length === 1, await text());
 // "Get updates first" (for people helping to test afterwrd): no waiting, chosen on the Update page, where it's folded away.
 check("\"Get updates first\" is folded away", await owner.$eval("#early", (d) => !d.open));
+check("…and the card says once a day, and when it looks", /once a day, at about \d{1,2}(:\d\d)?[ap]m/.test(await text("#auto-how")), await text("#auto-how"));
+check("…and doesn't say when they were turned on", !(await owner.$("#auto-since")));
 await owner.$eval("#early", (d) => { d.open = true; });
 await Promise.all([owner.waitForNavigation(), owner.click("form[action='/_admin/update/early-on'] button")]);
-check("…and turning it on is kept, and shown", state().early === true && (await text("#early")).includes("You're getting updates first")
-  && (await text("#auto")).includes("as soon as they're signed"));
+check("…and turning it on is kept, and said once, in the card's own sentence (no box)", state().early === true
+  && (await text("#auto-how")).includes("as soon as it's signed, because you're getting updates first")
+  && !(await owner.$("details#early")) && (await text("#early")).includes("Wait the usual few days again"));
 s = await dailyRun();
 check("…then the release signed two days ago installs at once", s.last?.version === "99.0.5" && s.last?.result === "done", JSON.stringify(s.last));
 await owner.goto(`${BASE}/_admin/update`);
@@ -382,7 +385,7 @@ latestRow("99.0.10");
 cf.versions.length = 0; cf.deployments.length = 0;
 await owner.goto(`${BASE}/_admin/update`);
 check("the Update page says when the newest release will install itself, and offers it now",
-  /99\.0\.10 is available.*install itself after .*install it now/.test(await text()) && Boolean(await owner.$("button[data-install-now]")), await text());
+  /99\.0\.10 is ready\. It'll install itself after .*install it now/.test(await text()) && Boolean(await owner.$("button[data-install-now]")), await text());
 check("…and there's no other way to update while automatic updates are on (no Connect, no unsigned install)",
   !(await owner.$("#go")) && !(await owner.$("#connect")) && !(await owner.$("#auto-now")));
 await owner.click("button[data-install-now]");
@@ -438,7 +441,8 @@ await owner.goto(`${BASE}/_admin/update`);
 check("…and the Update page says when they turned themselves off", (await text("#auto")).includes("They turned themselves off on"));
 await turnOn("good.code-3");
 check("turning it on again works", state().on === true);
-check("…and the page still says Cloudflare stopped allowing it once", /On since .*Cloudflare stopped allowing their access on/.test(await text("#auto")), await text("#auto"));
+await owner.goto(`${BASE}/_admin/update`);
+check("…and the page doesn't still say what went wrong before", !/no longer allows|turned themselves off/.test(await text("#auto")), await text("#auto"));
 const refreshesBeforeHand = token.refreshes.length;
 const handStep = await owner.evaluate(async () => {
   // (The site's own steps only work at a workers.dev address; a group's pick their token first, so they show it here.)
@@ -461,7 +465,8 @@ const schedulesBefore = cf.schedules.length;
 await owner.goto(`${BASE}/_admin/update`);
 await Promise.all([owner.waitForNavigation(), owner.click("form[action='/_admin/update/auto-off'] button")]);
 check("turning it off clears the schedule", cf.schedules.length === schedulesBefore + 1 && Array.isArray(cf.schedules.at(-1).body) && cf.schedules.at(-1).body.length === 0);
-check("…and says how to remove it in Cloudflare too", (await text("#auto")).includes("Keep afterwrd up to date by itself") && !state().on);
+check("…and says how to remove it in Cloudflare too, once it's off", (await text("#auto")).includes("Keep afterwrd up to date by itself") && !state().on
+  && (await text("#auto-turned-off")).includes("Connected Applications"));
 const refreshesBefore = token.refreshes.length;
 s = await dailyRun();
 check("once off, the run does nothing at all", token.refreshes.length === refreshesBefore && cf.versions.length === 0);

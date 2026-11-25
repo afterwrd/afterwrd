@@ -170,6 +170,44 @@ await owner.setViewport({ width: 1100, height: 900 });
 await owner.goto(`${BASE}/_admin/photos/add`);
 await owner.screenshot({ path: `${OUT}/add-photos.png` });
 
+// The header's tabs work as an app's (ui/tabs.js): the history is only ever Home, a tab, and what was opened from it.
+const pathNow = () => new URL(owner.url()).pathname;
+async function arrive(path) {
+  for (let i = 0; i < 100; i++) {
+    try {
+      if (pathNow() === path && await owner.evaluate(() => document.readyState === "complete" && !document.documentElement.hasAttribute("data-onward"))) return true;
+    } catch {} // between pages
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+const tab = async (href) => { await owner.click(`header.site nav.main a[href="${href}"]`); return arrive(href); };
+/** The page's history, from the last Home back there: paths, with the one you're on marked. */
+const historyNow = () => owner.evaluate(() => {
+  const all = navigation.entries().map((e) => new URL(e.url).pathname);
+  const at = navigation.currentEntry.index;
+  const home = all.lastIndexOf("/", at);
+  return all.slice(home, at + 1).join(" → ");
+});
+const back = async (path) => { await owner.evaluate(() => history.back()); return arrive(path); };
+await owner.goto(`${BASE}/`);
+await tab("/groups"); await tab("/activity"); await tab("/photos");
+check("tab to tab to tab: the history is just Home → the last tab", await historyNow() === "/ → /photos", await historyNow());
+check("…so back is Home", await back("/"));
+await tab("/photos");
+await Promise.all([owner.waitForNavigation(), owner.click('main a[href="/_admin/photos/add"]')]);
+check("a page opened from a tab adds a step", await historyNow() === "/ → /photos → /_admin/photos/add", await historyNow());
+check("…another tab from there takes the tab's place (passing through without drawing it)", await tab("/activity")
+  && await historyNow() === "/ → /activity", await historyNow());
+check("…and back is Home", await back("/") && !(await owner.cookies()).some((c) => c.name === "afterwrd_onward"));
+await tab("/photos");
+await Promise.all([owner.waitForNavigation(), owner.click('main a[href="/_admin/photos/add"]')]);
+check("the tab you're in goes back to it, as it was", await tab("/photos") && await historyNow() === "/ → /photos", await historyNow());
+await Promise.all([owner.waitForNavigation(), owner.click('main a[href="/_admin/photos/add"]')]);
+await owner.click("header.site a.brand");
+check("the logo goes back to Home, not on to a new one", await arrive("/") && await historyNow() === "/"
+  && await owner.evaluate(() => navigation.currentEntry.index < navigation.entries().length - 1), await historyNow());
+
 check("no script errors", errors.length === 0, errors.join(" | "));
 await browser.close();
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);
