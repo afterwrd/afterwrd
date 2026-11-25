@@ -280,6 +280,13 @@ annFeed = [await threadOn(ann, bobsPostPage)];
 check("Ann sees Bob's reply, not deletable by her", annFeed[0].comments.map((c) => c.text).join("|") === "Looks great, Bob! Where was it?|Thanks Ann"
   && !annFeed[0].comments[1].canDelete, JSON.stringify(annFeed[0].comments));
 check("once Bob has replied, Ann can't change her comment", !(await ann.$(`${annComment} div.edit`)));
+// Her Home's copy of the post keeps how many comments Bob's site says it has, not just whether it has any.
+copiesOld(stateA);
+const countOnHome = async () => {
+  await ann.goto(`${A}/`);
+  return ann.$eval(`article.from-friend[id$="-${bobPostId}"] details.comments summary`, (x) => [x.querySelector(".n")?.textContent, x.getAttribute("aria-label")].join("|")).catch(() => "");
+};
+check("…and on her Home, Bob's post's button shows 2 comments", await waitFor(async () => (await countOnHome()) === "2|2 comments", 20_000), await countOnHome());
 await ann.goto(`${A}/activity`);
 check("…on her Notifications: Bob replied on his post", (await ann.$eval("main", (m) => m.innerText)).includes("Bob Example replied on their post")
   && Boolean(await ann.$(`main a[href="/friend/${bobPostOnA().connection_id}/posts/${bobPostId}"]`)));

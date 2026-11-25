@@ -1,7 +1,7 @@
 // What this site tells friends' sites about the owner's signed posts (afterwrd 2, step 4b: docs/signed-conversations.md),
 // only in signed calls from friends' sites (calls.js friendCalling):
 //   GET  /_p/items?since=<t>   the owner's posts changed since `t` (this site's clock), oldest change first, up to 50:
-//                              each with its first record as signed, its words now, whether it has comments, its photos
+//                              each with its first record as signed, its words now, how many comments it has, its photos
 //                              (with links to their files for this friend, as before), where its list is up to, and the
 //                              delegations behind its records; the posts deleted since; and how long the owner's identity
 //                              is, so a friend's site can tell when to read it again. "Nothing new" reads a row or three.

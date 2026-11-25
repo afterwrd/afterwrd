@@ -2103,7 +2103,7 @@ In both, each item is the object below (`itemForFriend`). A group's site sends t
 | `content` | The item as the host has worked it out now: the latest words, `photos` (each with `src` and `thumbSrc` added for this friend), `poll`, `mentions`, and `event`. An event may include `cancelled_at`, `called_off_by` and `skipped`, which the host adds. | Not trusted. The reader works out the words, the photo list and the event itself from `sent` and `records` (`signedNow`). It takes from here only the `src` and `thumbSrc` of each photo whose `item`, `hash` and `thumb_hash` match the signed ones, and only if each is exactly `<host's address>/files/<that hash>?exp=<1–12 digits>&sig=<43 characters>`. |
 | `earlier` | `[{text, replaced_at}]`: the words before each edit. | Recomputed from the signed edits. |
 | `edited_at` | The taken time of the last edit, or null. | Recomputed. |
-| `comments` | How many comments are showing. | Kept only as "has comments". |
+| `comments` | How many comments are showing. | The host's word, kept as a whole number up to 9,999 and shown as the count. Opening the comments reads and checks the thread itself. |
 | `changed_at` | When the item last changed, by the host's clock. | Kept; the reader pages by the answer's `until`. |
 | `list` | `{n, head}`: where the item's list is up to. | Kept. The list is checked when it is opened (section 6). |
 | `tally` | Polls: `{votes, ended_at}`. Events: `{answers, invited, dates?}`. An event's may have `moved_at`. | The host's word, kept only in that shape (`cleanTally`: at most 2,000 people, masks below 1,024, 60 dates). A poll is counted again when it is opened (7.4). A one-off event's answers are not counted again; a repeating group event's answers for the date opened are. |

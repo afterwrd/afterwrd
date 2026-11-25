@@ -244,7 +244,7 @@ export async function keepCopy(env, { connection = null, group = null, host, aut
     list_n = excluded.list_n, list_head = excluded.list_head
     WHERE copies.connection_id IS excluded.connection_id AND copies.group_id IS excluded.group_id`)
     .bind(item.id, connection, group, got.record.author, JSON.stringify(item.sent), JSON.stringify(content), JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []),
-      Number.isSafeInteger(item.edited_at) ? item.edited_at : null, item.comments > 0 ? 1 : 0, written, Number(item.changed_at) || now(),
+      Number.isSafeInteger(item.edited_at) ? item.edited_at : null, commentCount(item.comments), written, Number(item.changed_at) || now(),
       tally ? JSON.stringify(tally) : null, list?.n ?? null, list?.head ?? null);
   return { statement, record: got.record, content };
 }
@@ -293,6 +293,12 @@ const MAX_TALLY = 2000; // people in one poll's or event's totals
  * A host's totals for a poll ({votes: {person: choices}, ended_at}) or an event ({answers: {person: {answer, version}},
  * invited}), kept only in that shape. They're the host's word until the thread is opened and counted again.
  */
+/**
+ * How many comments a post's site says are showing: its word, only a hint (opening them reads and checks the thread),
+ * so kept as a whole number, capped.
+ */
+export const commentCount = (n) => (Number.isSafeInteger(n) && n > 0 ? Math.min(n, 9999) : 0);
+
 export function cleanTally(t) {
   if (!t || typeof t !== "object") return null;
   const entries = (o) => (o && typeof o === "object" ? Object.entries(o).slice(0, MAX_TALLY).filter(([p]) => ID_RE.test(p)) : []);
@@ -520,7 +526,7 @@ export async function relayRecord(request, env, url, connectionId, id) {
       await env.DB.prepare("UPDATE copies SET tally = ? WHERE id = ? AND connection_id = ?").bind(JSON.stringify(tally), id, connection.id).run();
     }
   }
-  // Its copy here no longer knows whether it has comments: ask again soon.
+  // Its copy here no longer knows how many comments it has: ask again soon.
   await env.DB.prepare("UPDATE connections SET items_checked_at = 0 WHERE id = ?").bind(connection.id).run();
   back.hash = `fi${connection.id}-${id}`;
   return Response.redirect(back.href, 303);

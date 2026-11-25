@@ -17,7 +17,7 @@ import { blockedAmong, isBlocked } from "./blocks.js";
 import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
-import { cleanTally, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
+import { cleanTally, commentCount, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
 import { identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { frozenUntil, ID_RE, keepKnown, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
@@ -279,7 +279,7 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
     if (!kept) continue;
     rows.push({ id: item.id, group_id: group.id, author: kept.record.author, record: JSON.stringify(item.sent), content: JSON.stringify(kept.content),
       earlier: JSON.stringify(Array.isArray(item.earlier) ? item.earlier.slice(0, 20) : []), edited_at: Number.isSafeInteger(item.edited_at) ? item.edited_at : null,
-      comments: item.comments > 0 ? 1 : 0, created_at: writtenAt(kept.record, Number(item.taken)), tally: cleanTally(item.tally) ? JSON.stringify(cleanTally(item.tally)) : null,
+      comments: commentCount(item.comments), created_at: writtenAt(kept.record, Number(item.taken)), tally: cleanTally(item.tally) ? JSON.stringify(cleanTally(item.tally)) : null,
       list_n: Number.isSafeInteger(item.list?.n) ? item.list.n : null, list_head: typeof item.list?.head === "string" ? item.list.head : null,
       checked_n: null, checked_head: null });
   }
