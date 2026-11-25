@@ -389,7 +389,7 @@ await ann.click("details.me > summary");
 await Promise.all([ann.waitForNavigation(), ann.click('details.me .menu a[href="/help"]')]);
 const helpWords = await text(ann);
 await ann.screenshot({ path: `${OUT}/help.png`, fullPage: true });
-check("Getting help is behind Ann's picture, with where to turn", helpWords.includes("Getting help") && helpWords.includes("101")
+check("Getting help is behind Ann's picture, with where to turn", helpWords.includes("Getting help") && helpWords.includes("tell the police too")
   && helpWords.includes("116 123") && helpWords.includes("0345 6000 459") && helpWords.includes("0300 323 0169"));
 check("…and says who looks after what on afterwrd", helpWords.includes("afterwrd has no company behind it"));
 

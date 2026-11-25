@@ -1,8 +1,7 @@
 // Getting help (docs/safety-plan.md 3.5): where to turn when something's wrong that afterwrd can't put right. The same
 // words on every site (/help: views/home.js helpPage) and on afterwrd.app (/help/: central/site.js), from here.
 // Each organisation's name, link, numbers and hours were checked against its own website on CHECKED. Check them again
-// there before changing any, and move CHECKED on. (Not checked from here, as police.uk refused automated reading: 101
-// and police.uk; checked by hand before release.)
+// there before changing any, and move CHECKED on. (No police numbers or links: people know how to reach the police.)
 import { html } from "./html.js";
 
 export const CHECKED = "25 November 2026";
@@ -24,8 +23,8 @@ your local police and services.</p>
     <li>The <a href="https://www.iwf.org.uk/en/uk-report/">Internet Watch Foundation</a> takes reports of pictures or videos
       of children being sexually abused, found online. You can report anonymously. Don't save or pass on what you've
       found, even to show someone.</li>
-    <li>If it's somewhere private, such as an afterwrd site or group, tell the police too, on ${tel("101")}: the
-      Internet Watch Foundation can't see private places.</li>
+    <li>If it's somewhere private, such as an afterwrd site or group, tell the police too: the Internet Watch Foundation
+      can't see private places.</li>
   </ul>
 </section>
 
@@ -47,8 +46,7 @@ your local police and services.</p>
   <ul>
     <li>The <a href="https://www.nationalbullyinghelpline.co.uk/contact.html">National Bullying Helpline</a> gives free,
       confidential advice on bullying of every kind, including online and at work: ${tel("0300 323 0169")}.</li>
-    <li>Threats, and harassment that won't stop, can be crimes: tell the police on ${tel("101")}, or at
-      <a href="https://www.police.uk/">police.uk</a>.</li>
+    <li>Threats, and harassment that won't stop, can be crimes, and you can report them to the police.</li>
     <li>Keep a record first: a screenshot of what was said, and when, before you remove it, block someone or leave.</li>
   </ul>
 </section>
