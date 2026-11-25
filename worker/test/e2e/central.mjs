@@ -327,6 +327,11 @@ const nonce = /script-src 'nonce-([\w-]+)'/.exec(connectPage.headers.get("conten
 check("the Connect page's one script carries the answer's nonce, with the sign-in apps filled in", connectPage.status === 200 && Boolean(nonce)
   && connectText.includes(`<script nonce="${nonce}">`) && !connectText.includes("__OAUTH"), connectPage.headers.get("content-security-policy"));
 check("a folder without its last slash goes to the one with it", (await sitePath("/how-it-works")).headers.get("location")?.endsWith("/how-it-works/"));
+const help = await sitePath("/help/");
+const helpText = await help.text();
+check("afterwrd.app has Getting help, with the same words as every site's, filled in", help.status === 200 && helpText.includes("116 123")
+  && helpText.includes("Revenge Porn Helpline") && helpText.includes("9.9.9") && !/__[A-Z_]+__/.test(helpText), `${help.status}`);
+check("…linked from the install page", homeText.includes('href="/help/"'));
 check("anything else isn't there", (await sitePath("/wp-login.php")).status === 404);
 signing.releases = [];
 const fallback = await sitePath("/");

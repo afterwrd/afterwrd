@@ -10,6 +10,7 @@ import { html, raw } from "./html.js";
 import { askedBecause, friendFace, introductionCard } from "./friends.js";
 import { gone, waitingFor } from "../friendcopies.js";
 import { MEMORIES, page } from "./layout.js";
+import { helpBody } from "./help.js";
 import { blockButton, composer, postCard } from "./parts.js";
 
 // --- Home and Memories ----------------------------------------------------------------------------------------------
@@ -233,6 +234,14 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
 }
 
 /** Memories: the sections of the Facebook download that were published, and what happened on this day. */
+/** Getting help (views/help.js, docs/safety-plan.md 3.5): behind the owner's picture, Getting help. */
+export function helpPage(ctx) {
+  return page(ctx, "Getting help", html`<div class="help">
+<h1>Getting help</h1>
+${helpBody()}
+</div>`);
+}
+
 export function memoriesPage(ctx, { onThisDay }) {
   const available = MEMORIES.filter(([s]) => ctx.chosen.includes(s));
   return page(ctx, "Memories", html`

@@ -6,7 +6,7 @@
 //
 //   /               the install page
 //   /connect/       the Connect page: where Cloudflare's sign-in sends people back to (src/cloudflare.js RELAY)
-//   /how-it-works/  /compared/  /check/
+//   /how-it-works/  /compared/  /check/  /help/
 // www.afterwrd.app sends people to afterwrd.app.
 import pkg from "../package.json";
 import INSTALL from "../installer/page.html";
@@ -14,10 +14,14 @@ import CONNECT from "../installer/connect.html";
 import HOW from "../installer/how-it-works.html";
 import COMPARED from "../installer/compared.html";
 import CHECK from "../installer/check.html";
+import HELP from "../installer/help.html";
+import { helpBody } from "../src/views/help.js";
 
 export const SITE_HOST = pkg.afterwrd.site;
 const REPO_PAGE = `https://github.com/${pkg.afterwrd.releases}`;
-const PAGES = { "/": INSTALL, "/connect/": CONNECT, "/how-it-works/": HOW, "/compared/": COMPARED, "/check/": CHECK };
+// /help/: the same words as every site's Getting help (src/views/help.js), put in when it's served.
+const PAGES = { "/": INSTALL, "/connect/": CONNECT, "/how-it-works/": HOW, "/compared/": COMPARED, "/check/": CHECK,
+  "/help/": HELP.replace("__HELP__", () => String(helpBody())) };
 
 // Nothing is fetched but the page itself: no scripts at all but the Connect page's own, by its nonce.
 const POLICY = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";

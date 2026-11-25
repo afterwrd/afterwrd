@@ -6,7 +6,9 @@
 // muting Bob folds his posts there to a line, and his post's own page still shows it.
 //   node safety.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
+import { fileURLToPath } from "node:url";
 import { count as n, letInto, settled, siteSql as sql, setUpSigning, signedGroupPost, startSignedGroup } from "./helpers.mjs";
+const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
 const [, fixtures, stateA, stateB, stateC, stateG] = process.argv.slice(2);
@@ -202,6 +204,17 @@ await ann.click('article.in-group header details.more > summary');
 await Promise.all([ann.waitForNavigation(), ann.click('article.in-group header form[action$="/unmute"] button')]);
 await ann.goto(`${A}/groups/${annGroup}`);
 check("Unmuted, it's back in the group", n(stateA, "mutes") === 0 && (await text(ann)).includes("Anyone for Saturday?"));
+
+// --- Getting help (step 3) ----------------------------------------------------------------------------------------------
+
+await ann.goto(`${A}/`);
+await ann.click("details.me > summary");
+await Promise.all([ann.waitForNavigation(), ann.click('details.me .menu a[href="/help"]')]);
+const helpWords = await text(ann);
+await ann.screenshot({ path: `${OUT}/help.png`, fullPage: true });
+check("Getting help is behind Ann's picture, with where to turn", helpWords.includes("Getting help") && helpWords.includes("101")
+  && helpWords.includes("116 123") && helpWords.includes("0345 6000 459") && helpWords.includes("0300 323 0169"));
+check("…and says who looks after what on afterwrd", helpWords.includes("afterwrd has no company behind it"));
 
 check("no errors in the pages", errors.length === 0, errors.join(" | "));
 await browser.close();

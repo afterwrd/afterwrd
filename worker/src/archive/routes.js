@@ -84,6 +84,8 @@ const ROUTES = [
   [/^\/$/, null, home, views.homePage],
   [/^\/overview$/, "overview", overview, views.overviewPage],
   [/^\/memories$/, null, memories, views.memoriesPage],
+  // Where to turn when something's wrong that afterwrd can't put right (views/help.js).
+  [/^\/help$/, null, async () => ({}), views.helpPage],
   [/^\/timeline$/, "timeline", timeline, views.timelinePage],
   [/^\/posts$/, "posts", posts, views.postsPage],
   // (Always shown: Posts is always published, for posts written here. So it can start alongside the header.)

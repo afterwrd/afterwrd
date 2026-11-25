@@ -931,3 +931,9 @@ details.more .menu a:hover, details.more .menu button:hover { background: var(--
 /* How a group's member is known to the owner (names.js): "your friend", a new name, or a look-alike. */
 .member .what .from { display: block; font-size: 0.72rem; color: var(--muted); }
 .member .what .from.warn { color: var(--danger); font-weight: 700; }
+
+/* Getting help (views/help.js) */
+.help .lede { color: var(--muted); font-size: 1.05rem; }
+.help section { margin-top: 1.6rem; }
+.help ul { padding-left: 1.2rem; }
+.help li { margin: 0.5rem 0; }
