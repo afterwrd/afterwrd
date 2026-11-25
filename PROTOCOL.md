@@ -1286,7 +1286,9 @@ A writer's site sends its owner's record to the host in a signed call (section 8
 5. Checks content rules for the kind: comment and edit lengths, mentions, poll and event rules (`kindPlan`: version,
    guest, closing time, called off, over).
 6. Runs `checkRecord` (5.3) at the host's time now; refuses with "That didn't check." if it fails, or if `host` isn't
-   this site ("That belongs somewhere else.").
+   this site ("That belongs somewhere else."). A `comment` on an item whose comments are turned off is refused
+   ("Comments are turned off on this post.") unless its author wrote the item. Turning comments off is the host's own
+   choice, as refusing any record is: nothing is signed for it, and readers don't check it (6.9 says how they hear).
 7. Takes the record in turn with others for the same list: applies the list's rules (`Rules.refuse`, 6.10 lists them)
    to the list as it stands, then appends the entry and signs a receipt (6.5).
 
@@ -1519,7 +1521,10 @@ The answer to an item's list:
 }
 ```
 
-`signedHead` is signed fresh at each read for the list's end now. A group's site adds `roles`: for each admin who
+`signedHead` is signed fresh at each read for the list's end now. `commentsOff: true` is there when the host has turned
+comments off on the item (5.7): a reader shows that rather than a comment box, except to the item's writer. It's the
+host's word about what it will take, not part of the list, so it's never checked; a reader that doesn't know it shows
+the box, and the host's refusal says why. A group's site adds `roles`: for each admin who
 signed a `remove` or `calloff` in the list, `{join, role}`, their `join` and the owner's `role` record making them
 admin, each as a `sent` object. The members list's answer has `group` (the group's person id) in place of `v`, and no
 `roles`.

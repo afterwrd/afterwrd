@@ -182,7 +182,10 @@ export async function handleGroupItems(request, env, url) {
       .map((r) => r.author))];
     const roles = acting.length ? await roleProofs(env, self, acting) : {};
     const roleKeys = Object.values(roles).flatMap((p) => [p.join, p.role]).map((s) => keyOf(s));
+    // Comments turned off (hosted.js; docs/safety-plan.md: admins' switch for it comes later): said, as a friend's site does.
+    const off = !one[2] && (await db.prepare("SELECT 1 FROM items WHERE id = ? AND comments_off_at IS NOT NULL").bind(one[1]).first());
     return json({ v: 2, owner: list.owner, entries: list.entries, signedHead: list.signedHead, checkpoint: list.checkpoint ?? null, roles,
+      ...(off && { commentsOff: true }),
       delegations: await delegationsFor(db, [...records.map((r) => r.key), ...roleKeys]),
       people: await peopleFor(db, [...new Set([...records.map((r) => r.author), self.owner])]) });
   }

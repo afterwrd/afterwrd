@@ -171,7 +171,10 @@ export async function handleFriendItems(request, env, url, work) {
     if (!list) return json({ error: "Not found." }, 404);
     if (list.deleted) return json({ error: "Deleted.", deleted: true }, 410);
     const records = list.entries.filter((e) => e.sent).map((e) => parseRecord(fromB64url(e.sent.record))).filter(Boolean);
+    // Comments turned off by the owner (items.js, hosted.js): said, so a friend's site shows it rather than a comment box.
+    const off = await db.prepare("SELECT 1 FROM items WHERE id = ? AND comments_off_at IS NOT NULL").bind(one[1]).first();
     return json({ v: 2, owner: list.owner, entries: list.entries, signedHead: list.signedHead, checkpoint: list.checkpoint ?? null,
+      ...(off && { commentsOff: true }),
       delegations: await delegationsFor(db, records.map((r) => r.key)), people: await peopleFor(db, [...new Set(records.map((r) => r.author))]) });
   }
   if (request.method === "POST" && url.pathname === "/_p/records/check") {

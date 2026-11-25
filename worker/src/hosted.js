@@ -73,6 +73,7 @@ export async function overDailyRecords(db, author, kind, members = "") {
 }
 export const DAILY_RECORDS_SAID = "That's a lot for one day here. Try again tomorrow.";
 const OPEN_WHILE_FROZEN = new Set(["delete", "remove", "close"]);
+export const COMMENTS_OFF_SAID = "Comments are turned off on this post.";
 /**
  * Why something on an item brought over from afterwrd 1 is refused for now: what was said on it before is still coming
  * (`until`: when it's in at the latest), or due in now (`at` past it: before.js puts it in at the next chance).
@@ -97,9 +98,14 @@ export async function takeRecord(db, { sent, host, lookups, taken = Math.floor(D
   // An item brought over from afterwrd 1 takes nothing new until the comments made on it before are in (step 10), so
   // they go in first, in the order they were written, and each writer's chain (prev) runs on from there. Deleting,
   // removing and closing still go through.
+  // Comments turned off on it (docs/safety-plan.md 3.1): none from anyone but its writer, who may still have the last
+  // word. Edits and deletes of what's there, and votes and answers, carry on.
   if (!bringing && got.record.kind !== "item" && !OPEN_WHILE_FROZEN.has(got.record.kind)) {
-    const frozen = await db.prepare("SELECT before_until FROM items WHERE id = ? AND before_until IS NOT NULL").bind(got.record.item).first();
-    if (frozen) return { refused: frozenSaid(Number(frozen.before_until), taken) };
+    const row = await db.prepare("SELECT author, before_until, comments_off_at FROM items WHERE id = ?").bind(got.record.item).first();
+    if (row?.before_until !== null && row?.before_until !== undefined) return { refused: frozenSaid(Number(row.before_until), taken) };
+    if (got.record.kind === "comment" && row?.comments_off_at !== null && row?.comments_off_at !== undefined && got.record.author !== String(row.author)) {
+      return { refused: COMMENTS_OFF_SAID };
+    }
   }
   const list = listOf(got.record, got.fp);
   return inTurn(list, () => take(db, got, { sent, host, taken, list, group, dateOwner: got.record.date ? owner : null }));

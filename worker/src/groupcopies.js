@@ -393,7 +393,8 @@ export async function groupThread(env, from, group, id, people = []) {
   const mine = [...result.entries].reverse().find((e) => e.record?.author === me?.person)?.fp ?? null;
   return { entries: result.entries.map((e) => ({ ...e, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
     ...(e.by && shown.tags.get(e.by)) })),
-  problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names: new Map([...names, ...shown.names]), tags: shown.tags };
+  problem: result.problem, changed, seen: last ? { n: last.n, h: last.head } : null, mine, host, owner, admins, names: new Map([...names, ...shown.names]), tags: shown.tags,
+    commentsOff: data?.commentsOff === true };
 }
 
 /** The owner's signed record, with the delegation behind it and their signed name, ready to pass on to `group`. */
@@ -467,7 +468,7 @@ export async function relayToGroup(request, env, url, group, id) {
     // Kept if it may have been taken, or is a delete to send again (sentchecks.js).
     await keepSent(env, record, sent, null, error);
     if (error.status === 409 && error.message === "duplicate") answer = {};
-    else return refused(`Couldn't send it: ${error.message}.${willRetry(record)}`);
+    else return refused(`Couldn't send it: ${String(error.message).replace(/\.$/, "")}.${willRetry(record)}`);
   }
   const fp = await keepSent(env, record, sent, answer.receipt ?? null);
   // Those it mentions are sent the group's receipt too, from here (receipts.js).

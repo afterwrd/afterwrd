@@ -474,7 +474,7 @@ export async function friendThread(env, from, connection, id) {
   const shown = await peopleShown(db, result.entries.map((e) => e.by), { signed: names, friendHost: { person, name: String(connection.name) }, me: me?.person ?? null });
   return { entries: result.entries.map((e) => ({ ...e, name: e.by ? shown.names.get(e.by) ?? names.get(e.by) ?? "Someone" : null,
     ...(e.by && shown.tags.get(e.by)) })), problem: result.problem, changed,
-    seen: last ? { n: last.n, h: last.head } : null, mine, host: person };
+    seen: last ? { n: last.n, h: last.head } : null, mine, host: person, commentsOff: data.commentsOff === true };
 }
 
 /** POST /_admin/friend/<connection>/items/<id>/records: the owner's signed record, passed on to their friend's site. */
@@ -503,7 +503,7 @@ export async function relayRecord(request, env, url, connectionId, id) {
     // Kept if it may have been taken, or is a delete to send again (sentchecks.js).
     await keepSent(env, { record, sent, list: id, error });
     if (error.status === 409 && error.message === "duplicate") answer = {};
-    else return refused(`Couldn't send it: ${error.message}.${willRetry(record)}`);
+    else return refused(`Couldn't send it: ${String(error.message).replace(/\.$/, "")}.${willRetry(record)}`);
   }
   const fp = await keepSent(env, { record, sent, list: id, receipt: answer.receipt ?? null });
   // Those it mentions are sent the host's receipt too, from here (receipts.js).

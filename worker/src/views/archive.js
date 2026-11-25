@@ -4,7 +4,7 @@
 // the page's frame (routes.js frame(): who's signed in, the request URL, their picture, the published sections and the
 // menu's counts), and the data its loader gathered. Views only draw: they read nothing and change nothing.
 import { nonce } from "../nonce.js";
-import { fromPost, itemCard, photoComments, photoDelete, postWords } from "./items.js";
+import { fromPost, itemCard, OWN, photoComments, photoDelete, postWords } from "./items.js";
 import {
   dateRange, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
 
@@ -292,7 +292,8 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
       ${photoItem && photoDelete(photoItem, itemPost)}
     </div>
     ${key && html`<h2>Comments</h2>${thread(ctx, key, comments, { region: true })}`}
-    ${photoItem && photoComments(ctx, { post: itemPost, photo: photoItem.photo, thread: photoItem.thread, list: photoItem.list, postThread: photoItem.postThread })}
+    ${photoItem && photoComments(ctx, { post: itemPost, photo: photoItem.photo, thread: photoItem.thread, list: photoItem.list, postThread: photoItem.postThread,
+      opts: { moderate: OWN } })}
     ${post && html`<h2>Posted with</h2>${postCard(ctx, post)}`}
     ${itemPost && !photoItem?.postThread && fromPost(`/posts/${itemPost.id}`, "your", itemPost.text)}
     ${comment && html`<h2>Attached to your comment</h2>${commentCard(ctx, comment)}`}

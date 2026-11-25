@@ -121,7 +121,7 @@ check("a new post offers Edit", Boolean(await owner.$(`${firstCard} > div.edit`)
 check("…behind the small V, with Delete", !(await shown(`${firstCard} > div.edit`)) && !(await shown(`${firstCard} > header .delete`))
   && Boolean(await owner.$(`${firstCard} > header details.more .delete`)));
 await owner.click(`${firstCard} > header details.more summary`);
-check("the V opens a menu: Edit, Delete", (await owner.$eval(`${firstCard} > header details.more .menu`, (m) => m.innerText.replace(/\s+/g, " ").trim())) === "Edit Delete");
+check("the V opens a menu: Edit, Turn comments off, Delete", (await owner.$eval(`${firstCard} > header details.more .menu`, (m) => m.innerText.replace(/\s+/g, " ").trim())) === "Edit Turn comments off Delete");
 await owner.click(`${firstCard} > header details.more a[href^="#edit"]`);
 check("Edit shows the words, ready to change, and closes the menu", await owner.waitForFunction((card) => {
   const box = document.querySelector(`${card} > div.edit`);

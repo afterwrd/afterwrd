@@ -135,6 +135,7 @@ run_groups() {
 }
 run_polls() { three_sites polls.mjs group; }
 run_mentions() { three_sites mentions.mjs group; }
+run_safety() { three_sites safety.mjs; } # docs/safety-plan.md: removing comments, comments off
 # Daily limits (src/allowances.js, docs/signed-conversations.md step 8), small enough to reach (TEST_LIMITS, local sites
 # only: limits.js): Bob's site, 40 calls a caller and a day of 90 seconds; Cat's, 3 records a writer and 2 notices from
 # one writer (1 to the phone); the group's, 3 records a member.
@@ -243,10 +244,10 @@ run_upgrade() { # $1: an older release tag
   git -C "$WORKER" worktree remove --force "$OUT/old"
 }
 
-if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions limits events hosts selfhosted checks recover central forged; fi
+if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions safety limits events hosts selfhosted checks recover central forged; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|limits|events|hosts|selfhosted) "run_$1" ;;
+    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|safety|limits|events|hosts|selfhosted) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
     crossover) shift; run_crossover "${1:?give an older release tag, e.g. v0.58.2}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;

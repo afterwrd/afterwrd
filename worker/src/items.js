@@ -174,6 +174,22 @@ export async function handleItems(request, env, url, owner) {
       throw error;
     }
   }
+  // Comments off, and on again (docs/safety-plan.md 3.1): on a post and its photos. It's this site's own choice as their
+  // host (hosted.js refuses comments meanwhile), so nothing's signed. Turned off again, it keeps when it first was.
+  const comments = /^\/_admin\/items\/([A-Za-z0-9_-]{43})\/comments$/.exec(url.pathname);
+  if (comments) {
+    const form = await request.formData().catch(() => new FormData());
+    const back = new URL(safeNext(String(form.get("back") ?? "/"), url), url.origin);
+    const id = comments[1];
+    if (!(await env.DB.prepare("SELECT 1 FROM items WHERE id = ? AND type = 'post'").bind(id).first())) {
+      return html(messagePage("That post isn't here any more.", { href: back.pathname + back.search, label: "Go back" }), 404);
+    }
+    const off = form.get("off") === "1";
+    await env.DB.prepare(`UPDATE items SET comments_off_at = ${off ? "COALESCE(comments_off_at, ?2)" : "NULL"}
+      WHERE id = ?1 OR id IN (SELECT photo FROM item_photos WHERE post = ?1)`).bind(id, ...(off ? [now()] : [])).run();
+    back.hash = `i-${id}`;
+    return Response.redirect(back.href, 303);
+  }
   const on = /^\/_admin\/items\/([A-Za-z0-9_-]{43})\/(records|remove-photo)$/.exec(url.pathname);
   if (on) {
     const form = await request.formData().catch(() => new FormData());
@@ -708,7 +724,7 @@ async function itemFromRow(db, r) {
     editable: now() - Number(r.created_at) < EDIT_SECONDS && Number(r.others) === 0,
     // For the signed forms on it (views/items.js): where its list is up to, and its writer's newest record on it.
     list: { host: String(r.author), me: String(r.author), seen: { n: Number(r.list_n), h: String(r.list_head) }, mine: String(r.author_last),
-      frozenUntil: frozenUntil(r.before_until) },
+      frozenUntil: frozenUntil(r.before_until), commentsOff: r.comments_off_at !== null && r.comments_off_at !== undefined },
   };
 }
 

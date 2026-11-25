@@ -39,7 +39,7 @@ const signedDelete = (action, confirm, sign, { back, inplace }) => html`<form me
  * A Remove in the V menu, signed: in a signed group (step 6c), what an admin (or the group's owner) takes down. The
  * browser asks this site where the group's members list is up to first (ui/sign.js role_at).
  */
-const signedRemove = (action, confirm, sign, { back, inplace, group }) => html`<form method="post" action="${action}" data-confirm="${confirm}" data-confirm-ok="Remove"${raw(inplace === "remove" ? ' data-inplace="remove"' : " data-inplace")}${signing("remove", sign)} data-sign-group="${group}">
+const signedRemove = (action, confirm, sign, { back, inplace, group }) => html`<form method="post" action="${action}" data-confirm="${confirm}" data-confirm-ok="Remove"${raw(inplace === "remove" ? ' data-inplace="remove"' : " data-inplace")}${signing("remove", sign)}${group && html` data-sign-group="${group}"`}>
     <input type="hidden" name="back" value="${back}"><button class="delete">Remove</button></form>`;
 
 /** An edit box, as parts.js editBox, signed. */
@@ -55,8 +55,9 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
 /**
  * An item's comments (items.js thread), then a box to add one. `list`: {seen, owner, host, mine} (where the list is
  * up to, and this person's newest record on it, for the signed forms). `region`: the comments are what's drawn again
- * when something's sent from them (a photo's page), not the post they're in. `moderate`: in a signed group, {group (its
- * id here), may(person)}: whose comments the owner here may remove, as an admin or the group's owner.
+ * when something's sent from them (a photo's page), not the post they're in. `moderate`: {may(person)}: whose comments the
+ * owner here may remove: on their own posts (OWN), anyone's; in a signed group, with `group` (its id here), as an admin
+ * or the group's owner. `list.commentsOff`: its host has turned comments off, so only the item's writer has a box.
  */
 /** A one-photo post's words, at the top of its photo's page (its page is the post's: photoComments). */
 export const postWords = (post, postThread) => postThread && post?.text && html`<div class="caption">${linkify(post.text, post.mentions)}</div>`;
@@ -110,7 +111,8 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
       <time title="${fmtDatetime(c.taken)}">${fmtAgo(c.taken)}</time>
       ${c.author === list.me && moreMenu([c.editable && menuEdit(`edit-c-${c.fp}`),
         signedDelete(action, "Delete this comment?", { ...sign, about: c.fp }, { back, inplace: "refresh" })])}
-      ${c.author !== list.me && c.author && moreMenu([moderate?.may(c.author) && signedRemove(action, "Remove this comment? Everyone in the group will see it was removed by you.",
+      ${c.author !== list.me && c.author && moreMenu([moderate?.may(c.author) && signedRemove(action, moderate.group ? "Remove this comment? Everyone in the group will see it was removed by you."
+        : "Remove this comment? Everyone who can see the post will see you removed it.",
         { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group }), c.author !== owner?.person && blockButton({ person: c.author, name: name(c), back })])}
     </div>
     ${edited(c)}
@@ -119,13 +121,22 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
       : c.state === "removed" ? (c.removedBy === list.me ? "You removed a comment." : c.removedByName ? `A comment was removed by ${c.removedByName}.` : "A comment was removed.")
         : c.state === "failed" ? "A comment here didn't pass its check, so it isn't shown." : "A comment here was left out."}</p>`))}
   ${!say ? "" : list.frozenUntil ? html`<p class="meta frozen">${frozenSaid(list.frozenUntil)}</p>`
-    : html`<form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
+    : list.commentsOff && item.author !== list.me ? html`<p class="meta comments-off">Comments are turned off.</p>`
+    : html`${list.commentsOff && html`<p class="meta comments-off">You've turned comments off: only you can comment now.</p>`}<form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
     <input type="hidden" name="back" value="${back}">
     <textarea name="text" data-draft="comment:${item.id}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
     <button>Post</button>
   </form>`}
 </section>`;
 }
+
+/** On the owner's own posts and photos, they may remove anyone else's comment (openly: lists.js Rules lets an item's owner). */
+export const OWN = { may: () => true };
+
+/** Comments off, or on again, on one of the owner's posts (items.js; docs/safety-plan.md 3.1): nothing to sign. */
+const commentsSwitch = (id, off, back) => html`<form method="post" action="/_admin/items/${id}/comments" data-inplace>
+    <input type="hidden" name="off" value="${off ? "0" : "1"}"><input type="hidden" name="back" value="${back}">
+    <button>${off ? "Turn comments on" : "Turn comments off"}</button></form>`;
 
 /**
  * One of the owner's own items, as Home and its page show it. `open`: its comments shown (its own page, or Home once
@@ -140,8 +151,8 @@ export function itemCard(ctx, item, { thread = null, list = item.list ?? null, o
     ${ownerFace(ctx)}
     <span class="what"><strong>You</strong></span>
     <a class="when" href="/posts/${item.id}" title="${fmtDatetime(item.created_at)}"><time>${fmtAgo(item.created_at)}</time></a>
-    ${sign && moreMenu([item.editable && !item.event && menuEdit(`edit-i-${item.id}`),
-      signedDelete(action, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back, inplace: "remove" })])}
+    ${sign && moreMenu([item.editable && !item.event && menuEdit(`edit-i-${item.id}`), commentsSwitch(item.id, Boolean(list?.commentsOff), back),
+      signedDelete(action, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back, inplace: "remove" })], "More")}
   </header>
   ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
   ${edited(item)}
@@ -156,7 +167,7 @@ export function itemCard(ctx, item, { thread = null, list = item.list ?? null, o
   ${item.event && open && list && guestsSigned(ctx, item, list)}
   <details class="comments"${open && raw(" open")} data-thread="/posts/${item.id}">
     ${commentsButton(item.comments)}
-    ${thread && list ? itemThread(ctx, item, thread, list) : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
+    ${thread && list ? itemThread(ctx, item, thread, list, { moderate: OWN }) : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
 </article>`;
 }
