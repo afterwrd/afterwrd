@@ -230,8 +230,9 @@ ${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your
 <link rel="stylesheet" href="${asset("/static/style.css")}">
 ${favicon()}
 <style>
-  .button, #go, #groups-go, button.go { display: inline-block; padding: 0.5rem 1rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button);
-    font: inherit; font-weight: 600; text-decoration: none; cursor: pointer; }
+  /* This page's buttons are afterwrd's primary button (style.css .chip.primary). */
+  .button, #go, #groups-go, button.go { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0.35rem 1.05rem; border: 0; border-radius: 999px;
+    background: var(--button); color: var(--on-button); font: 800 0.92rem var(--round); text-decoration: none; cursor: pointer; }
   .button + .meta { display: block; margin-top: 0.4rem; }
   #go:disabled, #groups-go:disabled, button.go:disabled { opacity: 0.6; cursor: default; }
   #error, #group-error, #forget-error, .error { color: var(--danger); }

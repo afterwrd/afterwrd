@@ -144,6 +144,10 @@ async function connect(host, hostSite, guest, guestSite) {
   await Promise.all([host.waitForNavigation(), host.click('.requests button[formaction$="/approve"]')]);
 }
 async function commentOnFirst(page, selector, words) {
+  // Comments are behind each post's "Comments" button, opened in place (ui/threads.js).
+  const summary = await page.$(`${selector} details.comments:not([open]) summary`);
+  if (summary) await summary.click();
+  await page.waitForSelector(`${selector} form.say textarea`, { timeout: 15_000 });
   const form = await page.$(`${selector} form.say`);
   await (await form.$("textarea")).type(words);
   // Sent in place since 0.45.0 (or, the old way, with a new page): whichever happens.
@@ -223,6 +227,50 @@ for (const fields of [
 await ben.goto(`${B}${benGroupHref}/calendar?month=${nextMonth.slice(0, 7)}`);
 await Promise.all([settled(ben, { timeout: 30_000 }), ben.click(".answers button[value=going]")]);
 step("a group, with events");
+
+// AUDIT=1: every page Ann (owner of the group) and Ben (a member) can reach by links from Home, at phone width in the
+// dark theme, whole page, as they are (notices kept), into $OUT/audit. One page for each shape of address (numbers
+// and ids stand for any). The README's pictures are left alone.
+if (process.env.AUDIT) {
+  const dir = `${OUT}/audit`;
+  mkdirSync(dir, { recursive: true });
+  // A page's shape: ids in its path stand for any, and so do its query's values, but for the few that pick a page.
+  const shape = (path) => {
+    const u = new URL(path, "http://x");
+    const keys = [...u.searchParams.keys()].sort().map((k) => (["for", "view"].includes(k) ? `${k}=${u.searchParams.get(k)}` : k));
+    return u.pathname.split("/").map((s) => (/^\d+$|^[\w-]{16,}$/.test(s) ? ":id" : s)).join("/") + (keys.length ? `?${keys.join("&")}` : "");
+  };
+  const skip = /^\/(static|_auth\/logout|_f\/|media\/|_admin\/export\/download|_admin\/download)/;
+  async function crawl(page, site, who) {
+    await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "dark" }]);
+    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2 });
+    const seen = new Set();
+    const queue = ["/", "/_admin/blocks", "/_admin/keys/signing"];
+    let n = 0;
+    while (queue.length && n < 120) {
+      const path = queue.shift();
+      if (seen.has(shape(path))) continue;
+      seen.add(shape(path));
+      const res = await page.goto(`${site}${path}`, { waitUntil: "networkidle2", timeout: 30_000 }).catch(() => null);
+      if (!res || !/text\/html/.test(res.headers()["content-type"] ?? "")) continue;
+      if (new URL(page.url()).origin !== site) continue;
+      const file = `${who}-${String(++n).padStart(3, "0")}${shape(path).replace(/[^\w=]+/g, "_").replace(/_$/, "") || "_home"}.png`;
+      await page.screenshot({ path: `${dir}/${file}`, fullPage: true });
+      step(`${file}  ${path}`);
+      const links = await page.$$eval("a[href]", (as) => as.map((a) => a.getAttribute("href")));
+      for (const href of links) {
+        const u = new URL(href, `${site}${path}`);
+        if (u.origin !== site || skip.test(u.pathname)) continue;
+        const next = u.pathname + u.search;
+        if (!seen.has(shape(u.pathname + u.search))) queue.push(next);
+      }
+    }
+  }
+  await crawl(ann, A, "ann");
+  await crawl(ben, B, "ben");
+  await browser.close();
+  process.exit(0);
+}
 
 // The pictures.
 await shot(ann, `${A}/`, "home-desktop.png", { height: 1250, full: false });

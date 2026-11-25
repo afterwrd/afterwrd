@@ -103,7 +103,8 @@ await owner.goto(`${BASE}/posts`);
 const firstCard = "article.card:first-of-type";
 check("each post written here has its comments behind a button, and only those", (await owner.$$("article.card details.comments")).length === 2
   && (await owner.$$("article.own details.comments")).length === 2
-  && (await owner.$$eval("article.own details.comments summary", (l) => l.map((x) => x.textContent))).every((t) => t === "Comment"));
+  && (await owner.$$eval("article.own details.comments summary", (l) => l.map((x) => x.getAttribute("aria-label")))).every((t) => t === "Comment"));
+check("…a speech bubble, with no count while there are none", (await owner.$$eval("article.own details.comments summary", (l) => l.every((x) => x.querySelector("svg.icon") && !x.querySelector(".n")))));
 await say(owner, firstCard, "Lovely <script>alert(1)</script>\nsecond line https://example.com");
 check("posting stays on the page", new URL(owner.url()).pathname === "/posts" && !new URL(owner.url()).hash, owner.url());
 let shown = await bubbles(owner, firstCard);
@@ -116,7 +117,7 @@ check("owner can delete their own", shown[0].canDelete);
 const postHref = await owner.$eval(`${firstCard} a.when`, (a) => a.getAttribute("href"));
 await owner.goto(BASE + postHref);
 check("post has its own page with the thread", (await bubbles(owner, "article.card")).length === 1, postHref);
-check("…and, with a comment, its button says Comments", (await owner.$eval("article.card details.comments summary", (x) => x.textContent)) === "Comments");
+check("…and, with a comment, its button shows 1 (and says \"1 comment\" to screen readers)", (await owner.$eval("article.card details.comments summary", (x) => [x.querySelector(".n")?.textContent, x.getAttribute("aria-label")].join("|"))) === "1|1 comment");
 
 // A comment on the photo posted here.
 await owner.goto(`${BASE}/posts`);
@@ -124,7 +125,12 @@ await owner.goto(`${BASE}/posts`);
 const photoHref = await owner.$eval(`${firstCard} .collage a.tile`, (a) => new URL(a.href).pathname);
 await owner.goto(BASE + photoHref);
 await say(owner, ".info", "Great photo");
-check("photo comment shows in the info panel", (await bubbles(owner, ".info")).map((c) => c.text).join() === "Great photo");
+// A post with one photo: its photo's page is the post's (as Facebook does). The post's comments, its box comments on
+// the post, and the post isn't shown again underneath.
+check("a comment from a one-photo post's photo shows there, as the newest", (await bubbles(owner, ".info")).at(-1)?.text === "Great photo");
+check("…with no copy of the post underneath", !(await owner.$(".info article.card")) && !(await owner.$(".info .from-post")));
+await owner.goto(BASE + postHref);
+check("…and it's on the post, where everyone reads", (await bubbles(owner, "article.card")).some((c) => c.text === "Great photo"));
 // A photo posted here is an item of its own (afterwrd 2): its comments are its, not its file's, so the imported copy
 // of the same picture has none.
 await owner.goto(`${BASE}/photos/${imported.id}`);
@@ -204,7 +210,7 @@ await owner.goto(`${BASE}/posts`);
 await openThread(firstCard);
 check("post comments survive a re-import", beforeImport > 0 && (await bubbles(owner, firstCard)).length === beforeImport, `${(await bubbles(owner, firstCard)).length} after, page had ${beforeImport}`);
 await owner.goto(BASE + photoHref);
-check("photo comment survives a re-import", (await bubbles(owner, ".info")).length === 1);
+check("photo comment survives a re-import", (await bubbles(owner, ".info")).some((c) => c.text === "Great photo"));
 await owner.goto(`${BASE}/posts`);
 check("…and the posts written here keep their addresses", sql("SELECT COUNT(*) AS n FROM items WHERE type = 'post'")[0].n === 2
   && (await owner.$eval(`${firstCard} a.when`, (a) => a.getAttribute("href"))) === postHref);

@@ -11,7 +11,7 @@ import { audienceOf, makeRecord, pickedMentions } from "../records.js";
 import { b64url } from "../signed.js";
 import { savedKey } from "../browserkey.js";
 
-export const CANT_SIGN = "This browser can't sign for you yet. Sign out and sign in again, or set up signing in Your devices.";
+export const CANT_SIGN = "This browser can't sign for you yet. Choose Let this browser sign, on Home or in Your devices.";
 
 // One date of a repeating event (data-sign-date, step 6d) has a list of its own: its first answer saw nothing there
 // (data-sign-seen-n empty).

@@ -8,7 +8,7 @@ import { MAX_COMMENT } from "../archive/comments.js";
 import { frozenSaid } from "../hosted.js";
 import { MAX_POST_TEXT } from "../edits.js";
 import { fmtAgo, fmtDatetime, linkify } from "./format.js";
-import { initial } from "./nav.js";
+import { icon, initial } from "./nav.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { friendFace } from "./friends.js";
@@ -58,6 +58,38 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
  * when something's sent from them (a photo's page), not the post they're in. `moderate`: in a signed group, {group (its
  * id here), may(person)}: whose comments the owner here may remove, as an admin or the group's owner.
  */
+/** A one-photo post's words, at the top of its photo's page (its page is the post's: photoComments). */
+export const postWords = (post, postThread) => postThread && post?.text && html`<div class="caption">${linkify(post.text, post.mentions)}</div>`;
+
+/** "From Ann's post: 'The first words…'", leading back to it: on a photo's page, when its post has several photos. */
+export function fromPost(href, whose, text) {
+  const words = String(text ?? "").replace(/\s+/g, " ").trim();
+  const short = words.length > 80 ? `${words.slice(0, 78).trimEnd()}…` : words;
+  return html`<p class="from-post"><a href="${href}">From ${whose} post${short && html`: “${short}”`}</a></p>`;
+}
+
+/**
+ * The comments on a photo's page. A post with one photo (`postThread`): the post's comments (its words are at the top,
+ * postWords), which is where everyone reads them; any made on the photo itself before that are shown after, with no box of their
+ * own. Otherwise the photo's own comments.
+ */
+export function photoComments(ctx, { post, photo, thread, list, postThread, action = undefined, postAction = undefined, opts = {} }) {
+  if (postThread) {
+    return html`<h2>Comments</h2>${itemThread(ctx, post, postThread.thread, postThread.list, { region: true, action: postAction, ...opts })}
+    ${thread?.length > 0 && list && html`<h2>On this photo</h2>${itemThread(ctx, photo, thread, list, { action, ...opts, say: false })}`}`;
+  }
+  return html`<h2>Comments</h2>${thread && list && itemThread(ctx, photo, thread, list, { region: true, action, ...opts })}`;
+}
+
+/**
+ * What opens a post's comments: a speech bubble and how many there are (just the bubble when there are none). Screen
+ * readers hear "Comment" or "3 comments".
+ */
+export function commentsButton(count) {
+  const n = Number(count) || 0;
+  return html`<summary class="comments-button" aria-label="${n > 0 ? `${n} comment${n === 1 ? "" : "s"}` : "Comment"}">${raw(icon("comments"))}${n > 0 && html`<span class="n">${n}</span>`}</summary>`;
+}
+
 /**
  * How someone is known to the owner here, beside their name (names.js): "friend of Ann" or "your friend", "not your
  * friend Bob" (a look-alike), and a friend's new name.
@@ -65,7 +97,7 @@ const signedEdit = (id, home, action, text, back, max, sign, { required = true }
 export const whoTags = (p) => html`${p.label && html`<span class="from">${p.label}</span>`}${p.warn && html`<span class="from warn">${p.warn}</span>`}${p.renamed
   && html`<span class="from">now calling themselves ${p.renamed}</span>`}`;
 
-export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null } = {}) {
+export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null, say = true } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
   const sign = { item: item.id, host: list.host, seen: list.seen, prev: list.mine };
   const name = (c) => (c.author === list.me ? ctx.ownerName : c.name ?? "Someone");
@@ -86,7 +118,7 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
   </div>` : html`<p class="comment gone meta" id="c-${c.fp}">${c.state === "deleted" ? "A comment was deleted."
       : c.state === "removed" ? (c.removedBy === list.me ? "You removed a comment." : c.removedByName ? `A comment was removed by ${c.removedByName}.` : "A comment was removed.")
         : c.state === "failed" ? "A comment here didn't pass its check, so it isn't shown." : "A comment here was left out."}</p>`))}
-  ${list.frozenUntil ? html`<p class="meta frozen">${frozenSaid(list.frozenUntil)}</p>`
+  ${!say ? "" : list.frozenUntil ? html`<p class="meta frozen">${frozenSaid(list.frozenUntil)}</p>`
     : html`<form class="say" method="post" action="${action}" data-inplace data-me="${ctx.ownerName}"${signing("comment", sign)}${owner && html` data-owner-person="${owner.person}" data-owner-name="${owner.name}"`}>
     <input type="hidden" name="back" value="${back}">
     <textarea name="text" data-draft="comment:${item.id}" rows="1" maxlength="${MAX_COMMENT}" required placeholder="Write a comment…" aria-label="Write a comment"></textarea>
@@ -123,7 +155,7 @@ export function itemCard(ctx, item, { thread = null, list = item.list ?? null, o
     cancelNote: "Call this event off? Everyone invited who hasn't said no will be told.", note: "Your event. Only the people you invite can see it." })}
   ${item.event && open && list && guestsSigned(ctx, item, list)}
   <details class="comments"${open && raw(" open")} data-thread="/posts/${item.id}">
-    <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
+    ${commentsButton(item.comments)}
     ${thread && list ? itemThread(ctx, item, thread, list) : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
 </article>`;
@@ -185,7 +217,7 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
     note: `${c.name}'s event. Only the people ${c.name} invited can see it.` })}
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${page}">
-    <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
+    ${commentsButton(item.comments)}
     ${thread && list ? itemThread(ctx, item, thread, list, { action: `/_admin/friend/${c.id}/items/${item.id}/records`, owner: { name: c.name, person: item.author } })
       : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
@@ -204,7 +236,7 @@ export function friendItemPage(ctx, { item, thread, list, problem }) {
  * paging through the post's photos, ✕ back to where it was opened from, and the photo's own comments (its own item,
  * read from their site and checked), then the post it's in.
  */
-export function friendItemPhotoPage(ctx, { item, index, back, thread, list, problem }) {
+export function friendItemPhotoPage(ctx, { item, index, back, thread, list, problem, postThread = null, postProblem = null }) {
   const c = item.connection;
   const m = item.photos[index - 1];
   const stay = `?${new URLSearchParams({ in: "post", back })}`;
@@ -222,11 +254,11 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
     <a class="album-link" href="/friend/${c.id}/posts/${item.id}">${c.name}'s post</a>
     <time class="when">${fmtDatetime(item.created_at)}</time>
     <p class="meta"><a href="/friend/${c.id}/posts">${c.name}</a></p>
-    <h2>Comments</h2>
-    ${problem && html`<p class="notice alert">${problem}</p>`}
-    ${thread && list && itemThread(ctx, { id: m.item }, thread, list, { region: true, action: `/_admin/friend/${c.id}/items/${m.item}/records`,
-      owner: { name: c.name, person: item.author } })}
-    <h2>Posted with</h2>${friendItemCard(ctx, item, { back })}
+    ${postWords(item, postThread)}
+    ${(postProblem ?? problem) && html`<p class="notice alert">${postProblem ?? problem}</p>`}
+    ${photoComments(ctx, { post: item, photo: { id: m.item }, thread, list, postThread, action: `/_admin/friend/${c.id}/items/${m.item}/records`,
+      postAction: `/_admin/friend/${c.id}/items/${item.id}/records`, opts: { owner: { name: c.name, person: item.author } } })}
+    ${!postThread && fromPost(`/friend/${c.id}/posts/${item.id}`, `${c.name}'s`, item.text)}
   </aside>
 </main>
 <script nonce="${nonce()}">
@@ -348,7 +380,7 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
     cancelNote: "Call this event off? Everyone going, or who might, will be told.", note: "Everyone in the group can see it." })}
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${base}">
-    <summary>${item.comments > 0 ? "Comments" : "Comment"}</summary>
+    ${commentsButton(item.comments)}
     ${thread && list ? itemThread(ctx, item, thread, list, { action: relay, moderate: { group: g.id, may } })
       : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
@@ -359,7 +391,7 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
  * A photo in a signed group's post: the photo, from the group's site by its link, paging through the post's photos,
  * ✕ back to where it was opened from, and the photo's own comments (its own item, read from the group and checked).
  */
-export function signedGroupPhoto(ctx, { membership: g, group: info, item, index, back, thread, list, problem, ownerPerson }) {
+export function signedGroupPhoto(ctx, { membership: g, group: info, item, index, back, thread, list, problem, ownerPerson, postThread = null, postProblem = null }) {
   const m = item.photos[index - 1];
   const stay = `?${new URLSearchParams({ in: "post", back })}`;
   const base = `/groups/${g.id}/posts/${item.id}/photos`;
@@ -375,11 +407,11 @@ export function signedGroupPhoto(ctx, { membership: g, group: info, item, index,
   <aside class="info">
     <a class="album-link" href="/groups/${g.id}">${info?.name ?? g.name}</a>
     <time class="when">${fmtDatetime(item.created_at)}</time>
-    <h2>Comments</h2>
-    ${problem && html`<p class="notice alert">${problem}</p>`}
-    ${thread && list && itemThread(ctx, { id: m.item }, thread, list, { region: true, action: `/_groups/${g.id}/items/${m.item}/records`,
-      moderate: { group: g.id, may: mayModerate(g, ownerPerson, list.me) } })}
-    <h2>Posted with</h2>${groupItemCard(ctx, g, item, { back, ownerPerson })}
+    ${postWords(item, postThread)}
+    ${(postProblem ?? problem) && html`<p class="notice alert">${postProblem ?? problem}</p>`}
+    ${photoComments(ctx, { post: item, photo: { id: m.item }, thread, list, postThread, action: `/_groups/${g.id}/items/${m.item}/records`,
+      postAction: `/_groups/${g.id}/items/${item.id}/records`, opts: { moderate: { group: g.id, may: mayModerate(g, ownerPerson, (postThread?.list ?? list)?.me) } } })}
+    ${!postThread && fromPost(`/groups/${g.id}/posts/${item.id}`, item.mine ? "your" : item.name ? `${item.name}'s` : "the", item.text)}
   </aside>
 </main>
 <script nonce="${nonce()}">

@@ -478,7 +478,7 @@ export async function relayRecord(request, env, url, connectionId, id) {
   const refused = (message) => html(messagePage(message, { href: back.pathname + back.search, label: "Go back" }), 400);
   let sent = null;
   try { sent = JSON.parse(String(form.get("sent") ?? "")); } catch {}
-  if (!sent) return refused("This browser can't sign for you yet. Sign out and in again, or set it up in Your devices.");
+  if (!sent) return refused("This browser can't sign for you yet. Choose Let this browser sign, on Home or in Your devices.");
   const connection = await env.DB.prepare("SELECT * FROM connections WHERE id = ? AND approved_at IS NOT NULL").bind(connectionId).first();
   const me = await ownHost(env);
   const record = typeof sent.record === "string" ? parseRecord(fromB64url(sent.record)) : null;

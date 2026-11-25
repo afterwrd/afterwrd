@@ -182,7 +182,7 @@ export async function handleItems(request, env, url, owner) {
     const sent = parse("sent");
     const refused = (message) => html(messagePage(message, { href: back.pathname + back.search, label: "Go back" }), 400);
     if (!host) return refused("Set up signing first, in Your devices.");
-    if (!sent) return refused("This browser can't sign for you yet. Sign out and in again, or set it up in Your devices.");
+    if (!sent) return refused("This browser can't sign for you yet. Choose Let this browser sign, on Home or in Your devices.");
     if (on[2] === "remove-photo") {
       const answer = await removePhoto(env, host, on[1], sent, parse("change"));
       if (answer.refused) return refused(answer.refused);

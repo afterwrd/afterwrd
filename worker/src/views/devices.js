@@ -1,7 +1,7 @@
 // Your devices (admin.js): the owner's passkeys, adding a device with a one-hour link, and signing out everywhere.
 import { nonce } from "../nonce.js";
 import { escape } from "../util.js";
-import { asset, favicon, ownerHeader } from "./nav.js";
+import { asset, favicon, integrity, ownerHeader } from "./nav.js";
 
 function day(ts) {
   return ts ? new Date(ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -73,7 +73,7 @@ link here and open it on that device: it works once, for an hour, and gives owne
 </section>
 <ul class="devices">
   ${passkeys.map((k, i) => `<li class="card" data-credential="${escape(k.id)}"><span><strong>Passkey ${i + 1}</strong>${k.id === thisCredential ? " (this device)" : ""}<span class="meta"> · added ${day(k.created_at)}${k.last_used_at ? `, last used ${day(k.last_used_at)}` : ""}${status(k)}</span></span>
-    <button class="chip danger" data-action="delete-passkey" data-credential="${escape(k.id)}" ${passkeys.length === 1 ? 'disabled title="Your only passkey"' : ""}>Remove</button></li>`).join("")}
+    ${passkeys.length > 1 ? `<button class="chip danger" data-action="delete-passkey" data-credential="${escape(k.id)}">Remove</button>` : ""}</li>`).join("")}
 </ul>
 ${canLet ? `<div class="row" id="let-sign"${notSigning ? "" : " hidden"}><button class="chip primary" data-sign="allow">${notSigning > 1 ? "Let them sign for you" : "Let it sign for you"}</button></div>` : ""}
 <div class="row">
@@ -84,7 +84,11 @@ ${canLet ? `<div class="row" id="let-sign"${notSigning ? "" : " hidden"}><button
 ${!identity ? `<p class="meta">What you post and comment isn't signed yet. <a href="/_admin/keys?next=/_admin">Set up signing</a>:
 it takes your recovery code and one face, fingerprint or PIN.</p>` : `
 <p class="meta">What you post and comment is signed on the devices above that sign for you, so nobody can change your
-words. ${thisSigns ? "This device signs for you." : "This device can't sign for you yet: let it from one that does, or use your recovery code below."}</p>
+words. ${thisSigns ? "This device's passkey signs for you." : "This device can't sign for you yet: let it from one that does, or use your recovery code below."}</p>
+${thisSigns ? `<div class="notice browser-sign" data-browser-sign hidden><p>This browser can't sign what you write yet, so you can't post
+  or comment from it. One face, fingerprint or PIN lets it.</p>
+  <div class="row"><button class="chip primary">Let this browser sign</button></div><p class="error" role="alert"></p></div>
+<script type="module" src="${asset("/static/ui/letsign.js")}" integrity="${integrity("/static/ui/letsign.js")}"></script>` : ""}
 ${pending ? `<section class="card" id="identity-change"><strong>Waiting until ${day(pending.at)}</strong>
   <p>${escape(identityChange(pending))}. If that wasn't you, cancel it.</p>
   <div class="row">${!pending.byRecovery && thisSigns ? '<button class="chip danger" data-sign="cancel">Cancel it</button>' : ""}

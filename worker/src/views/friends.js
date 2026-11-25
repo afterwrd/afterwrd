@@ -12,7 +12,7 @@ import { host } from "../sites.js";
 import { now } from "../util.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
-import { blockButton, feed, has, pager } from "./parts.js";
+import { blockButton, feed, has, moreMenu, pager } from "./parts.js";
 
 // --- a friend's shared Facebook archive and albums, read from their site (friends.js) ----------------------------
 
@@ -152,7 +152,7 @@ ${friends.length ? html`<ul class="friend-list">
     </a>
     <nav class="friend-tabs"><a href="${friendBase(c)}/posts">Posts</a><a href="${friendBase(c)}/photos">Photos</a>${friends.length > 1
       && html`<a href="/_admin/connections/${c.id}/introduce">Introduce</a>`}</nav>
-    ${friendSilence(c) && html`<div class="meta silent">${friendSilence(c)} ${!c.unmoved_since && removeFriend(c, "chip")}</div>`}
+    ${friendSilence(c) && html`<div class="meta silent">${friendSilence(c)} ${!c.unmoved_since && removeFriend(c, "chip danger")}</div>`}
     ${c.person ? linkForm(c, html`<span class="meta">On Facebook as ${fbLink(c.person)}</span>
         <input type="hidden" name="unlink" value="1"><button class="link">Unlink</button>`)
       : c.suggestion ? linkForm(c, html`<span>Is this <strong>${c.suggestion.name}</strong> from your Facebook download?</span>
@@ -325,10 +325,11 @@ function friendHead(ctx, c, tab) {
 ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cover.src}" alt=""></div></section>`}
 <div class="feed-head">
   <h1 class="friend-name">${c.avatar && html`<img class="avatar-small" src="${c.avatar.thumbSrc}" alt="">`}${c.name}</h1>
-  ${c.facebook && has(ctx, "friends") && html`<a class="chip" href="/people/${c.facebook.id}">${raw(icon("friends"))}<span>Your Facebook history together</span></a>`}
+  <span class="head-tools">${c.facebook && has(ctx, "friends") && html`<a class="chip" href="/people/${c.facebook.id}">${raw(icon("friends"))}<span>Your Facebook history together</span></a>`}
+  ${moreMenu([removeFriend(c, "delete")], "More")}</span>
 </div>
 <div class="meta">${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}
-  · a friend you're connected with. Only you see this here. ${removeFriend(c, "link")}</div>
+  · a friend you're connected with. Only you see this here.</div>
 ${c.renamed && html`<form class="notice" method="post" action="/_admin/connections/${c.id}/rename">
   <input type="hidden" name="name" value="${c.renamed}">
   ${c.name} now calls themselves ${c.renamed}. You'll go on seeing ${c.name} everywhere until you choose otherwise.

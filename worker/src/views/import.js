@@ -25,17 +25,18 @@ export function importPage({ owner, me = null }) {
 ${favicon()}
 <style>
   .pickers { display: grid; gap: 0.75rem; margin: 1rem 0; }
-  .picker { display: block; background: var(--surface); border: 1px dashed var(--border); border-radius: 18px;
+  .file-picker { display: block; background: var(--surface); border: 1px dashed var(--border); border-radius: 18px;
     padding: 0.9rem 1rem; cursor: pointer; }
-  .picker:hover { border-color: var(--accent); }
-  .picker strong { display: block; }
-  .picker input { margin-top: 0.5rem; max-width: 100%; }
+  .file-picker:hover { border-color: var(--accent); }
+  .file-picker strong { display: block; }
+  .file-picker input { margin-top: 0.6rem; max-width: 100%; }
   fieldset { border: 1px solid var(--border); border-radius: 18px; background: var(--surface); padding: 0.6rem 1rem 0.8rem; margin: 0 0 1rem; }
   legend { font-weight: 600; padding: 0 0.3rem; }
   fieldset label { display: grid; grid-template-columns: auto 1fr; gap: 0 0.6rem; padding: 0.35rem 0; cursor: pointer; }
-  fieldset label input { grid-row: span 2; margin-top: 0.25rem; }
+  fieldset label input { grid-row: span 2; align-self: start; margin-top: 0.3rem; }
   fieldset label span { color: var(--muted); font-size: 0.85rem; }
-  #go { font: inherit; font-weight: 600; padding: 0.6rem 1.2rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); cursor: pointer; }
+  /* The page's one button: afterwrd's primary button (style.css .chip.primary). */
+  #go { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0.35rem 1.25rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); font: 800 0.92rem var(--round); cursor: pointer; }
   #go:disabled { opacity: 0.6; cursor: default; }
   #progress[hidden] { display: none; }
   #progress progress { width: 100%; height: 0.7rem; margin: 0.5rem 0; }
@@ -57,10 +58,10 @@ Your browser reads it on this computer and uploads only the sections you tick be
 what you imported before (never what you've posted on afterwrd); the old version stays until the new one is complete.</p>
 
 <div class="pickers">
-  <label class="picker"><strong>The zip file(s) from Facebook</strong>
+  <label class="file-picker"><strong>The zip file(s) from Facebook</strong>
     <span class="meta">Big archives come as several zips: choose them all.</span><br>
     <input type="file" id="zips" accept=".zip,application/zip" multiple></label>
-  <label class="picker"><strong>…or the unzipped folder</strong>
+  <label class="file-picker"><strong>…or the unzipped folder</strong>
     <input type="file" id="folder" webkitdirectory></label>
 </div>
 
@@ -148,12 +149,13 @@ export function movePage({ me = null, site, moving = null, own = false }) {
 <link rel="stylesheet" href="${asset("/static/style.css")}">
 ${favicon()}
 <style>
-  .picker { display: block; background: var(--surface); border: 1px dashed var(--border); border-radius: 18px;
+  .file-picker { display: block; background: var(--surface); border: 1px dashed var(--border); border-radius: 18px;
     padding: 0.9rem 1rem; margin: 1rem 0; cursor: pointer; }
-  .picker:hover { border-color: var(--accent); }
-  .picker strong { display: block; }
-  .picker input { margin-top: 0.5rem; max-width: 100%; }
-  #go { font: inherit; font-weight: 600; padding: 0.6rem 1.2rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); cursor: pointer; }
+  .file-picker:hover { border-color: var(--accent); }
+  .file-picker strong { display: block; }
+  .file-picker input { margin-top: 0.6rem; max-width: 100%; }
+  /* The page's one button: afterwrd's primary button (style.css .chip.primary). */
+  #go { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0.35rem 1.25rem; border: 0; border-radius: 999px; background: var(--button); color: var(--on-button); font: 800 0.92rem var(--round); cursor: pointer; }
   #go:disabled { opacity: 0.6; cursor: default; }
   #ask { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   #ask input { flex: 1; min-width: 12rem; }
@@ -190,7 +192,7 @@ site stays, saying where you've gone, until you delete it.</p>
 in friends' names included (though any signed by them must check), so a file someone sent you could put words in
 other people's mouths.</p>
 
-<label class="picker"><strong>Your Download everything zip</strong>
+<label class="file-picker"><strong>Your Download everything zip</strong>
   <input type="file" id="zip" accept=".zip,application/zip"></label>
 
 <button id="go" disabled>Move everything here</button>

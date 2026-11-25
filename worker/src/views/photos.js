@@ -31,10 +31,10 @@ ${role ? `<p class="meta">Upload one here, or open any of your photos and press 
     <textarea name="description" rows="2" maxlength="2000" placeholder="What's it about? (optional)" aria-label="Album description"></textarea>
   </div>`}
   <ul class="picked" hidden></ul>
-  <label class="chip pick"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>
-    <span>${role ? "Choose a photo" : "Choose photos"}</span><input type="file" accept="image/*" ${role ? "" : "multiple"} class="hidden"></label>
   <p class="error" role="alert"></p>
-  <div class="actions"><span class="status meta" role="status"></span><button class="post">${role ? "Use this photo" : "Add photos"}</button></div>
+  <div class="actions"><label class="chip pick"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-9 9"/></svg>
+    <span>${role ? "Choose a photo" : "Choose photos"}</span><input type="file" accept="image/*" ${role ? "" : "multiple"} class="hidden"></label>
+    <span class="status meta" role="status"></span><button class="post">${role ? "Use this photo" : "Add photos"}</button></div>
 </form>
 </main>
 <script type="module" src="${asset("/static/add-photos.js")}" integrity="${integrity("/static/add-photos.js")}"></script>

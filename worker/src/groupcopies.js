@@ -456,7 +456,7 @@ export async function relayToGroup(request, env, url, group, id) {
   const refused = (message, status = 400) => html(messagePage(message, { href: back.pathname + back.search, label: "Go back" }), status);
   let sent = null;
   try { sent = JSON.parse(String(form.get("sent") ?? "")); } catch {}
-  if (!sent) return refused("This browser can't sign for you yet. Sign out and in again, or set it up in Your devices.");
+  if (!sent) return refused("This browser can't sign for you yet. Choose Let this browser sign, on Home or in Your devices.");
   let ready_;
   try { ready_ = await ready(env, group, sent, (r) => r.item === id && r.kind !== "item"); } catch (error) { return refused(error.message); }
   const { record } = ready_;

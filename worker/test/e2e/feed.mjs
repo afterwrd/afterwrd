@@ -218,7 +218,7 @@ await ann.goto(`${A}/`);
 check("the photo loads straight from Bob's site, by a signed link", await ann.$eval("article.from-friend .collage img", (i, b) => i.naturalWidth > 0
   && i.getAttribute("src").startsWith(`${b}/files/`) && i.getAttribute("src").includes("&sig="), B));
 await ann.goto(`${A}/_admin/connections`);
-check("Ann's Connections lists Bob", (await ann.$eval("table.numbers tbody", (t) => t.textContent)).includes("Bob Example"));
+check("Ann's Connections lists Bob", (await ann.$eval(".friend-rows", (t) => t.textContent)).includes("Bob Example"));
 
 // afterwrd 2: Ann comments on Bob's signed post from her Home. Her browser signs it; her site passes it on to Bob's in a
 // signed call, and keeps it, with Bob's site's receipt (friendcopies.js). Comments are behind the post's button.
@@ -672,7 +672,8 @@ const full = await ann.$eval(".stage img", (i) => ({ w: i.naturalWidth, src: i.g
 check("a photo opens on Ann's site, full size, from Bob's", full.w === 1200 && full.src.startsWith(`${B}/files/`), full.src.slice(0, 60));
 check("…with no comment box: it's from his Facebook download", Boolean(await ann.$(".info")) && !(await ann.$(".info .say")));
 const fullSrc = full.src;
-// afterwrd 2: a photo Bob posted is an item of its own, with its own comments, opened from his post.
+// afterwrd 2: a photo Bob posted is an item of its own, with its own comments, opened from his post (it has two
+// photos: a one-photo post's photo has the post's comments instead, as comments.mjs checks).
 const ownTile = `/friend/${bobId}/posts/${bobPostId}/photos/1`;
 await ann.goto(A + ownTile);
 await ann.type(".info .say textarea", "What a view");
@@ -681,6 +682,8 @@ check("Ann comments on a photo Bob posted, from her site", new URL(ann.url()).pa
   && (await ann.$$eval(".info section.thread .comment:not(.gone)", (l) => l.map((c) => ({ t: c.querySelector(".said").textContent, d: Boolean(c.querySelector(".under .delete")) }))))
     .some((c) => c.t === "What a view" && c.d));
 check("…kept on Bob's site against that photo", sql(stateB, "SELECT comments FROM items WHERE type = 'photo' ORDER BY created_at LIMIT 1")[0]?.comments === 1);
+check("…with a line back to his post, not the whole post again", (await ann.$eval(".info .from-post a", (a) => a.getAttribute("href")).catch(() => ""))
+  === `/friend/${bobId}/posts/${bobPostId}` && !(await ann.$(".info article.card")));
 // Opened from his album instead, it's the same photo page: its signed comments are there.
 await ann.goto(A + bobAlbums.find((a) => a.name === "Posted on afterwrd").href);
 await Promise.all([ann.waitForNavigation(), ann.click(".justified a.tile")]);
@@ -1025,7 +1028,7 @@ check("Home still shows Cara's posts, from the copy her note kept", (await feedC
 check("…asking every friend's site in the background, in the calls a page may make", await waitFor(() =>
   sql(stateA, "SELECT COUNT(*) AS n FROM connections WHERE id < 0 AND items_checked_at IS NOT NULL AND missing_since IS NOT NULL")[0].n === 45, 20_000));
 await ann.goto(`${A}/`);
-const notices = await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent));
+const notices = await ann.$$eval(".notice", (l) => l.map((p) => p.textContent));
 const reachNotices = notices.filter((n) => /Couldn't (reach|load)/.test(n));
 check("…and Home sums up those it couldn't reach in one line", reachNotices.length === 1 && /Couldn't reach 45 friends' sites/.test(reachNotices[0]),
   notices.join(" | "));
@@ -1043,9 +1046,13 @@ sql(stateA, `INSERT INTO connections (id, origin, name, created_at, connected_at
   (9002, 'https://ned.invalid', 'New Ned', 1700000000, 1700000000, 1700000000, NULL, NULL, NULL)`);
 const gailAsked = sql(stateA, "SELECT items_checked_at AS t FROM connections WHERE id = 9001")[0].t;
 await ann.goto(`${A}/`);
-const homeNotices = (await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent))).join(" | ");
+const homeNotices = (await ann.$$eval(".notice", (l) => l.map((p) => p.textContent))).join(" | ");
 check("Home mentions a friend's site that's just stopped answering", homeNotices.includes("Couldn't reach New Ned's site"), homeNotices);
 check("…but not one that's been quiet for a day", !homeNotices.includes("Gail"), homeNotices);
+// One quiet line, which can be put away until who's in it changes.
+await Promise.all([settled(ann), ann.click("form.friends-status button")]);
+await ann.goto(`${A}/`);
+check("…put away, it stays away", !(await ann.$("form.friends-status")));
 check("…which is asked at most once an hour", sql(stateA, "SELECT items_checked_at AS t FROM connections WHERE id = 9001")[0].t === gailAsked);
 check("Ned's site is noted as not answering", sql(stateA, "SELECT missing_since FROM connections WHERE id = 9002")[0].missing_since > 0);
 await ann.goto(`${A}/friend`);
@@ -1074,8 +1081,8 @@ check("a friend still on afterwrd 1 is noted as not moved yet, not as missing", 
   && olive().missing_since === null && olive().said_no === 0, JSON.stringify(olive()));
 check("…and asked again in a day, not an hour", olive().items_checked_at > Math.floor(Date.now() / 1000) + 20 * 3600);
 await ann.goto(`${A}/`);
-const oliveNotices = (await ann.$$eval("p.notice", (l) => l.map((p) => p.textContent))).join(" | ");
-check("Home says Olive's site hasn't moved to afterwrd 2 yet", oliveNotices.includes("Old Olive's site hasn't moved to afterwrd 2 yet"), oliveNotices);
+const oliveNotices = (await ann.$$eval(".notice", (l) => l.map((p) => p.textContent))).join(" | ");
+check("Home says Olive's site isn't on afterwrd 2 yet (back, as it's someone new)", oliveNotices.includes("Old Olive's site isn't on afterwrd 2 yet"), oliveNotices);
 check("…not that it couldn't be reached, or that she hasn't approved you", !/Couldn't reach Old Olive|Waiting for Old Olive/.test(oliveNotices), oliveNotices);
 await ann.goto(`${A}/friend`);
 const oliveCard = await ann.$$eval(".friend-list li", (l) => l.find((li) => li.textContent.includes("Old Olive"))?.querySelector(".silent")?.outerHTML ?? "");
@@ -1108,7 +1115,8 @@ await ann.goto(`${A}/friend/${caraId}/posts`);
 const caraNotice = await ann.$eval("p.notice", (p) => p.textContent).catch(() => "");
 check("her page says she may have removed you", caraNotice.includes("Cara Example may have removed you as a friend"), caraNotice);
 await ann.screenshot({ path: `${OUT}/friend-removed-you.png` });
-await Promise.all([ann.waitForNavigation(), ann.click("main form.inline button")]);
+await ann.click("main .feed-head details.more summary");
+await Promise.all([ann.waitForNavigation(), ann.click("main .feed-head details.more .menu button")]);
 check("Remove friend on her page forgets her", new URL(ann.url()).pathname === "/friend"
   && sql(stateA, "SELECT COUNT(*) AS n FROM connections")[0].n === 0 && sql(stateA, "SELECT COUNT(*) AS n FROM friend_links")[0].n === 0);
 

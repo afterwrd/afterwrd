@@ -38,11 +38,32 @@ const SIDE_FRIENDS = 12; // on Home; the rest are on Friends
 const listed = (items) => (items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 
 /**
+ * One quiet line for friends' sites that haven't answered lately and those not on afterwrd 2 yet, leading to Friends
+ * (where each says so on its own), with "Put it away". Away stays away until who's in it changes (`away`: the list as
+ * it was then, "m12,u15", kept by POST /_admin/notices/friends-away).
+ */
+function friendsStatus(unreachable, unmoved, away) {
+  const fp = [...unreachable.map((c) => `m${c.id}`), ...unmoved.map((c) => `u${c.id}`)].sort().join(",");
+  if (!fp || fp === away) return "";
+  const whose = (list) => (list.length > 2 ? `${list.length} friends'` : list.map((c) => `${c.name}'s`).join(" and "));
+  const sites = (list) => (list.length === 1 ? "site" : "sites");
+  const parts = [
+    unreachable.length > 0 && `Couldn't reach ${whose(unreachable)} ${sites(unreachable)} lately`,
+    unmoved.length > 0 && `${whose(unmoved)} ${sites(unmoved)} ${unmoved.length === 1 ? "isn't" : "aren't"} on afterwrd 2 yet`,
+  ].filter(Boolean);
+  const said = parts.join(", and ");
+  return html`<form class="notice quiet friends-status" method="post" action="/_admin/notices/friends-away" data-region="" data-inplace="remove">
+    <input type="hidden" name="fp" value="${fp}">
+    <span>${said.charAt(0).toUpperCase() + said.slice(1)}, so some of their posts may be missing. <a href="/friend">Friends</a></span>
+    <button class="link">Put it away</button></form>`;
+}
+
+/**
  * The owner's Home: write something, then your posts and your friends' together, newest first.
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "" }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -57,6 +78,10 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
 <div class="home">
   <section class="stream" aria-label="Posts">
     <h1 class="hidden">Home</h1>
+    ${raw(`<div class="notice browser-sign" data-browser-sign hidden><p>This browser can't sign what you write yet, so you can't post
+  or comment from it. One face, fingerprint or PIN lets it.</p>
+  <div class="row"><button class="chip primary">Let this browser sign</button></div><p class="error" role="alert"></p></div>`)}
+    <script type="module" src="${asset("/static/ui/letsign.js")}" integrity="${integrity("/static/ui/letsign.js")}"></script>
     ${securityFix && html`<p class="notice alert">afterwrd ${securityFix} fixes a security problem, and this site is older.
       <a href="/_admin/update">Update now</a>.</p>`}
     ${(auto.problem || auto.on && (auto.last?.result && auto.last.result !== "done" || auto.waiting?.needsHand)) && html`<p class="notice alert">
@@ -65,9 +90,11 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
         : auto.last.result === "kept" ? html`afterwrd ${auto.last.version} failed its checks after updating your site's database, so it was kept.`
         : html`afterwrd ${auto.last.version} didn't work on this site, so it was put back as it was.`}
       <a href="/_admin/update#auto">See what happened</a>.</p>`}
-    ${checkFailure && html`<p class="notice alert" id="check-failure"><strong>${checkFailure.name}'s site checked yours</strong> on
+    ${checkFailure && html`<form class="notice alert" id="check-failure" method="post" action="/_admin/checks/failure/${checkFailure.id}/away"
+      data-region="" data-inplace="remove"><span><strong>${checkFailure.name}'s site checked yours</strong> on
       ${fmtDate(checkFailure.checked_at)} and found something that needs a look: ${checkFailure.problems[0]}
-      <a href="/_admin/update#check">See what it found</a>.</p>`}
+      <a href="/_admin/update#check">See what it found</a>.</span>${checkFailure.stale && html` <span>That was afterwrd ${checkFailure.version},
+      and your site has been updated since: their site checks it again within a day or so.</span> <button class="link">Put it away</button>`}</form>`}
     ${friendChecks.map((f) => html`<form class="notice alert friend-check" method="post" action="/_admin/checks/found/${f.id}/seen" data-region="" data-inplace="remove">
       ${f.verdict === "needs a look"
         ? html`<span>Your site checked <strong>${f.name}'s site</strong> and found something that needs a look. It's told their
@@ -177,9 +204,7 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       });
     </script>`}
     ${composer()}
-    ${unreachable.length > 2
-      ? html`<p class="notice">Couldn't reach ${unreachable.length} friends' sites lately, so their newest posts may be missing.</p>`
-      : unreachable.map((c) => html`<p class="notice">Couldn't reach ${c.name}'s site lately, so their newest posts may be missing.</p>`)}
+    ${friendsStatus(unreachable, unmoved, statusAway)}
     ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
     ${(bringOver?.posts > 0 || bringOver?.comments > 0 || bringOver?.groups > 0) && html`<p class="notice"><span id="bring-over">${bringOver.posts > 0
       ? `Bringing your ${bringOver.posts === 1 ? "post" : `${bringOver.posts} posts`} from before afterwrd 2 over, signed on this device…`
@@ -190,9 +215,6 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
       <script type="module" src="${asset("/static/ui/bringover.js")}" integrity="${integrity("/static/ui/bringover.js")}"></script>`}
     ${(bringOver?.owned ?? []).map((g) => html`<p class="notice bring-group">${g.name} is from before afterwrd 2.
       <a href="/groups/${g.id}">Bring it over</a>, so its members can carry on there.</p>`)}
-    ${unmoved.length > 2
-      ? html`<p class="notice unmoved">${unmoved.length} friends' sites haven't moved to afterwrd 2 yet. You'll see their posts once they have.</p>`
-      : unmoved.map((c) => html`<p class="notice unmoved">${c.name}'s site hasn't moved to afterwrd 2 yet. You'll see their posts once it has.</p>`)}
     ${stream.length ? stream.map((s) => s.card) : html`<div class="empty"><p>Nothing here yet. Write your first post above.</p></div>`}
   </section>
   <aside class="side">

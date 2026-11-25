@@ -58,7 +58,7 @@ export function eventBlock(ctx, e, { href, full = false, answer = null, ics = nu
     ${edit && !e.cancelled_at && !over && html`<a class="chip" href="${edit}">Change it</a>`}
     ${cancel && !e.cancelled_at && !over && html`<form method="post" action="${cancel}" data-inplace
       data-confirm="${cancelNote}" data-confirm-ok="Call it off"${raw(cancelSign)}>
-      <input type="hidden" name="back" value="${back}"><button class="chip">Call it off</button></form>`}
+      <input type="hidden" name="back" value="${back}"><button class="chip danger">Call it off</button></form>`}
   </div>`}
 </div>`;
 }
@@ -149,14 +149,14 @@ export function repeatingSigned(ctx, e, { base, relay, full = false, sign, edit 
         .map(([label, list]) => html`<dt>${label}</dt><dd>${names(list)}</dd>`)}</dl>`}
     ${open(d) && sign("calloff", d) && html`<form method="post" action="${relay}" data-inplace class="call-off-date"${raw(sign("calloff", d))}
       data-confirm="Call off ${dayName(eventDayParts(d))}? Everyone going that day will be told. The other dates stay." data-confirm-ok="Call it off">
-      <input type="hidden" name="back" value="${back}"><button class="chip">Call off this date</button></form>`}
+      <input type="hidden" name="back" value="${back}"><button class="chip danger">Call off this date</button></form>`}
   </li>`)}</ol>
   <div class="actions-row">
     ${!e.cancelled_at && html`<a class="chip" href="${base}/event.ics" download>${raw(icon("calendar"))}<span>Add to my calendar</span></a>`}
     ${edit && !e.cancelled_at && !over && html`<a class="chip" href="${edit}">Change it</a>`}
     ${all && !e.cancelled_at && !over && html`<form method="post" action="${relay}" data-inplace${raw(all)}
       data-confirm="Call off every date of this event? Everyone going to any of them will be told." data-confirm-ok="Call it all off">
-      <input type="hidden" name="back" value="${back}"><button class="chip">Call it all off</button></form>`}
+      <input type="hidden" name="back" value="${back}"><button class="chip danger">Call it all off</button></form>`}
   </div>`}
 </div>`;
 }
@@ -256,10 +256,10 @@ function calendarGrid(ctx, items, { month, day, base }) {
   const cls = (e) => ["cal-event", `cal-${e.kind}`, e.cancelled_at && "off", !e.answer && e.kind !== "own" && "unanswered"].filter(Boolean).join(" ");
   return html`<section class="calendar" aria-labelledby="cal-month">
   <header class="cal-head">
-    <a class="chip" href="${link(`month=${around.prev}`)}" aria-label="The month before">‹</a>
     <h2 id="cal-month">${around.name}</h2>
-    <a class="chip" href="${link(`month=${around.next}`)}" aria-label="The month after">›</a>
     ${(now.year !== month.year || now.month !== month.month || day) && html`<a class="chip" href="${base}">Today</a>`}
+    <a class="chip arrow" href="${link(`month=${around.prev}`)}" aria-label="The month before">‹</a>
+    <a class="chip arrow" href="${link(`month=${around.next}`)}" aria-label="The month after">›</a>
   </header>
   <table class="cal-grid">
     <thead><tr>${WEEK.map((d) => html`<th scope="col"><abbr title="${d}">${d[0]}</abbr><span>${d.slice(1)}</span></th>`)}</tr></thead>
@@ -295,10 +295,10 @@ function weekHead(ctx, week, base) {
   const around = weekAround(week);
   const now = dateKey(today(ctx.zone));
   return html`<header class="cal-head">
-  <a class="chip" href="${base}?view=week&week=${around.prev}" aria-label="The week before">‹</a>
   <h2 id="cal-week">${around.name}</h2>
-  <a class="chip" href="${base}?view=week&week=${around.next}" aria-label="The week after">›</a>
   ${!around.days.some((d) => d.key === now) && html`<a class="chip" href="${base}?view=week">This week</a>`}
+  <a class="chip arrow" href="${base}?view=week&week=${around.prev}" aria-label="The week before">‹</a>
+  <a class="chip arrow" href="${base}?view=week&week=${around.next}" aria-label="The week after">›</a>
 </header>`;
 }
 
@@ -371,10 +371,16 @@ function invitationCard(ctx, e) {
 /** Events: invitations to answer, the owner's calendar, and making an event. */
 export function eventsPage(ctx, { view, month, day, week, items, invitations, friends, pushKey }) {
   return page(ctx, "Events", html`
-<div class="feed-head">
-  <h1>Events</h1>
-  <a class="chip primary" href="#make">${raw(icon("calendar"))}<span>Make an event</span></a>
-</div>
+<h1>Events</h1>
+<details class="add-event" id="make">
+  <summary class="chip primary">${raw(icon("calendar"))}<span>Make an event</span></summary>
+  <div class="card">
+  <p class="meta">Only the friends you invite see it, on their own sites. They're told you've invited them, and those who
+  haven't said no are told if it changes or is called off. Nothing else is sent.</p>
+  ${eventForm({ action: "/_admin/items", back: "/events", submit: "Make the event", sign: ' data-sign="event-new"',
+    guests: guestPicker(friends, { none: "You have no friends on afterwrd to invite yet. You can still make it, and invite people later." }) })}
+  </div>
+</details>
 ${invitations.length > 0 && html`<section class="invitations">
   <h2>Invitations</h2>
   <ul class="invitation-list">${invitations.map((e) => invitationCard(ctx, e))}</ul>
@@ -384,18 +390,10 @@ ${view === "month" ? html`${calendarGrid(ctx, items, { month, day, base: "/event
     : view === "week" ? html`<section class="calendar" aria-labelledby="cal-week">${weekHead(ctx, week, "/events")}
       ${weekDays(ctx, items, week, (list) => eventRows(ctx, list))}</section>`
     : html`<section class="cal-upcoming" aria-label="Coming up">${upcomingByMonth(items, (list) => eventRows(ctx, list))}</section>`}
-<details class="card add-event" id="make">
-  <summary>Make an event</summary>
-  <p class="meta">Only the friends you invite see it, on their own sites. They're told you've invited them, and those who
-  haven't said no are told if it changes or is called off. Nothing else is sent.</p>
-  ${eventForm({ action: "/_admin/items", back: "/events", submit: "Make the event", sign: ' data-sign="event-new"',
-    guests: guestPicker(friends, { none: "You have no friends on afterwrd to invite yet. You can still make it, and invite people later." }) })}
-</details>
 ${notificationsSwitch(pushKey)}
 <script nonce="${nonce()}">
-  // "Make an event" opens the form.
+  // A link to #make (from elsewhere) opens the form.
   if (location.hash === "#make") document.getElementById("make").open = true;
-  document.querySelector('a[href="#make"]').addEventListener("click", () => { document.getElementById("make").open = true; });
 </script>`);
 }
 
@@ -454,12 +452,14 @@ ${missing && html`<p class="meta">The group only lists its 30 most recent events
 ${shown.length ? html`<div class="feed">${shown.map(card)}</div>` : html`<p class="empty">${day ? "Nothing on that day." : "Nothing this month."}</p>`}`;
   return page(ctx, `${info?.name ?? g.name}: calendar`, html`
 ${groupHead(ctx, g, info, "calendar")}
-${!g.closed_at && html`<details class="card add-event" ${!upcoming.length && raw("open")}>
-  <summary>Add an event</summary>
+${!g.closed_at && html`<details class="add-event" ${!upcoming.length && raw("open")}>
+  <summary class="chip primary">${raw(icon("calendar"))}<span>Add an event</span></summary>
+  <div class="card">
   <p class="meta">Everyone in the group will see it here. No one is sent anything about it; those who say they're
   going, or might, are told if it changes or is called off.</p>
   ${eventForm({ action: `/_groups/${g.id}/items`, back: base, submit: "Add the event", repeats: true,
     sign: ` data-sign="event-new" data-sign-host="${g.identity}" data-sign-group="${g.id}" data-sign-to="/_groups/${g.id}/items"` })}
+  </div>
 </details>`}
 ${calendarSwitch(base, view)}
 ${shownView}`);

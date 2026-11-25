@@ -39,8 +39,9 @@ async function register(page, link) {
   await page.goto(link);
   await Promise.all([page.waitForNavigation(), page.click("#go")]);
 }
-const passkeys = (page) => page.$$eval(".devices li", (l) => l.map((li) => ({
-  id: li.querySelector("button").dataset.credential, disabled: li.querySelector("button").disabled })));
+// Each passkey, and whether it can be removed (the only one has no Remove).
+const passkeys = (page) => page.$$eval(".devices li[data-credential]", (l) => l.map((li) => ({
+  id: li.dataset.credential, disabled: !li.querySelector("button[data-action=delete-passkey]") })));
 
 // The owner joins via the terminal, as on a brand-new site.
 const ownerName = `Owner ${Date.now()}`;
@@ -67,6 +68,26 @@ check("the recovery code is kept nowhere on the site", /^([0-9A-Z]{5}-){4}[0-9A-
   && !everything.includes(recoveryCode) && !everything.includes(recoveryCode.replace(/-/g, "")));
 check("the signing code is public, so the sign-in page can use it", (await fetch(`${BASE}/static/signed.js`)).status === 200
   && (await fetch(`${BASE}/static/browserkey.js`)).status === 200 && (await fetch(`${BASE}/static/ui/main.js`, { redirect: "manual" })).status === 302);
+// A browser still signed in from before afterwrd 2 has no key (it's made at sign-in). Home offers to let it sign, with
+// one prompt, without signing out (ui/letsign.js, keys.js browser/start and browser/finish).
+await phone.goto(`${BASE}/`);
+check("a browser that can sign isn't offered to", await phone.$eval("[data-browser-sign]", (b) => b.hidden));
+await phone.evaluate(() => new Promise((resolve) => { const r = indexedDB.open("afterwrd-keys", 1); r.onsuccess = () => {
+  const t = r.result.transaction("keys", "readwrite"); t.objectStore("keys").delete("browser"); t.oncomplete = () => { r.result.close(); resolve(null); }; }; }));
+await phone.reload();
+await phone.waitForSelector("[data-browser-sign]:not([hidden])", { timeout: 10_000 }).catch(() => null);
+check("without a key, Home says this browser can't sign yet, and offers to let it",
+  await phone.$eval("[data-browser-sign]", (b) => !b.hidden && b.querySelector("button").textContent === "Let this browser sign"));
+await phone.click("[data-browser-sign] button");
+await phone.waitForFunction(() => document.querySelector("[data-browser-sign]").textContent.includes("Done"), { timeout: 15_000 }).catch(() => null);
+const letKey = await browserKeyOf(phone);
+check("…one prompt later, it has a key that signs for the owner, kept with this session",
+  letKey?.person === identity.person && /^[\w-]+$/.test(letKey.publicKey) && sql(`SELECT COUNT(*) AS n FROM delegations WHERE key = '${letKey.publicKey}' AND session_hash IS NOT NULL`)[0]?.n === 1,
+  JSON.stringify(sql("SELECT key FROM delegations")));
+await phone.reload();
+check("…and Home stops offering", await phone.$eval("[data-browser-sign]", (b) => b.hidden));
+// The phone's browser keys allowed so far (its first, and the one just made), for counting new devices' below.
+const phoneDelegations = sql("SELECT COUNT(*) AS n FROM delegations")[0].n;
 await phone.goto(`${BASE}/_admin/keys`);
 check("setting up signing again just goes on", new URL(phone.url()).pathname === "/");
 const startAgain = await phone.evaluate(async () => (await fetch("/_admin/keys/start", { method: "POST", headers: { "Content-Type": "application/json" },
@@ -103,7 +124,7 @@ await phone.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "" }]);
 await phone.evaluate(() => localStorage.removeItem("afterwrd-look"));
 
 await phone.goto(`${BASE}/_admin`);
-check("Your devices lists one passkey, which can't be removed", (await phone.$eval("h1", (h) => h.textContent)) === "Your devices"
+check("Your devices lists one passkey, with no Remove (it's the only one)", (await phone.$eval("h1", (h) => h.textContent)) === "Your devices"
   && JSON.stringify((await passkeys(phone)).map((k) => k.disabled)) === "[true]");
 check("no inviting other people", !(await phone.$("#invite")) && !(await phone.$("button[data-action=revoke]")));
 
@@ -139,7 +160,7 @@ check("the laptop is signed in as the owner", (await navLabels(laptop)).includes
 const docs = () => JSON.parse(sql("SELECT chain FROM own_identity")[0].chain).map((d) => JSON.parse(Buffer.from(d.bytes, "base64url").toString()));
 const laptopBrowserKey = await browserKeyOf(laptop);
 check("…and signs for them: its passkey added to the identity, its browser allowed", docs().length === 2 && docs()[1].passkeys.length === 2
-  && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 2 && laptopBrowserKey?.person === identity.person && laptopBrowserKey.extractable === false,
+  && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === phoneDelegations + 1 && laptopBrowserKey?.person === identity.person && laptopBrowserKey.extractable === false,
   JSON.stringify(docs().map((d) => d.passkeys.length)));
 const reuse = await (await device()).goto(link);
 check("the link only works once", reuse.status() === 404);
@@ -174,7 +195,7 @@ check("the laptop, no longer new, has nothing to hear", (await alerts(laptop)).l
 const desk = await device();
 await register(desk, (await (await fromLaptop("/_admin/devices/link")).json()).link);
 check("a device added without a signing device's say-so signs in, but can't sign", new URL(desk.url()).pathname === "/_admin/keys/join"
-  && docs().length === 2 && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === 2);
+  && docs().length === 2 && sql("SELECT COUNT(*) AS n FROM delegations")[0].n === phoneDelegations + 1);
 const deskKey = sql("SELECT id FROM credentials ORDER BY rowid DESC LIMIT 1")[0].id;
 const statusOf = async (page, id) => { await page.goto(`${BASE}/_admin`); return page.$eval(`li[data-credential="${id}"] .meta`, (m) => m.textContent).catch(() => ""); };
 check("Your devices says so", (await statusOf(phone, deskKey)).includes("can't sign for you yet"), await statusOf(phone, deskKey));

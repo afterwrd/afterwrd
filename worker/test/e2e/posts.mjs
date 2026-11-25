@@ -185,7 +185,7 @@ const albums = await owner.$$eval(".albums a.album strong", (l) => l.map((s) => 
 check("photos appear in a 'Posted on afterwrd' album", albums.includes("Posted on afterwrd"), albums.join(", "));
 await owner.goto(`${BASE}/photos/${stored[0].id}`);
 check("photo page shows it, with the post", (await owner.$eval(".info .album-link", (a) => a.textContent)) === "Posted on afterwrd"
-  && (await owner.$eval(".info article.card .text", (t) => t.textContent)) === "Two photos");
+  && (await owner.$eval(".info .from-post a", (t) => t.textContent)).includes("Two photos"));
 // Opened from the post, a photo is among the post's photos (not in the middle of "Posted on afterwrd"), and ✕ goes
 // back to the post where it was.
 await owner.goto(`${BASE}/posts`);

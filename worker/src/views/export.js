@@ -19,12 +19,6 @@ ${ownerHeader("export", me)}
 ones people have written here, and the ones you've written on friends' sites), likes, friends and connections, and
 the groups you're in, with what you've posted and said there.
 It's yours to keep, move or read with other tools.</p>
-<p class="meta">The data is in <a href="https://www.w3.org/TR/activitystreams-core/" target="_blank" rel="noopener noreferrer">ActivityStreams</a>,
-the open format the fediverse uses, and everything has a permanent address. So when two friends both download,
-a comment one of you left on the other's post has the same address in both, and your conversations can be put
-back together. A README in the zip explains the files.</p>
-<p class="meta">Moving to another afterwrd site (one on your own server, say)? Download everything here, with photos and
-videos, then choose the zip on the new site's Import page, under Bring everything over.</p>
 <p class="meta"><strong>Keep the download as safe as your site.</strong> It's all of your site in one file: anyone who gets
 it could read everything, or set up a copy of your site under another address.</p>
 
@@ -37,6 +31,13 @@ it could read everything, or set up a copy of your site under another address.</
   <p class="status meta" id="status" role="status"></p>
   <p class="error" id="error" role="alert"></p>
 </form>
+
+<p class="meta">The data is in <a href="https://www.w3.org/TR/activitystreams-core/" target="_blank" rel="noopener noreferrer">ActivityStreams</a>,
+the open format the fediverse uses, and everything has a permanent address. So when two friends both download,
+a comment one of you left on the other's post has the same address in both, and your conversations can be put
+back together. A README in the zip explains the files.</p>
+<p class="meta">Moving to another afterwrd site (one on your own server, say)? Download everything here, with photos and
+videos, then choose the zip on the new site's Import page, under Bring everything over.</p>
 </main>
 <script src="/static/vendor/zip-2.24.0.min.js" integrity="${integrity("/static/vendor/zip-2.24.0.min.js")}"></script>
 <script type="module" src="${asset("/static/export/main.js")}" integrity="${integrity("/static/export/main.js")}"></script>

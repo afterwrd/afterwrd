@@ -37,7 +37,7 @@ import { checkLinkPage, messagePage } from "./views/pages.js";
 import { ownerName, siteOrigin } from "./sites.js";
 import { callFriend } from "./calls.js";
 import { knownLatest, newer } from "./update.js";
-import { laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
+import { failureAway, laterChecks, letOff, lookAfterLater, putAway, setCheckingFriends } from "./friendchecks.js";
 import { signedList } from "./signing.js";
 import { onCloudflare } from "./hosting.js";
 import { isPublicStatic } from "./static.js";
@@ -71,6 +71,11 @@ export async function handleCheckAdmin(request, env, url) {
   // Friends' automatic checks (friendchecks.js): letting friends' sites check this one, this one checking theirs.
   if (url.pathname === "/_admin/checks/let-later") {
     await laterChecks(env.DB);
+    return Response.redirect(`${url.origin}/`, 303);
+  }
+  const away = /^\/_admin\/checks\/failure\/(\d+)\/away$/.exec(url.pathname);
+  if (away) { // "Put it away" on Home's note of a friend's check of an older afterwrd
+    await failureAway(env.DB, Number(away[1]));
     return Response.redirect(`${url.origin}/`, 303);
   }
   if (url.pathname === "/_admin/checks/remind-later") { // "Not now" on Home's one reminder to let the site look after itself

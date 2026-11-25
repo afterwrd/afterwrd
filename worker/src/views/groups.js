@@ -34,7 +34,7 @@ export function groupsIndexPage(ctx, { groups, unfinished = [], connected = fals
   <a class="chip primary" href="/groups/new">${raw(icon("groups"))}<span>Start a group</span></a>
 </div>
 <form class="filters" id="join" action="/groups/join" method="get">
-  <input type="search" name="link" placeholder="Got a link to join a group? Paste it here" required autocomplete="off" aria-label="A group's invite link">
+  <input type="search" name="link" placeholder="Paste an invite link" required autocomplete="off" aria-label="A group's invite link">
   <button type="button" class="chip" id="join-paste" hidden>Paste</button>
   <button>Join</button>
 </form>
@@ -368,7 +368,7 @@ ${g.role === "owner" ? html`<p class="meta">You can delete its site now, from <a
 export function groupItemPage(ctx, { membership: g, group: info, item, thread, list, problem }) {
   g.ownerFrom = info.ownerFrom;
   return page(ctx, info.name, html`
-${groupHead(ctx, g, info, "")}
+${groupHead(ctx, g, info, "posts")}
 <div class="feed">${groupItemCard(ctx, g, item, { thread, list, open: true, problem, ownerPerson: ownerPersonOf(info) })}</div>`);
 }
 
@@ -381,7 +381,7 @@ export function groupItemPhotoPage(ctx, data) {
 export function groupItemEventEditPage(ctx, { membership: g, group: info, item, list }) {
   g.ownerFrom = info.ownerFrom;
   return page(ctx, `${info.name}: change the event`, html`
-${groupHead(ctx, g, info, "")}
+${groupHead(ctx, g, info, "posts")}
 <section class="card">
   <h2>Change the event</h2>
   <p class="meta">If you change its name, time or place, everyone going, or who might, is told. Its times are in
@@ -405,9 +405,8 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
   const friendship = (m) => {
     if (!m.from || m.waiting || m.from === ctx.url.origin) return "";
     const c = friends.find((f) => f.origin === m.from);
-    if (c?.approved_at) {
-      return html`<span class="friendship">${c.reached_at ? html`<a class="chip" href="/friend/${c.id}/posts">Friends</a>` : html`<span class="meta">Asked</span>`}</span>`;
-    }
+    // Friends already: their name leads to their posts (below), so no button.
+    if (c?.approved_at) return c.reached_at ? "" : html`<span class="friendship meta">Asked</span>`;
     if (c?.invited_as) return html`<span class="friendship"><a class="chip primary" href="/friend">Asking to be friends</a></span>`;
     if (c) {
       return html`<form method="post" class="friendship"><button class="chip primary"
@@ -417,14 +416,21 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
       <input type="hidden" name="origin" value="${m.from}"><input type="hidden" name="group" value="${g.id}">
       <input type="hidden" name="back" value="${here}"><button class="chip">Ask to be friends</button></form>`;
   };
-  const person = (m, actions) => html`<li class="card member" data-from="${m.from ?? ""}">
-    ${faceFor(ctx, m.from, m.name, m.id ?? 0)}
-    <span class="what"><strong>${m.name}</strong>${m.from && html`<span class="meta">${host(m.from)}</span>`}${whoTags(m)}</span>
-    ${ROLE_NAMES[m.role] && html`<span class="badge as-written">${ROLE_NAMES[m.role]}</span>`}
-    ${friendship(m)}
-    ${actions}
-    ${m.person && m.from !== ctx.url.origin && m.role !== "owner" && blockButton({ person: m.person, name: m.name, back: here, look: "chip" })}
+  const friendOf = (m) => m.from && friends.find((f) => f.origin === m.from && f.approved_at && f.reached_at);
+  // Who they are on one line (face, name, role), then everything you can do about them on the next.
+  const person = (m, actions) => {
+    const friend = friendOf(m);
+    const doing = [friendship(m), actions,
+      m.person && m.from !== ctx.url.origin && m.role !== "owner" && blockButton({ person: m.person, name: m.name, back: here, look: "chip danger" })].filter(Boolean);
+    return html`<li class="card member" data-from="${m.from ?? ""}">
+    <div class="member-top">
+      ${faceFor(ctx, m.from, m.name, m.id ?? 0)}
+      <span class="what">${friend ? html`<a href="/friend/${friend.id}/posts"><strong>${m.name}</strong></a>` : html`<strong>${m.name}</strong>`}${m.from && html`<span class="meta">${host(m.from)}</span>`}${whoTags(m)}</span>
+      ${ROLE_NAMES[m.role] && html`<span class="badge as-written">${ROLE_NAMES[m.role]}</span>`}
+    </div>
+    ${doing.length > 0 && html`<div class="actions-row">${doing}</div>`}
   </li>`;
+  };
   // Buttons for an admin: what they can do about someone (only the owner deals with admins).
   const choices = (m) => {
     if (!runs(g) || shut || m.id === null || m.role === "owner" || m.from === ctx.url.origin) return [];
@@ -436,11 +442,9 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
   const SIGNED = { approve: ["approve"], decline: ["remove"], remove: ["remove"], admin: ["role", "admin"], member: ["role", "member"] };
   const decide = (m) => {
     const list = m.join ? choices(m) : [];
-    return list.length > 0 && html`<div class="actions-row">
-      ${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : ""}" data-group-record="${SIGNED[action][0]}"
+    return list.length > 0 && html`${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : action === "remove" ? " danger" : ""}" data-group-record="${SIGNED[action][0]}"
         data-group="${g.id}" data-about="${m.join}" ${SIGNED[action][1] ? raw(`data-role="${SIGNED[action][1]}"`) : ""}
-        ${action === "remove" && raw(`data-ask="Remove them from the group? What they posted stays." data-ask-ok="Remove"`)}>${label}</button>`)}
-    </div>`;
+        ${action === "remove" && raw(`data-ask="Remove them from the group? What they posted stays." data-ask-ok="Remove"`)}>${label}</button>`)}`;
   };
   const waiting = members.filter((m) => m.waiting);
   const inGroup = members.filter((m) => !m.waiting);
@@ -491,7 +495,7 @@ ${owner && !shut ? html`<section class="card" id="close">
   but nothing new can be posted, said or answered; then it goes, for everyone, and you can delete its site. This can't be
   undone.</p>
   <p id="error" role="alert"></p>
-  <div class="actions-row"><button class="chip" data-group-record="close" data-group="${g.id}"
+  <div class="actions-row"><button class="chip danger" data-group-record="close" data-group="${g.id}"
     data-ask="Close this group for everyone? It goes 30 days from now. This can't be undone." data-ask-ok="Close it">Close the group</button></div>
 </section>` : owner && gone ? html`<section class="card" id="delete">
   <h2>Delete the group's site</h2>
@@ -499,12 +503,14 @@ ${owner && !shut ? html`<section class="card" id="close">
   ${g.script ? connectField(connected, "to delete the group's site", `/groups/${g.id}/members`) : ""}
   ${deleteCommand && html`<p class="meta" id="delete-command">Its site stays on your server, empty, until you remove it there:
     <code>${deleteCommand}</code></p>`}
-  <div class="actions-row"><button class="chip" id="delete-go">Delete the group's site</button></div>
+  <div class="actions-row"><button class="chip danger" id="delete-go">Delete the group's site</button></div>
   <ol id="log"></ol>
   <p id="error" role="alert"></p>
 </section>` : !owner && gone ? html`<form method="post" action="/_groups/${g.id}/forget"><button class="chip">Take it off your list</button></form>`
-  : !owner && !shut ? html`<p id="error" role="alert"></p><div class="actions-row"><button class="chip" data-group-record="leave" data-group="${g.id}"
-  data-ask="Leave this group? What you posted in it stays there." data-ask-ok="Leave">Leave the group</button></div>` : ""}
+  : !owner && !shut ? html`<section class="card" id="leave"><h2>Leave the group</h2>
+  <p class="meta">What you posted in it stays there.</p>
+  <p id="error" role="alert"></p><div class="actions-row"><button class="chip danger" data-group-record="leave" data-group="${g.id}"
+  data-ask="Leave this group? What you posted in it stays there." data-ask-ok="Leave">Leave the group</button></div></section>` : ""}
 <script nonce="${nonce()}">${raw(STEP_SCRIPT)}
   const linkUrl = document.getElementById("link-url");
   document.getElementById("make")?.addEventListener("click", async () => {

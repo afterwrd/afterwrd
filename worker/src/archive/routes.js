@@ -546,6 +546,11 @@ async function photo(ctx, params, id) {
   // afterwrd 2: a photo in a signed post (items.js) is an item of its own, with its own signed comments, shown with its
   // post; opened from the post, it pages through the post's photos, and ✕ goes back there.
   const item = m.item_id ? await photoItem(ctx.env, m.id) : null;
+  // A post with one photo: its photo's page is the post's, with the post's comments (as Facebook does).
+  if (item && item.total === 1) {
+    const onPost = await itemPost(ctx, params, item.post.id);
+    if (onPost) item.postThread = { thread: onPost.thread, list: onPost.list };
+  }
   if (item) {
     const inItem = params.get("in") === "post";
     const back = inItem ? (params.get("back") ? safeNext(params.get("back"), ctx.url) : `/posts/${item.post.id}`) : null;
@@ -685,7 +690,10 @@ async function friendItemPhoto(ctx, params, connectionId, id, index) {
   const at = Number(index);
   if (!item || !(at >= 1 && at <= item.photos.length) || !item.photos[at - 1]?.item) return null;
   const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/#fi${connection.id}-${id}`;
-  return { item, index: at, back, ...(await friendComments(ctx, connection, item.photos[at - 1].item, item.author)) };
+  // A post with one photo: its photo's page is the post's, with the post's comments (as Facebook does).
+  const onPost = item.photos.length === 1 ? await friendComments(ctx, connection, id, item.author) : null;
+  return { item, index: at, back, ...(await friendComments(ctx, connection, item.photos[at - 1].item, item.author)),
+    ...(onPost && { postThread: onPost.thread && { thread: onPost.thread, list: onPost.list }, postProblem: onPost.problem }) };
 }
 
 /** One of the owner's own signed posts (afterwrd 2: items.js), with its comments. */
@@ -816,6 +824,8 @@ async function home(ctx, params) {
   ]);
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
+  // Home's line about friends' sites (views/home.js friendsStatus), if the owner put it away as it is now.
+  const statusAway = String((await first(db, "SELECT value FROM settings WHERE key = 'friends_status_away'"))?.value ?? "");
   // Posts from afterwrd 1 still to come over as signed items: this browser brings them (before.js, ui/bringover.js).
   // Until when (10f): what hasn't come over by then is left behind; and the owner's groups from before are offered here
   // until then, on their own pages after.
@@ -837,11 +847,11 @@ async function home(ctx, params) {
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver, statusAway };
   }
   return {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
-    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver,
+    newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver, statusAway,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or
@@ -1180,7 +1190,10 @@ async function groupItemPost(ctx, params, id, itemId, photo = null) {
       const back = params.get("back") ? safeNext(params.get("back"), ctx.url) : `/groups/${g.id}#gi-${itemId}`;
       const { admins: _, ...photoComments } = await groupComments(ctx, g, item.photos[at - 1].item, item.author, info?.people);
       void _;
-      return { group: info, item, index: at, back, ...photoComments };
+      // A post with one photo: its photo's page is the post's, with the post's comments (as Facebook does).
+      const onPost = item.photos.length === 1 ? await groupComments(ctx, g, itemId, item.author, info?.people) : null;
+      return { group: info, item, index: at, back, ...photoComments,
+        ...(onPost && { postThread: onPost.thread && { thread: onPost.thread, list: onPost.list }, postProblem: onPost.problem }) };
     }
     const shown = await groupComments(ctx, g, itemId, item.author, info?.people);
     // A poll counted again from its checked list, as a friend's is (friendItemPost).

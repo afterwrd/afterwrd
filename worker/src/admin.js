@@ -57,6 +57,15 @@ export async function handleAdmin(request, env, url, owner) {
     await forgetDeviceById(env, forget[1]);
     return Response.redirect(`${url.origin}/_admin`, 303);
   }
+  // "Put it away" on Home's line about friends' sites not answering or not on afterwrd 2 yet: away until that changes.
+  if (url.pathname === "/_admin/notices/friends-away") {
+    const fp = String((await request.formData().catch(() => null))?.get("fp") ?? "");
+    if (/^[mu]\d{1,12}(,[mu]\d{1,12}){0,999}$/.test(fp)) {
+      await env.DB.prepare("INSERT INTO settings (key, value) VALUES ('friends_status_away', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+        .bind(fp).run();
+    }
+    return Response.redirect(`${url.origin}/`, 303);
+  }
   // What the owner sent elsewhere (sentchecks.js): stop sending a delete again; clear "signed as you".
   if (url.pathname === "/_admin/sent/stop" || url.pathname === "/_admin/notices/dismiss") return handleSentAdmin(request, env, url);
   // Blocking someone, and unblocking (blocks.js).

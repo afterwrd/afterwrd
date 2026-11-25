@@ -300,15 +300,26 @@ export async function receiveCheckFailed(env, url, peer, body) {
 }
 
 /**
- * The newest friend's check of this site that found something, if no friend's check since has passed:
- * {name, version, checked_at, problems: [words]}, or null. For Home and the Update page.
+ * The newest friend's check of this site that found something, if no friend's check since has passed, and the owner
+ * hasn't put it away: {id, name, version, checked_at, problems: [words], stale}, or null. For Home and the Update page.
+ * `stale`: it checked an older afterwrd than this site runs now (it'll be checked again), so it may be put away.
  */
 export async function lastFailure(db) {
-  const row = await db.prepare(`SELECT name, version, checked_at, problems FROM checked c WHERE problems IS NOT NULL
+  const row = await db.prepare(`SELECT id, name, version, checked_at, problems FROM checked c WHERE problems IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM checked p WHERE p.problems IS NULL AND p.checked_at > c.checked_at
       AND (p.connection_id = c.connection_id OR p.connection_id IS NULL))
+    AND c.id > COALESCE((SELECT CAST(value AS INTEGER) FROM settings WHERE key = 'check_failure_away'), 0)
     ORDER BY id DESC LIMIT 1`).first();
-  return row ? { ...row, problems: JSON.parse(row.problems) } : null;
+  return row ? { ...row, problems: JSON.parse(row.problems), stale: Boolean(row.version) && row.version !== pkg.version } : null;
+}
+
+/** "Put it away" on Home's note of a friend's check of an older afterwrd (only that: a current one stays until passed). */
+export async function failureAway(db, id) {
+  const last = await lastFailure(db);
+  if (!last?.stale || last.id !== id) return false;
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('check_failure_away', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
+    .bind(String(id)).run();
+  return true;
 }
 
 // --- the checking site --------------------------------------------------------------------------------------------

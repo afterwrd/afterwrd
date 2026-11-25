@@ -48,10 +48,7 @@ export function connectionsPage({ friends: connections, me = null }) {
 
 <h2>Invite someone</h2>
 <p class="meta">Send a friend link to someone, whether or not they have an afterwrd site yet: if they haven't, it shows
-them how to set one up first. Once you're friends, you'll each see the other's new posts on <a href="/">Home</a>, and
-can read each other's posts and photos (everything you've published) on your own site. Your comments are kept on
-their site. Removing a friend ends all of it at once.</p>
-
+them how to set one up first.</p>
 <div class="actions-row">
   <button class="chip primary" id="make">Make a friend link</button>
 </div>
@@ -66,15 +63,15 @@ their site. Removing a friend ends all of it at once.</p>
   <button class="chip" id="share" hidden>Share…</button>
 </section>
 
-${connections.length ? `<table class="numbers">
-  <thead><tr><th>Friend</th><th>Site</th><th>Since</th><th></th></tr></thead>
-  <tbody>${connections.map((c) => `<tr>
-    <th><a href="/friend/${c.id}/posts">${escape(c.name)}</a></th>
-    <td><a href="${escape(c.origin)}" target="_blank" rel="noopener noreferrer">${escape(host(c.origin))}</a></td>
-    <td>${day(c.connected_at)}</td>
-    <td><button class="chip" data-disconnect="${c.id}" data-name="${escape(c.name)}">Remove friend</button></td>
-  </tr>`).join("")}</tbody>
-</table>` : `<p class="empty">You're not connected with anyone yet.</p>`}`, `${POST_SCRIPT}
+<h2>Your friends</h2>
+<p class="meta">Once you're friends, you'll each see the other's new posts on <a href="/">Home</a>, and can read each
+other's posts and photos (everything you've published) on your own site. Your comments are kept on their site.
+Removing a friend ends all of it at once.</p>
+${connections.length ? `<ul class="member-list friend-rows">${connections.map((c) => `<li class="card member">
+    <span class="what"><a href="/friend/${c.id}/posts"><strong>${escape(c.name)}</strong></a>
+      <span class="meta"><a href="${escape(c.origin)}" target="_blank" rel="noopener noreferrer">${escape(host(c.origin))}</a> · since ${day(c.connected_at)}</span></span>
+    <button class="chip danger" data-disconnect="${c.id}" data-name="${escape(c.name)}">Remove friend</button>
+  </li>`).join("")}</ul>` : `<p class="empty">You're not connected with anyone yet.</p>`}`, `${POST_SCRIPT}
   // Paste in one tap where the browser allows reading what was copied (it may ask first).
   const pasteClip = document.getElementById("paste-clip");
   if (navigator.clipboard?.readText) {

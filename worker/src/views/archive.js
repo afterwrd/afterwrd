@@ -4,7 +4,7 @@
 // the page's frame (routes.js frame(): who's signed in, the request URL, their picture, the published sections and the
 // menu's counts), and the data its loader gathered. Views only draw: they read nothing and change nothing.
 import { nonce } from "../nonce.js";
-import { itemCard, itemThread, photoDelete } from "./items.js";
+import { fromPost, itemCard, photoComments, photoDelete, postWords } from "./items.js";
 import {
   dateRange, EMOJI, fmtAgo, fmtDate, fmtDatetime, linkify, mediaUrl, number, safeUrl, summary, thumbUrl } from "./format.js";
 
@@ -101,7 +101,7 @@ function profileHeader(ctx) {
     ${profile ? html`<a class="avatar" href="/photos/${profile.id}"><img src="/files/${profile.thumb_hash ?? profile.hash}" alt="Profile picture"></a>`
       : html`<a class="avatar empty" href="/_admin/photos/add?for=profile" title="Add a profile picture" aria-label="Add a profile picture">+</a>`}
     <div><p class="name">${ctx.me.name}</p>
-      ${profile && html`<a class="meta" href="/_admin/photos/add?for=profile">Change picture</a>`}</div>
+      ${profile && html`<a class="chip" href="/_admin/photos/add?for=profile">Change picture</a>`}</div>
   </div>
 </section>`;
 }
@@ -269,6 +269,7 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
     <time class="when">${fmtDatetime(m.taken_at || m.created_at)}</time>
 
     ${m.description && !(post && post.text === m.description) && html`<div class="caption">${linkify(m.description)}</div>`}
+    ${postWords(itemPost, photoItem?.postThread)}
 
     <dl class="details">
       ${m.taken_at && m.taken_at !== m.created_at && html`<dt>Taken</dt><dd>${fmtDatetime(m.taken_at)}</dd>`}
@@ -279,8 +280,9 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
         <dd><a href="https://www.openstreetmap.org/?mlat=${m.latitude}&amp;mlon=${m.longitude}#map=15/${m.latitude}/${m.longitude}" target="_blank" rel="noopener noreferrer">View on map ↗</a></dd>`}
     </dl>
 
-    ${m.hash && html`<div class="photo-tools">
-      ${m.kind === "photo" && ["profile", "cover"].map((role) => html`<form method="post" action="/_admin/profile">
+    <div class="photo-tools">
+      <a class="chip" href="${mediaUrl(m)}" target="_blank">Open original ↗</a>
+      ${m.hash && m.kind === "photo" && ["profile", "cover"].map((role) => html`<form method="post" action="/_admin/profile">
         <input type="hidden" name="role" value="${role}"><input type="hidden" name="hash" value="${m.hash}">
         <input type="hidden" name="back" value="${ctx.url.pathname}">
         <button class="chip">${role === "profile" ? "Make profile picture" : "Make cover"}</button>
@@ -288,14 +290,12 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
       ${m.source === "afterwrd" && !photoItem && html`<form method="post" action="/_admin/photos/${m.id}/delete"
         data-confirm="Delete this photo and its comments? This can’t be undone." data-confirm-ok="Delete"><button class="chip danger">Delete photo</button></form>`}
       ${photoItem && photoDelete(photoItem, itemPost)}
-    </div>`}
+    </div>
     ${key && html`<h2>Comments</h2>${thread(ctx, key, comments, { region: true })}`}
-    ${photoItem && html`<h2>Comments</h2>${itemThread(ctx, photoItem.photo, photoItem.thread, photoItem.list, { region: true })}`}
+    ${photoItem && photoComments(ctx, { post: itemPost, photo: photoItem.photo, thread: photoItem.thread, list: photoItem.list, postThread: photoItem.postThread })}
     ${post && html`<h2>Posted with</h2>${postCard(ctx, post)}`}
-    ${itemPost && html`<h2>Posted with</h2>${itemCard(ctx, itemPost)}`}
+    ${itemPost && !photoItem?.postThread && fromPost(`/posts/${itemPost.id}`, "your", itemPost.text)}
     ${comment && html`<h2>Attached to your comment</h2>${commentCard(ctx, comment)}`}
-
-    <p class="original"><a href="${mediaUrl(m)}" target="_blank">Open original ↗</a></p>
   </aside>
 </main>
 

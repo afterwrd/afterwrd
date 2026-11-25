@@ -77,10 +77,10 @@ export function edited(item) {
  * shows while it's the page's #target, so both work without scripts; ui.js closes the menu on a tap elsewhere.
  * `items` are menuEdit / menuDelete entries (false ones left out); nothing at all if there are none.
  */
-export function moreMenu(items) {
+export function moreMenu(items, label = "Edit or delete") {
   const shown = items.filter(Boolean);
   if (!shown.length) return "";
-  return html`<details class="more"><summary aria-label="Edit or delete" title="Edit or delete">${raw(icon("more"))}</summary>
+  return html`<details class="more"><summary aria-label="${label}" title="${label}">${raw(icon("more"))}</summary>
   <div class="menu">${shown}</div></details>`;
 }
 export const menuEdit = (id) => html`<a href="#${id}">Edit</a>`;

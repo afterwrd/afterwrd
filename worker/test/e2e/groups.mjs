@@ -285,10 +285,10 @@ await bob.goto(`${B}/groups/${bobGroup}`);
 await Promise.all([bob.waitForNavigation(), bob.click(`#gi-${bobPost} .collage a.tile:nth-of-type(2)`)]);
 const groupInPost = await bob.evaluate(() => ({ counter: document.querySelector(".counter")?.textContent, close: document.getElementById("close").getAttribute("href"),
   prev: document.getElementById("prev")?.getAttribute("href"), next: Boolean(document.getElementById("next")),
-  shown: document.querySelector(".stage img")?.naturalWidth > 0, post: document.querySelector(".info article.in-group .text")?.textContent }));
+  shown: document.querySelector(".stage img")?.naturalWidth > 0, post: document.querySelector(".info .from-post a")?.textContent }));
 check("a photo opened from a group's post is among that post's photos", groupInPost.counter === "2 / 2" && !groupInPost.next
   && groupInPost.prev?.startsWith(`/groups/${bobGroup}/posts/${bobPost}/photos/1`) && groupInPost.prev.includes("back=")
-  && groupInPost.post === "Started the first book", JSON.stringify(groupInPost));
+  && groupInPost.post?.includes("Started the first book"), JSON.stringify(groupInPost));
 check("…and ✕ goes back to the post where it was", groupInPost.close === `/groups/${bobGroup}#gi-${bobPost}`, groupInPost.close);
 await Promise.all([bob.waitForNavigation(), bob.click("#prev")]);
 check("…and stays with the post going back a photo", (await bob.$eval(".counter", (c) => c.textContent)) === "1 / 2"
@@ -810,7 +810,8 @@ await Promise.all([cat.waitForNavigation(), cat.click("form.notice.asking button
 check("Cat approves: they're friends", n(stateC, `connections WHERE origin = '${B}' AND approved_at IS NOT NULL`) === 1);
 await bob.goto(`${B}/`);
 await bob.goto(`${B}/groups/${bobGroup}/members`);
-check("…and Bob's group page says so", (await friendship(bob, C)) === "Friends");
+check("…and Bob's group page says so: Cat's name leads to her posts, with no button", (await friendship(bob, C)) === ""
+  && /^\/friend\/\d+\/posts$/.test(await bob.$eval(`li[data-from="${C}"] .what a`, (a) => a.getAttribute("href")).catch(() => "")));
 
 await ann.goto(`${A}/groups/${annGroup}/members`);
 await ask(ann, C);
