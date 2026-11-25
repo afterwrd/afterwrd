@@ -17,6 +17,7 @@ can be published with credit to you, if you'd like.
 - A person's afterwrd site, and a group's site (the code in `worker/`).
 - The installer and the pages at afterwrd.app (`worker/central/`, which serves the pages in `worker/installer/`).
 - How sites talk to each other ([PROTOCOL.md](PROTOCOL.md)).
+- The self-hosted image, built by GitHub from the same code (`worker/selfhost/`), and how it's put together.
 
 Problems in Cloudflare itself, or in someone's Cloudflare account settings, are outside it, though if afterwrd could
 do something to protect people better, that's worth hearing.

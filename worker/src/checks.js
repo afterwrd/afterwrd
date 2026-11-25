@@ -56,6 +56,9 @@ const AUDIT_PAGE = 500;
 const OTHER_WORKERS = 8; // other Workers looked at (two calls each, within the free plan's 50 a request)
 // The bindings afterwrd gives a personal site (src/deploy.js deployVersion), and the secrets it may have.
 const BINDINGS = ["assets ASSETS", "d1 DB", "durable_object_namespace MEDIA MediaStore", "durable_object_namespace OUTBOX Outbox", "version_metadata VERSION"];
+// The D1 database the site used before it moved into its own object (0.57.0: sitecopy.js). Allowed, but no longer
+// needed: a site without it isn't missing anything, so a later release can stop connecting it.
+const NO_LONGER_NEEDED = new Set(["d1 DB"]);
 const SECRETS = new Set(["SETUP_CODE", "UPDATE_TOKEN", "OUTBOX_KEY"]); // OUTBOX_KEY: the key calls to its objects carry (sqlite.js)
 
 // --- the owner's side -------------------------------------------------------------------------------------------
@@ -476,7 +479,7 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
       const have = (detail.resources?.bindings ?? []).map((b) => b?.type === "durable_object_namespace"
         ? `${b.type} ${b.name} ${b.class_name}` : `${text(b?.type, 40)} ${text(b?.name, 60)}`);
       const extra = have.filter((b) => !BINDINGS.includes(b) && !(b.startsWith("secret_text ") && SECRETS.has(b.slice(12))));
-      const missing = BINDINGS.filter((b) => !have.includes(b));
+      const missing = BINDINGS.filter((b) => !have.includes(b) && !NO_LONGER_NEEDED.has(b));
       // Without its version piece a site can't say which upload it is, so the comparison can't be made: one plain
       // problem, rather than that and a mismatch that only follows from it.
       const noVersion = missing.includes("version_metadata VERSION") && !said?.id;
