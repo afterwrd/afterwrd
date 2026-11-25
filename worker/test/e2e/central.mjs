@@ -329,7 +329,8 @@ check("the Connect page's one script carries the answer's nonce, with the sign-i
 check("a folder without its last slash goes to the one with it", (await sitePath("/how-it-works")).headers.get("location")?.endsWith("/how-it-works/"));
 const help = await sitePath("/help/");
 const helpText = await help.text();
-check("afterwrd.app has Getting help, with the same words as every site's, filled in", help.status === 200 && helpText.includes("116 123")
+check("afterwrd.app has Help, with the same words as every site's, filled in", help.status === 200 && helpText.includes("116 123")
+  && helpText.includes("How afterwrd works") && helpText.includes("hello@afterwrd.app")
   && helpText.includes("Revenge Porn Helpline") && helpText.includes("9.9.9") && !/__[A-Z_]+__/.test(helpText), `${help.status}`);
 check("…linked from the install page", homeText.includes('href="/help/"'));
 check("anything else isn't there", (await sitePath("/wp-login.php")).status === 404);

@@ -425,11 +425,12 @@ function friendActivityItem(c) {
  * raised it, saying what became of it, or, if nobody's looked, where else to turn.
  */
 function reportItem(c, href, label) {
-  const late = c.kind === "reported" && String(c.text ?? "").includes("Getting help");
+  // (Notices from before Help said "Getting help".)
+  const late = c.kind === "reported" && /Staying safe|Getting help/.test(String(c.text ?? ""));
   return html`<article class="card activity${c.isNew ? " new" : ""}">
   <div class="body">
     <header>
-      <span class="what"><strong>${c.friend}</strong>: ${c.text} <a href="${late ? "/help" : href}">${late ? "Getting help" : label}</a></span>
+      <span class="what"><strong>${c.friend}</strong>: ${c.text} <a href="${late ? "/help#safe" : href}">${late ? "Staying safe" : label}</a></span>
       ${c.isNew && raw('<span class="badge badge-new">New</span>')}
       <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
     </header>

@@ -11,6 +11,7 @@ import { askedBecause, friendFace, introductionCard } from "./friends.js";
 import { gone, waitingFor } from "../friendcopies.js";
 import { MEMORIES, page } from "./layout.js";
 import { helpBody } from "./help.js";
+import pkg from "../../package.json";
 import { blockButton, composer, postCard } from "./parts.js";
 
 // --- Home and Memories ----------------------------------------------------------------------------------------------
@@ -236,11 +237,11 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting
 }
 
 /** Memories: the sections of the Facebook download that were published, and what happened on this day. */
-/** Getting help (views/help.js, docs/safety-plan.md 3.5): behind the owner's picture, Getting help. */
+/** Help (views/help.js): how afterwrd works, staying safe, and something not working. Behind the owner's picture. */
 export function helpPage(ctx) {
-  return page(ctx, "Getting help", html`<div class="help">
-<h1>Getting help</h1>
-${helpBody()}
+  return page(ctx, "Help", html`<div class="help">
+<h1>Help</h1>
+${helpBody({ version: pkg.version })}
 </div>`);
 }
 

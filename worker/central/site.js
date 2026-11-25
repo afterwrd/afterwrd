@@ -19,7 +19,7 @@ import { helpBody } from "../src/views/help.js";
 
 export const SITE_HOST = pkg.afterwrd.site;
 const REPO_PAGE = `https://github.com/${pkg.afterwrd.releases}`;
-// /help/: the same words as every site's Getting help (src/views/help.js), put in when it's served.
+// /help/: the same words as every site's Help (src/views/help.js), put in when it's served.
 const PAGES = { "/": INSTALL, "/connect/": CONNECT, "/how-it-works/": HOW, "/compared/": COMPARED, "/check/": CHECK,
   "/help/": HELP.replace("__HELP__", () => String(helpBody())) };
 

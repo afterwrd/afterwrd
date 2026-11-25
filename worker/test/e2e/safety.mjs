@@ -382,14 +382,15 @@ await askToJoin();
 await Promise.all([bob.waitForNavigation({ timeout: 30_000 }), bob.click("#go")]);
 check("…and now he can", await waitFor(() => n(stateG, `group_members WHERE identity = '${bobPerson}' AND approved_at IS NULL`) === 1));
 
-// --- Getting help (step 3) ----------------------------------------------------------------------------------------------
+// --- Help, with Staying safe (step 3) ----------------------------------------------------------------------------------------------
 
 await ann.goto(`${A}/`);
 await ann.click("details.me > summary");
 await Promise.all([ann.waitForNavigation(), ann.click('details.me .menu a[href="/help"]')]);
 const helpWords = await text(ann);
 await ann.screenshot({ path: `${OUT}/help.png`, fullPage: true });
-check("Getting help is behind Ann's picture, with where to turn", helpWords.includes("Getting help") && helpWords.includes("tell the police too")
+check("Help is behind Ann's picture: how it works, where to turn, and reporting a problem", helpWords.includes("How afterwrd works")
+  && helpWords.includes("Staying safe") && helpWords.includes("hello@afterwrd.app") && helpWords.includes("This site runs afterwrd") && helpWords.includes("tell the police too")
   && helpWords.includes("116 123") && helpWords.includes("0345 6000 459") && helpWords.includes("0300 323 0169"));
 check("…and says who looks after what on afterwrd", helpWords.includes("afterwrd has no company behind it"));
 

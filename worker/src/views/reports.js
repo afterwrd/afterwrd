@@ -21,7 +21,7 @@ export function reportFormPage(ctx, { where, place, to, placeName, item, about, 
     <legend>What's wrong?</legend>
     ${Object.entries(REASONS).map(([key, label]) => html`<label><input type="radio" name="reason" value="${key}" required> ${label}</label>`)}
   </fieldset>
-  <p class="meta">If it might be illegal, you can report it outside afterwrd too: <a href="/help">Getting help</a>.</p>
+  <p class="meta">If it might be illegal, you can report it outside afterwrd too: <a href="/help#safe">Staying safe</a>, under Help.</p>
   <label>Anything to add? <span class="meta">(if you like)</span>
     <textarea name="note" rows="3" maxlength="${MAX_NOTE}"></textarea></label>
   <label><input type="checkbox" name="named" value="1" checked> Let ${them} see it was me</label>

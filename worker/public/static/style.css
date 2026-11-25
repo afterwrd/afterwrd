@@ -932,7 +932,9 @@ details.more .menu a:hover, details.more .menu button:hover { background: var(--
 .member .what .from { display: block; font-size: 0.72rem; color: var(--muted); }
 .member .what .from.warn { color: var(--danger); font-weight: 700; }
 
-/* Getting help (views/help.js) */
+/* Help (views/help.js) */
+.help nav.contents { margin: 0 0 1rem; }
+.help h3 { font-size: 1.02rem; margin: 1.2rem 0 0.3rem; }
 .help .lede { color: var(--muted); font-size: 1.05rem; }
 .help section { margin-top: 1.6rem; }
 .help ul { padding-left: 1.2rem; }

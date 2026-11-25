@@ -1,5 +1,6 @@
-// Getting help (docs/safety-plan.md 3.5): where to turn when something's wrong that afterwrd can't put right. The same
-// words on every site (/help: views/home.js helpPage) and on afterwrd.app (/help/: central/site.js), from here.
+// Help (/help on every site: views/home.js helpPage; /help/ on afterwrd.app: central/site.js), the same words in both,
+// from here: how afterwrd works, staying safe (docs/safety-plan.md 3.5: where to turn when something's wrong that afterwrd
+// can't put right), and what to do when something isn't working.
 // Each organisation's name, link, numbers and hours were checked against its own website on CHECKED. Check them again
 // there before changing any, and move CHECKED on. (No police numbers or links: people know how to reach the police.)
 import { html } from "./html.js";
@@ -9,14 +10,56 @@ export const CHECKED = "25 November 2026";
 /** A phone number, to call with a tap on a phone. */
 const tel = (number) => html`<a class="tel" href="tel:${number.replace(/\s/g, "")}"><strong>${number}</strong></a>`;
 
-/** The page's words, after its heading: the same on a site and on afterwrd.app. */
-export const helpBody = () => html`<p class="lede">afterwrd has no company behind it that reads posts or takes them down. Each person
-looks after their own posts, and each group's admins look after their group. When something's wrong that they can't or
-won't put right, or that's too serious to leave to them, these are the people to turn to. They're in the UK; elsewhere,
-your local police and services.</p>
+/**
+ * The page's words, after its heading: the same on a site and on afterwrd.app. `version`: the site's, to say in
+ * "Something not working?" (afterwrd.app's own pages say theirs in their footer).
+ */
+export const helpBody = ({ version = null } = {}) => html`<nav class="contents" aria-label="On this page">
+  <a href="#how">How afterwrd works</a> · <a href="#safe">Staying safe</a> · <a href="#bugs">Something not working?</a>
+</nav>
 
+<section id="how">
+  <h2>How afterwrd works</h2>
+  <h3>Your site</h3>
+  <p>Your afterwrd site is yours: it runs in your own Cloudflare account (or on your own server), and there's no company in
+  the middle. Only you sign in to it, with a passkey: your face, fingerprint or phone PIN, nothing to remember. Your friends
+  see your things from their own sites, never by signing in to yours.</p>
+  <h3>Friends</h3>
+  <p>Go to <strong>Friends</strong>, then <strong>Add a friend</strong>: make a link to send someone, or paste a link a friend
+  sent you. Nothing is shared until you've approved them. Once you're friends, you can introduce friends to each other.</p>
+  <h3>Posts and comments</h3>
+  <p>Write a post on Home or Your profile, with photos if you like: all your friends see it, and nobody else. You can change
+  what you wrote for 15 minutes, until someone replies, and delete it any time. Comment on friends' posts from your own Home.
+  On your own posts, the ⌄ menu lets you remove anyone's comment, or turn comments off.</p>
+  <h3>Groups</h3>
+  <p>Start a group from <strong>Groups</strong>, or join one with an invite link someone sends you. Its admins decide who's in,
+  and can write the group's rules. Each group has a site of its own, in its owner's Cloudflare account.</p>
+  <h3>Events</h3>
+  <p>Make an event from <strong>Events</strong> and invite the friends you choose; only they see it, and say whether they're
+  going. Groups can have events too, for everyone in them.</p>
+  <h3>Notifications</h3>
+  <p>Replies, mentions, invitations and changes to events show under <strong>Notifications</strong>. Your phone buzzes only for
+  events and when someone mentions you, and only if you've said yes, in <strong>Your devices</strong>. afterwrd never nags.</p>
+  <h3>Your devices</h3>
+  <p>Each phone or computer you sign in on is listed in <strong>Your devices</strong>. What you write is signed by the device
+  you write it on, so nobody else, not even your site's host, can write as you. A new device asks once to <strong>let this
+  browser sign</strong>.</p>
+  <h3>Updates</h3>
+  <p>afterwrd keeps itself up to date if you let it: <strong>Update</strong> (behind your picture) installs only releases signed
+  with afterwrd's own key, a few days after they're out. If you let them, your friends' sites check that yours is running a real release.</p>
+  <h3>Your things are yours</h3>
+  <p><strong>Download everything</strong> gives you all of it, to keep or to bring to another site. Nothing you post is used for
+  anything else, and nobody is shown adverts.</p>
+</section>
+
+<section id="safe">
+  <h2>Staying safe</h2>
+  <p class="lede">afterwrd has no company behind it that reads posts or takes them down. Each person looks after their own
+  posts, and each group's admins look after their group. When something's wrong that they can't or won't put right, or
+  that's too serious to leave to them, these are the people to turn to. They're in the UK; elsewhere, your local police and
+  services.</p>
 <section id="children">
-  <h2>A child at risk</h2>
+  <h3>A child at risk</h3>
   <ul>
     <li><a href="https://www.ceop.police.uk/">CEOP</a>, part of the National Crime Agency, is for children and young people
       worried about sexual abuse online, or about how someone has been talking to them online.</li>
@@ -28,8 +71,8 @@ your local police and services.</p>
   </ul>
 </section>
 
-<section id="images">
-  <h2>Intimate pictures shared without consent</h2>
+  <section id="images">
+  <h3>Intimate pictures shared without consent</h3>
   <ul>
     <li>The <a href="https://revengepornhelpline.org.uk/how-can-we-help/how-to-get-in-touch/">Revenge Porn Helpline</a>
       gives confidential advice to adults in the UK affected by intimate image abuse, including help getting pictures
@@ -41,8 +84,8 @@ your local police and services.</p>
   </ul>
 </section>
 
-<section id="bullying">
-  <h2>Bullying or harassment</h2>
+  <section id="bullying">
+  <h3>Bullying or harassment</h3>
   <ul>
     <li>The <a href="https://www.nationalbullyinghelpline.co.uk/contact.html">National Bullying Helpline</a> gives free,
       confidential advice on bullying of every kind, including online and at work: ${tel("0300 323 0169")}.</li>
@@ -51,21 +94,21 @@ your local police and services.</p>
   </ul>
 </section>
 
-<section id="elsewhere">
-  <h2>Harmful content elsewhere online</h2>
+  <section id="elsewhere">
+  <h3>Harmful content elsewhere online</h3>
   <p><a href="https://reportharmfulcontent.com/">Report Harmful Content</a> helps you report it to the site or app it's on,
   with each one's rules and how to report there. afterwrd has no company to report to: on afterwrd, it's the site's owner
   or the group's admins, or the people on this page.</p>
 </section>
 
-<section id="low">
-  <h2>Feeling low, or worried about someone</h2>
+  <section id="low">
+  <h3>Feeling low, or worried about someone</h3>
   <p><a href="https://www.samaritans.org/how-we-can-help/contact-samaritan/">Samaritans</a> are there to talk to, any time,
   day or night, for free: ${tel("116 123")}. In Welsh: ${tel("0808 164 0123")}.</p>
 </section>
 
-<section id="afterwrd">
-  <h2>On afterwrd itself</h2>
+  <section id="afterwrd">
+  <h3>On afterwrd itself</h3>
   <ul>
     <li>On your own posts, you can remove anyone's comment, or turn comments off.</li>
     <li>Mute someone to stop seeing their posts, and stay friends. Block them to stop hearing from them at all. Neither is
@@ -76,5 +119,21 @@ your local police and services.</p>
     <li>In a group, its admins can remove posts, comments and members, and anyone can leave.</li>
   </ul>
 </section>
+  <p class="meta">Checked against each organisation's own website on ${CHECKED}.</p>
+</section>
 
-<p class="meta">Checked against each organisation's own website on ${CHECKED}.</p>`;
+<section id="bugs">
+  <h2>Something not working?</h2>
+  <ol>
+    <li><strong>Update first.</strong> Many problems are already fixed in a newer release: see <strong>Update</strong>, behind
+      your picture.</li>
+    <li><strong>Tell us.</strong> Email <a href="mailto:hello@afterwrd.app">hello@afterwrd.app</a>, or, if you have a GitHub
+      account, <a href="https://github.com/afterwrd/afterwrd/issues">open an issue</a>. Say what you were doing, what you
+      expected and what happened instead, and which phone or computer and browser you were using. A screenshot helps.
+      ${version ? html`This site runs afterwrd <strong>${version}</strong>.` : html`Your site's version is at the bottom of the menu behind your picture.`}</li>
+    <li>Please don't send passwords, recovery codes or anything private, and don't post other people's names or words in a
+      public issue.</li>
+    <li><strong>A security problem?</strong> Don't post it in public: email <a href="mailto:security@afterwrd.app">security@afterwrd.app</a>
+      instead.</li>
+  </ol>
+</section>`;

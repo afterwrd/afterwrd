@@ -179,7 +179,7 @@ export async function handleGroupItems(request, env, url) {
     const taken = await takeReport(env, { reporter: String(member.identity), reporterName: String(member.name ?? "A member"), body,
       refuse: async (record) => (record.kind !== "comment" && record.kind !== "item" ? "That can't be reported here."
         : (await runners(record.author)).length ? null
-        : "Only whoever wrote this runs the group, so there's nobody else to tell. If it's serious, see Getting help.") });
+        : "Only whoever wrote this runs the group, so there's nobody else to tell. If it's serious, see Staying safe, under Help.") });
     if (taken.error) return json({ error: taken.error }, taken.status);
     const recipients = await runners(taken.author);
     if (recipients.length) await outbox(env).sendNote({ origin: url.origin, kind: "report", item: taken.item, fp: taken.id, recipients });

@@ -18,7 +18,7 @@
 // A report about an admin's own post or comment goes to the others who run the group, never to them.
 //
 // On the reporter's own site: reports_sent, asked about hourly (checkSentReports), with a quiet notice when one's dealt
-// with, and, for "might be illegal" left a few days, where else to turn (Getting help).
+// with, and, for "might be illegal" left a few days, where else to turn (Help: Staying safe).
 import { safeNext } from "./auth.js";
 import { callFriend } from "./calls.js";
 import { listEntries } from "./hosted.js";
@@ -312,7 +312,7 @@ export async function checkSentReports(env, from) {
       if (r.reason === "illegal" && !r.late_told && Number(r.created_at) < at - LATE_SECONDS) {
         await db.prepare("UPDATE reports_sent SET late_told = 1 WHERE id = ?").bind(r.id).run();
         await keepNotice(db, { kind: "reported", fp: `reported-late-${r.id}`, ...where, item: String(r.item), target, actor: whose,
-          text: `${whose === "The admins" ? "The admins haven't" : `${whose} hasn't`} looked at what you raised yet. If it's serious, you can report it outside afterwrd: see Getting help.` });
+          text: `${whose === "The admins" ? "The admins haven't" : `${whose} hasn't`} looked at what you raised yet. If it's serious, you can report it outside afterwrd: see Staying safe, under Help.` });
       }
     }
   }
