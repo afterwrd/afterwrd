@@ -33,7 +33,7 @@ const waitFor = async (test, ms = 20_000) => {
   for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 400))) if (await test()) return true;
   return false;
 };
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 
 /** A page for one person's site, with its own virtual passkey authenticator (and its passkeys, if given). */
 async function pageFor(site, credentials = null) {

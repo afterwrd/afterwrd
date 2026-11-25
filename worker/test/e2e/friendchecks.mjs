@@ -97,7 +97,7 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(8799, "127.0.0.1", r));
 
 // --- the two owners, friends -------------------------------------------------------------------------------------
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 let relay = null;
 async function owner(site, name) {
   const context = await browser.createBrowserContext();

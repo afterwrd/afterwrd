@@ -17,10 +17,10 @@ export const asset = (path) => `${path}?v=${Object.hasOwn(HASHES, path) ? HASHES
 // any module script. (The service worker isn't imported, and keeps its own address.)
 // Prefetch on tap (Chrome, Edge; others ignore it): a link to one of the owner's own pages starts loading when the
 // pointer goes down on it (or rests on it, with a mouse), which saves 100–300 ms. Only pages that just read this site:
-// not Home (it can ask friends' sites whose copies have run out), Events (it asks groups' sites), friends' or groups'
-// pages, Notifications (opening it marks things seen), or anything under /_ (actions, sign-in).
+// not Home (it can ask friends' sites whose copies have run out), Events (it asks groups' sites), friends' or a group's own
+// pages (the list of groups reads only this site), Notifications (opening it marks things seen), or anything under /_ (actions, sign-in).
 const OWN_PAGES = ["/posts", "/posts/*", "/photos", "/photos/*", "/memories", "/friend", "/timeline", "/overview",
-  "/comments", "/likes", "/friends", "/people/*"];
+  "/comments", "/likes", "/friends", "/people/*", "/groups", "/help"];
 const PREFETCH_RULES = JSON.stringify({ prefetch: [{
   where: { and: [{ or: OWN_PAGES.map((page) => ({ href_matches: page })) }, { not: { href_matches: "/*.ics" } }] },
   eagerness: "moderate",
@@ -187,7 +187,7 @@ export const ownerMenu = ({ memories = true, updateWaiting = false } = {}) => [
 // The parts public/static/ui/main.js imports, fetched alongside it rather than after it (a slow phone network would
 // otherwise wait twice before asking first, in place and the rest work). Keep in step with main.js's imports; one
 // missing here still works, just a moment later.
-const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app"];
+const UI_PARTS = ["confirm", "look", "menus", "drafts", "inplace", "sign", "threads", "arriving", "search", "autosubmit", "mentions", "app", "back", "viewer"];
 const UI_PRELOAD = UI_PARTS.map((part) => `<link rel="modulepreload" href="${asset(`/static/ui/${part}.js`)}" integrity="${integrity(`/static/ui/${part}.js`)}">`).join("\n");
 
 /** A name's first letter, for when there's no picture. */

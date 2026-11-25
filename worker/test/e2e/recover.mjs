@@ -62,7 +62,7 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(8799, "127.0.0.1", r));
 
 // --- people: the owner's old phone (still signed in), and the new one ------------------------------------------------
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function device() {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();

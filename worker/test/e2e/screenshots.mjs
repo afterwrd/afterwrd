@@ -21,7 +21,7 @@ const HOSTS = { "localhost:8787": "afterwrd.annm.workers.dev", "localhost:8788":
 const CODE = "local-test-setup-code";
 const GROUP_KEY = "local-test-group-key";
 const [, , , stateB, stateC] = process.argv.slice(2); // the made-up export, photos, then each site's state (run.sh)
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 const step = (what) => console.log(`·  ${what}`);
 
 // --- painted photos: simple landscapes drawn on a canvas, saved as JPEGs ---------------------------------------------

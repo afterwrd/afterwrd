@@ -29,7 +29,7 @@ const waitFor = async (test, ms = 15_000) => {
   return false;
 };
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();

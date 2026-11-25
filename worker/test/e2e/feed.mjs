@@ -26,7 +26,7 @@ const waitFor = async (test, ms = 10_000) => {
   return false;
 };
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
@@ -165,9 +165,9 @@ const mapped = await ann.$eval("script[type=importmap]", (s) => JSON.parse(s.tex
 check("…and the scripts' own imports go by their fingerprints too", /^\/static\/ui\/menus\.js\?v=[0-9a-f]{16}$/.test(mapped), mapped);
 // Prefetch on tap (views/nav.js): the owner's own pages that only read this site.
 const prefetched = await ann.$eval("script[type=speculationrules]", (s) => JSON.parse(s.textContent).prefetch[0].where.and[0].or.map((r) => r.href_matches)).catch(() => []);
-check("Prefetch on tap covers the owner's own pages, not Home, Events, friends', groups' or Notifications",
-  ["/posts/*", "/photos", "/memories"].every((p) => prefetched.includes(p))
-  && !prefetched.some((p) => p === "/" || /^\/(friend\/|groups|events|activity|_)/.test(p)), JSON.stringify(prefetched));
+check("Prefetch on tap covers the owner's own pages and the list of groups, not Home, Events, friends', a group's or Notifications",
+  ["/posts/*", "/photos", "/memories", "/groups"].every((p) => prefetched.includes(p))
+  && !prefetched.some((p) => p === "/" || /^\/(friend\/|groups\/|events|activity|_)/.test(p)), JSON.stringify(prefetched));
 
 // Each sees the other's new posts, and only those.
 let bobFeed = await feedCards(bob);

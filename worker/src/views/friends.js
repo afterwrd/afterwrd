@@ -133,7 +133,7 @@ ${muted.length > 0 && html`<section id="muted">
 <p class="meta">Their posts don't show on Home, and in groups they're folded away. You can still see everything on their page, and their comments. They haven't been told.</p>
 <ul class="friend-list">
   ${muted.map((m) => html`<li class="card"><span class="what"><strong>${m.name}</strong><span class="meta">since ${fmtDate(m.created_at)}</span></span>
-    <form method="post" action="/_admin/mutes/${m.person}/unmute"><input type="hidden" name="back" value="/friend#muted"><button class="chip">Unmute</button></form></li>`)}
+    <form method="post" action="/_admin/mutes/${m.person}/unmute" data-stay><input type="hidden" name="back" value="/friend#muted"><button class="chip">Unmute</button></form></li>`)}
 </ul></section>`}
 
 ${blocked.length > 0 && html`<section id="blocked">
@@ -141,7 +141,7 @@ ${blocked.length > 0 && html`<section id="blocked">
 <p class="meta">You don't see what they write, or hear from them, and they can't ask to be friends. They haven't been told.</p>
 <ul class="friend-list">
   ${blocked.map((b) => html`<li class="card"><span class="what"><strong>${b.name}</strong><span class="meta">since ${fmtDate(b.created_at)}</span></span>
-    <form method="post" action="/_admin/blocks/${b.person}/unblock"><input type="hidden" name="back" value="/friend#blocked"><button class="chip">Unblock</button></form></li>`)}
+    <form method="post" action="/_admin/blocks/${b.person}/unblock" data-stay><input type="hidden" name="back" value="/friend#blocked"><button class="chip">Unblock</button></form></li>`)}
 </ul></section>`}
 
 ${introductions.length > 0 && html`<section id="introductions">
@@ -314,7 +314,7 @@ ${facebook.length > 0 && html`
 
 /** Remove a friend: both sites forget each other (connect.js). `look` is the button's class. */
 function removeFriend(c, look) {
-  return html`<form method="post" action="/_admin/connections/${c.id}/disconnect" class="inline"
+  return html`<form method="post" action="/_admin/connections/${c.id}/disconnect" class="inline" data-stay
     data-confirm="Remove ${c.name} as a friend? You'll stop seeing each other's posts and photos. Comments already made stay where they are."
     data-confirm-ok="Remove"><button class="${look}">Remove friend</button></form>`;
 }

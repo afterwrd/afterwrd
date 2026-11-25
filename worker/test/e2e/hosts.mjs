@@ -34,7 +34,7 @@ const q = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 // --- people, friends, a group ----------------------------------------------------------------------------------------
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();

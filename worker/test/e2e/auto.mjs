@@ -175,7 +175,7 @@ const server = createServer(async (req, res) => {
 await new Promise((r) => server.listen(8799, "127.0.0.1", r));
 
 // --- the owner ---------------------------------------------------------------------------------------------------
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 const context = await browser.createBrowserContext();
 const owner = await context.newPage();
 // These check the site's own answers (a 400, the "being updated" page), which the test browser can't always see when

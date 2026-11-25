@@ -147,7 +147,7 @@ const site = createServer((req, res) => {
 await new Promise((r) => site.listen(8797, "127.0.0.1", r));
 
 // --- a person installing ------------------------------------------------------------------------------------------
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function install(code, { person = "Ann Example", domains = [], account = null, invite = null, rename = null, start = BASE } = {}) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();

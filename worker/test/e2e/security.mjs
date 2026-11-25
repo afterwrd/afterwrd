@@ -16,7 +16,7 @@ const post = (path, body, cookie, origin = BASE) => fetch(BASE + path, { method:
   headers: { Origin: origin, "Content-Type": "application/json", ...(cookie ? { Cookie: `__Host-session=${cookie}` } : {}) },
   body: JSON.stringify(body ?? {}) });
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function person() {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();

@@ -28,7 +28,7 @@ const waitFor = async (test, ms = 20_000) => {
 
 // --- people and friends (as mentions.mjs) -------------------------------------------------------------------------------
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
@@ -219,7 +219,9 @@ async function tell(page, menu, reason, { note = "", named = true } = {}) {
   await page.click(`form.report input[name=reason][value=${reason}]`);
   if (note) await page.type("form.report textarea[name=note]", note);
   if (!named) await page.click("form.report input[name=named]");
-  await Promise.all([page.waitForNavigation(), page.click("form.report button.primary")]);
+  // Sent in place (ui/inplace.js data-stay): back where it was raised, saying thanks; or, refused, why, under the form.
+  await page.click("form.report button.primary");
+  await page.waitForSelector(".notice.said, .form-error", { timeout: 20_000 });
   return text(page);
 }
 const saturday = groupPost("Anyone for Saturday?");

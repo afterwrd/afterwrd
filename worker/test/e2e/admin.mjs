@@ -18,7 +18,7 @@ const errors = [];
 // The main menu, then what's behind the person's picture.
 const navLabels = (page) => page.$$eval("header.site nav.main a, header.site .menu > a", (a) => a.map((x) => x.querySelector("span").textContent.trim()).join(","));
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 
 async function device() {
   const context = await browser.createBrowserContext();

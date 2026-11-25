@@ -479,12 +479,12 @@ ${runs(g) && !shut && removed.length > 0 && html`<section id="removed">
   <h2>Removed</h2>
   <p class="meta">They can't ask to join again, even with an invite link, unless an admin lets them.</p>
   <ul class="member-list">${removed.map((r) => html`<li class="card member"><div class="member-top"><span class="what"><strong>${r.name}</strong></span></div>
-    <div class="actions-row"><form method="post" action="/_groups/${g.id}/unremove"><input type="hidden" name="person" value="${r.person}">
+    <div class="actions-row"><form method="post" action="/_groups/${g.id}/unremove" data-stay><input type="hidden" name="person" value="${r.person}">
       <input type="hidden" name="back" value="${here}#removed"><button class="chip">Let them ask again</button></form></div></li>`)}</ul>
 </section>`}
 ${runs(g) && !shut && html`<section class="card" id="about">
   <h2>Name, description and rules</h2>
-  <form class="stack" method="post" action="/_groups/${g.id}/about">
+  <form class="stack" method="post" action="/_groups/${g.id}/about" data-stay>
     <input name="name" required maxlength="100" value="${name}" aria-label="Group name">
     <textarea name="about" rows="2" maxlength="1000" placeholder="What it's for (optional)" aria-label="What it's for">${info.about ?? ""}</textarea>
     <label>The group's rules <span class="meta">(optional: shown to anyone asking to join, and on the group's pages)</span>
@@ -496,7 +496,7 @@ ${runs(g) && !shut && html`<section class="card" id="about">
   <h2>@here</h2>
   <p class="meta">Writing @here in a post or comment tells everyone in the group, on their phones if they've said yes to
   mentions. A few times a day at most.</p>
-  <form method="post" action="/_groups/${g.id}/here">
+  <form method="post" action="/_groups/${g.id}/here" data-stay>
     <label><input type="checkbox" name="anyone" value="1"${info.hereAnyone && " checked"}> Anyone in the group can use it
       (otherwise only you${g.role === "owner" ? " and the admins" : ", the owner and the other admins"})</label>
     <div class="actions-row"><button class="chip">Save</button></div>

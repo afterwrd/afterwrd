@@ -198,3 +198,60 @@ document.addEventListener("submit", async (e) => {
   if (fresh) focusAgain(fresh, form);
   finished(true);
 });
+
+// Actions that lead back to a page (Mute, Block, Remove friend, Leave it, a group's settings, telling someone): a form
+// marked data-stay is sent from here, and the page it leads to takes this one's place in the page's history rather
+// than adding another copy of it. So back always goes to the page before, never to an out-of-date one. Where it leads
+// back to the page this one was opened from, it goes back there (as it was, scrolled to the same place) and is drawn
+// again. A refusal is said under the form, as for the others. data-said: a line to show on the page it leads to.
+const SAID = "afterwrd-said";
+const STALE = "afterwrd-stale";
+const here = () => location.pathname + location.search;
+const remember = (key, value) => { try { sessionStorage.setItem(key, value); } catch {} };
+const recall = (key) => { try { const v = sessionStorage.getItem(key); sessionStorage.removeItem(key); return v; } catch { return null; } };
+document.addEventListener("submit", async (e) => {
+  const form = /** @type {HTMLFormElement} */ (e.target);
+  if (e.defaultPrevented || !form.matches("form[data-stay]:not([data-inplace]):not([data-sign])")) return;
+  e.preventDefault();
+  if (form.dataset.sending) return;
+  form.dataset.sending = "1";
+  const submitter = /** @type {HTMLButtonElement | null} */ (e.submitter);
+  const body = new FormData(form);
+  if (submitter?.name) body.append(submitter.name, submitter.value);
+  const action = submitter?.hasAttribute("formaction") ? submitter.formAction : form.action;
+  submitter?.classList.add("busy");
+  let res;
+  try {
+    res = await fetch(action, { method: "POST", body, headers: { "X-Afterwrd-Stay": "1" } });
+  } catch {
+    sayUnder(form, OFFLINE);
+    return;
+  } finally {
+    delete form.dataset.sending;
+    submitter?.classList.remove("busy");
+  }
+  if (!res.ok || !res.redirected) { sayUnder(form, await refusal(res)); return; }
+  if (form.dataset.said) remember(SAID, form.dataset.said);
+  const to = new URL(res.url);
+  if (to.pathname + to.search === here()) {
+    // Only the #part can differ (Friends#muted, say): kept, then the page drawn again.
+    if (to.hash !== location.hash) history.replaceState(history.state, "", to.href);
+    location.reload();
+  } else if (history.length > 1 && (() => { try { const r = new URL(document.referrer); return r.origin === location.origin && r.pathname + r.search === to.pathname + to.search; } catch { return false; } })()) {
+    remember(STALE, to.pathname + to.search);
+    history.back();
+  } else {
+    location.replace(to.href);
+  }
+});
+// The page a data-stay form led to: drawn again if it was brought back as it was (the back/forward cache), and its line said.
+function arrived(e) {
+  if (/** @type {PageTransitionEvent} */ (e).persisted && recall(STALE) === here()) { location.reload(); return; }
+  const said = recall(SAID);
+  const main = document.querySelector("main");
+  if (!said || !main) return;
+  const note = Object.assign(document.createElement("p"), { className: "notice said", textContent: said });
+  note.setAttribute("role", "status");
+  main.prepend(note);
+}
+addEventListener("pageshow", arrived);

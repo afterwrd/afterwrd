@@ -47,7 +47,7 @@ const tokenServer = createServer(async (req, res) => {
 });
 await new Promise((r) => tokenServer.listen(8799, "127.0.0.1", r));
 
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 const page = await browser.newPage();
 // These check the site's own answers (a 400, the "being updated" page), which the test browser can't always see when
 // the service worker (public/static/app/push-sw.js) passes a page on; it's tested in comments.mjs.

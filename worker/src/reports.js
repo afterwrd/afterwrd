@@ -345,6 +345,8 @@ export async function handleReportsAdmin(request, env, url) {
       item: String(form.get("item") ?? ""), post: String(form.get("post") ?? ""), about: String(form.get("about") ?? ""),
       reason: String(form.get("reason") ?? ""), note: String(form.get("note") ?? ""), named: form.get("named") === "1" });
     if (sent.error) return said(sent.error);
+    // Sent from the page (ui/inplace.js data-stay): straight back to where it was raised, which says thanks itself.
+    if (request.headers.get("X-Afterwrd-Stay") === "1") return Response.redirect(`${url.origin}${back}`, 303);
     const told = friend ? `${friend.name} has` : `The admins of ${group.name} have`;
     return said(`Thanks. ${told} been told. You'll see in Notifications what's done about it.`, 200);
   }

@@ -330,15 +330,15 @@ export function composer({ action = null, max = null, placeholder = "Write somet
  * nobody's told.
  */
 export const muteButton = ({ person, name, back, muted = false }) => muted
-  ? html`<form method="post" action="/_admin/mutes/${person}/unmute"><input type="hidden" name="back" value="${back}"><button>Unmute ${name}</button></form>`
-  : html`<form method="post" action="/_admin/mutes"><input type="hidden" name="person" value="${person}"><input type="hidden" name="name" value="${name}">
+  ? html`<form method="post" action="/_admin/mutes/${person}/unmute" data-stay><input type="hidden" name="back" value="${back}"><button>Unmute ${name}</button></form>`
+  : html`<form method="post" action="/_admin/mutes" data-stay><input type="hidden" name="person" value="${person}"><input type="hidden" name="name" value="${name}">
     <input type="hidden" name="back" value="${back}"><button>Mute ${name}</button></form>`;
 
 /**
  * A Block button for `person` (blocks.js) (asks first: ui.js), going back to `back`. `look`: the button's class. A friend's ends
  * the friendship too.
  */
-export const blockButton = ({ person, name, back, friend = false, look = "block" }) => html`<form method="post" action="/_admin/blocks"
+export const blockButton = ({ person, name, back, friend = false, look = "block" }) => html`<form method="post" action="/_admin/blocks" data-stay
     data-confirm="Block ${name}? ${friend ? "You'll stop being friends. " : ""}You won't see what they write, or hear from them. They won't be told you've blocked them."
     data-confirm-ok="Block"><input type="hidden" name="person" value="${person}"><input type="hidden" name="name" value="${name}">
     <input type="hidden" name="back" value="${back}"><button class="${look}">Block</button></form>`;

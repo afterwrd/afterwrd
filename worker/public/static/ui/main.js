@@ -12,6 +12,8 @@
 //   mentions.js  @ in a post or comment box: picking someone to mention
 //   app.js       the home-screen app: the service worker, and Add to home screen
 //   groupsign.js a group's signed members list: joining, letting in, removing, admins, leaving
+//   back.js      back closes an open menu first, as in an app
+//   viewer.js    the photo viewer: next and previous don't add to history; ✕ goes back where it was opened
 import "./confirm.js";
 import "./look.js";
 import "./menus.js";
@@ -24,3 +26,5 @@ import "./mentions.js";
 import "./app.js";
 import "./threads.js";
 import "./groupsign.js";
+import "./back.js";
+import "./viewer.js";

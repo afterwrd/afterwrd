@@ -944,3 +944,14 @@ details.more .menu a:hover, details.more .menu button:hover { background: var(--
 .rules p { white-space: pre-line; }
 details.rules { margin: 0.5rem 0; }
 details.rules summary { cursor: pointer; color: var(--muted); }
+
+/* Moving between pages (Chrome, Edge, the home-screen app): the header stays where it is while the page beneath fades
+   across, as in an app, rather than the whole screen being drawn again (which flickered the header's edge). Other
+   browsers change pages as before. */
+@view-transition { navigation: auto; }
+header.site { view-transition-name: site-header; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 140ms; }
+@media (prefers-reduced-motion: reduce) {
+  @view-transition { navigation: none; }
+}
+.notice.said { margin-bottom: 1rem; }

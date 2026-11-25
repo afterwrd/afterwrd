@@ -51,3 +51,8 @@ and downloads go to `out/`, which git ignores.
 | `crossover.mjs` | three sites and a group on an afterwrd 1 release, then all on this code with the same databases: the group brought over, members joining again signed by their browsers, its history brought over by each writer's browser, and what's left from before cleared out once the 30 days are up |
 
 Each suite starts on a new site.
+
+Every suite's browser asks for reduced motion (`--force-prefers-reduced-motion`), which turns off the site's page
+transitions (style.css `@view-transition`). Headless Chrome doesn't run animations in pages that aren't at the front,
+so a transition there never ends and the page stops answering clicks; a person's own browser shows the page they're
+looking at, so it doesn't happen there.

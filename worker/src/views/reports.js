@@ -13,7 +13,8 @@ export function reportFormPage(ctx, { where, place, to, placeName, item, about, 
 <p class="meta">${where === "group" ? html`Only the admins of ${placeName} see this.` : html`Only ${to} sees this.`} Whoever wrote it isn't told.</p>
 <blockquote class="reported"><strong>${what.name}</strong> wrote${what.post ? " a post" : ""}:
   ${what.text || (what.photos ? `${what.photos} photo${what.photos === 1 ? "" : "s"}` : "(nothing)")}</blockquote>
-<form method="post" action="/_admin/reports/send" class="report">
+<form method="post" action="/_admin/reports/send" class="report" data-stay
+  data-said="Thanks. ${where === "group" ? `The admins of ${placeName} have` : `${to} has`} been told. You'll see in Notifications what's done about it.">
   <input type="hidden" name="where" value="${where}"><input type="hidden" name="place" value="${place}">
   <input type="hidden" name="item" value="${item}"><input type="hidden" name="about" value="${about}">
   <input type="hidden" name="post" value="${post}"><input type="hidden" name="back" value="${back}">
@@ -54,7 +55,7 @@ ${reports.map((r) => html`<li class="card report${r.open ? " open" : ""}" id="r-
   <p>${r.reasons.join(" · ")}<span class="meta"> · raised ${by(r)} · <time title="${fmtDatetime(r.first)}">${fmtAgo(r.first)}</time></span></p>
   ${r.notes.map((n) => html`<p class="note">“${n}”</p>`)}
   ${r.open ? html`<p><a class="chip" href="${link(r)}">Go to it</a> <span class="meta">to remove it${where === "group" ? ", or remove its writer from Members" : ""}.</span></p>
-  <form method="post" action="/_admin/reports/leave">
+  <form method="post" action="/_admin/reports/leave" data-stay>
     <input type="hidden" name="where" value="${where}"><input type="hidden" name="place" value="${group?.id ?? ""}">
     <input type="hidden" name="about" value="${r.about}"><input type="hidden" name="back" value="${ctx.url.pathname}">
     <label>A word back to whoever raised it <span class="meta">(if you like)</span>

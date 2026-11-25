@@ -156,7 +156,7 @@ const unversioned = createServer((req, res) => {
 await new Promise((r) => unversioned.listen(8794, "127.0.0.1", r));
 
 // --- the owner, and the friend's browser -------------------------------------------------------------------------
-const browser = await puppeteer.launch({ executablePath: CHROME, headless: true });
+const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
 async function person(withPasskeys) {
   const context = await browser.createBrowserContext();
   const page = await context.newPage();
