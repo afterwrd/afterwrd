@@ -1123,7 +1123,7 @@ const caraNotice = await ann.$eval("p.notice", (p) => p.textContent).catch(() =>
 check("her page says she may have removed you", caraNotice.includes("Cara Example may have removed you as a friend"), caraNotice);
 await ann.screenshot({ path: `${OUT}/friend-removed-you.png` });
 await ann.click("main .feed-head details.more summary");
-await Promise.all([ann.waitForNavigation(), ann.click("main .feed-head details.more .menu button")]);
+await Promise.all([ann.waitForNavigation(), ann.click("main .feed-head details.more .menu form[action$=\"/disconnect\"] button")]);
 check("Remove friend on her page forgets her", new URL(ann.url()).pathname === "/friend"
   && sql(stateA, "SELECT COUNT(*) AS n FROM connections")[0].n === 0 && sql(stateA, "SELECT COUNT(*) AS n FROM friend_links")[0].n === 0);
 

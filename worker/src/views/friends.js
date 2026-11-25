@@ -12,7 +12,7 @@ import { host } from "../sites.js";
 import { now } from "../util.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
-import { blockButton, feed, has, moreMenu, pager } from "./parts.js";
+import { blockButton, feed, has, moreMenu, muteButton, pager } from "./parts.js";
 
 // --- a friend's shared Facebook archive and albums, read from their site (friends.js) ----------------------------
 
@@ -98,7 +98,7 @@ export function introductionCard(i, back, tag = "li") {
 }
 
 /** The owner's Friends: friends on afterwrd first, then everyone from the Facebook download, in one list. */
-export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], checks = [], blocked = [] }) {
+export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], checks = [], blocked = [], muted = [] }) {
   const people = has(ctx, "friends"); // Facebook people have pages only if the friends list is published
   const fbLink = (p) => (people && p.id ? html`<a href="/people/${p.id}">${p.name}</a>` : p.name);
   const linkForm = (c, body) => html`<form method="post" action="/_admin/connections/${c.id}/facebook" class="fb-link">${body}</form>`;
@@ -127,6 +127,14 @@ so check the address is one you expect; if not, decline.</p>
     ${r.identity && blockButton({ person: r.identity, name: r.name, back: "/friend", look: "link" })}
   </li>`)}
 </ul>`}
+
+${muted.length > 0 && html`<section id="muted">
+<h2>Muted</h2>
+<p class="meta">Their posts don't show on Home, and in groups they're folded away. You can still see everything on their page, and their comments. They haven't been told.</p>
+<ul class="friend-list">
+  ${muted.map((m) => html`<li class="card"><span class="what"><strong>${m.name}</strong><span class="meta">since ${fmtDate(m.created_at)}</span></span>
+    <form method="post" action="/_admin/mutes/${m.person}/unmute"><input type="hidden" name="back" value="/friend#muted"><button class="chip">Unmute</button></form></li>`)}
+</ul></section>`}
 
 ${blocked.length > 0 && html`<section id="blocked">
 <h2>Blocked</h2>
@@ -326,8 +334,9 @@ ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cove
 <div class="feed-head">
   <h1 class="friend-name">${c.avatar && html`<img class="avatar-small" src="${c.avatar.thumbSrc}" alt="">`}${c.name}</h1>
   <span class="head-tools">${c.facebook && has(ctx, "friends") && html`<a class="chip" href="/people/${c.facebook.id}">${raw(icon("friends"))}<span>Your Facebook history together</span></a>`}
-  ${moreMenu([removeFriend(c, "delete")], "More")}</span>
+  ${moreMenu([c.identity && muteButton({ person: c.identity, name: c.name, back: ctx.url.pathname, muted: c.muted }), removeFriend(c, "delete")], "More")}</span>
 </div>
+${c.muted && html`<p class="notice muted">You've muted ${c.name}: their posts don't show on Home, only here. They haven't been told.</p>`}
 <div class="meta">${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}
   · a friend you're connected with. Only you see this here.</div>
 ${c.renamed && html`<form class="notice" method="post" action="/_admin/connections/${c.id}/rename">

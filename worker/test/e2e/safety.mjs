@@ -1,20 +1,28 @@
-// Safety (docs/safety-plan.md): three people's sites (Ann on 8787, Bob on 8788, Cat on 8789). Ann is friends with Bob and
-// with Cat. Step 1, on Ann's own post: she removes Bob's comment, openly (Cat sees she did); she turns comments off,
-// which covers its photo, refuses Bob's comment from a page he'd opened before, and leaves Ann able to have the last
-// word; then on again, and Bob's comment goes in.
-//   node safety.mjs <zip> <fixtures dir> <A state> <B state> <C state>
+// Safety (docs/safety-plan.md): three people's sites (Ann on 8787, Bob on 8788, Cat on 8789) and a group's (G, 8790). Ann
+// is friends with Bob and with Cat. Step 1, on Ann's own post: she removes Bob's comment, openly (Cat sees she did); she
+// turns comments off, which covers its photo, refuses Bob's comment from a page he'd opened before, and leaves Ann able
+// to have the last word; then on again, and Bob's comment goes in. Step 2, mute: Ann mutes Bob from his post on Home;
+// his posts leave Home but not his page, his comments still show, and Friends lists him, with Unmute. In Ann's group,
+// muting Bob folds his posts there to a line, and his post's own page still shows it.
+//   node safety.mjs <zip> <fixtures dir> <A state> <B state> <C state> <G state>
 import puppeteer from "puppeteer-core";
-import { count as n, settled, siteSql as sql, setUpSigning } from "./helpers.mjs";
+import { count as n, letInto, settled, siteSql as sql, setUpSigning, signedGroupPost, startSignedGroup } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
-const [, fixtures, stateA, stateB, stateC] = process.argv.slice(2);
+const [, fixtures, stateA, stateB, stateC, stateG] = process.argv.slice(2);
 const A = "http://localhost:8787";
 const B = "http://localhost:8788";
 const C = "http://localhost:8789";
+const G = "http://localhost:8790";
 const CODE = "local-test-setup-code";
+const GROUP_KEY = "local-test-group-key";
 const results = [];
 const check = (name, ok, extra = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}${extra ? `  (${extra})` : ""}`); };
 const errors = [];
+const waitFor = async (test, ms = 20_000) => {
+  for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 300))) if (await test()) return true;
+  return false;
+};
 
 // --- people and friends (as mentions.mjs) -------------------------------------------------------------------------------
 
@@ -153,6 +161,47 @@ check("Bob can comment again", (await comment(bob, "Still coming?")) === "");
 await ann.goto(annsPage);
 await openComments(ann);
 check("…and Ann sees it", (await comments(ann)).includes("Still coming?"));
+
+// --- Mute (step 2) -------------------------------------------------------------------------------------------------------
+
+await bob.goto(`${B}/posts`);
+await bob.type("#composer textarea", "Bike ride this morning");
+await Promise.all([bob.waitForNavigation({ timeout: 60_000 }), bob.click("#composer button.post")]);
+const bobsCards = async () => { await ann.goto(`${A}/`); return ann.$$eval("article.from-friend", (l) => l.filter((a) => a.dataset.name === "Bob Example").length); };
+check("Bob's post is on Ann's Home", await waitFor(async () => (await bobsCards()) === 1));
+await ann.click('article.from-friend[data-name="Bob Example"] header details.more > summary');
+await Promise.all([ann.waitForNavigation(), ann.click('article.from-friend[data-name="Bob Example"] header form[action="/_admin/mutes"] button')]);
+check("Ann mutes Bob from his post, and it's gone from her Home", n(stateA, "mutes") === 1 && (await bobsCards()) === 0);
+const bobOnA = sql(stateA, `SELECT id FROM connections WHERE origin = '${B}'`)[0].id;
+await ann.goto(`${A}/friend/${bobOnA}/posts`);
+check("Bob's page still shows his post, and says he's muted", (await text(ann)).includes("Bike ride this morning")
+  && (await text(ann)).includes("You've muted Bob Example") && Boolean(await ann.$('form[action$="/unmute"]')));
+await ann.goto(annsPage);
+await openComments(ann);
+check("Bob's comments on Ann's post still show", (await comments(ann)).includes("Still coming?"));
+await ann.goto(`${A}/friend`);
+check("Friends lists Bob as muted", (await text(ann, "#muted")).includes("Bob Example"));
+await Promise.all([ann.waitForNavigation(), ann.click("#muted form button")]);
+check("…and Unmute there brings his posts back to Home", n(stateA, "mutes") === 0 && (await bobsCards()) === 1);
+
+// In a group: Bob's posts fold to a line for Ann, and show in full on their own page.
+const annGroup = await startSignedGroup(ann, { origin: G, setup: GROUP_KEY, name: "Walkers" });
+const bobGroup = await letInto(ann, A, annGroup, bob, B, stateB);
+const groupPerson = sql(stateG, "SELECT person FROM own_identity")[0].person;
+const posted = await signedGroupPost(bob, bobGroup, groupPerson, { type: "post", text: "Anyone for Saturday?" });
+check("Bob posts in Ann's group", posted.status === 200, JSON.stringify(posted));
+await ann.goto(`${A}/groups/${annGroup}`);
+check("…and Ann sees it", (await text(ann)).includes("Anyone for Saturday?"));
+await ann.click('article.in-group[data-name="Bob Example"] header details.more > summary');
+await Promise.all([ann.waitForNavigation(), ann.click('article.in-group[data-name="Bob Example"] header form[action="/_admin/mutes"] button')]);
+check("Muted from there, Bob's post folds to a line", (await text(ann)).includes("A post from Bob Example, whom you've muted.")
+  && !(await text(ann)).includes("Anyone for Saturday?"));
+await Promise.all([ann.waitForNavigation(), ann.click("p.muted a")]);
+check("…and Show it opens the post, in full", (await text(ann)).includes("Anyone for Saturday?") && Boolean(await ann.$('article.in-group form[action$="/unmute"]')));
+await ann.click('article.in-group header details.more > summary');
+await Promise.all([ann.waitForNavigation(), ann.click('article.in-group header form[action$="/unmute"] button')]);
+await ann.goto(`${A}/groups/${annGroup}`);
+check("Unmuted, it's back in the group", n(stateA, "mutes") === 0 && (await text(ann)).includes("Anyone for Saturday?"));
 
 check("no errors in the pages", errors.length === 0, errors.join(" | "));
 await browser.close();

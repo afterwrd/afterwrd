@@ -3,6 +3,7 @@
 // no one else needs a way in: friends see each other from their own sites (connect.js).
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
 import { handleBlocks } from "./blocks.js";
+import { handleMutes } from "./mutes.js";
 import { handleSentAdmin } from "./sentchecks.js";
 import { handleKeys, identitySummary } from "./keys.js";
 import { handleItems } from "./items.js";
@@ -70,6 +71,8 @@ export async function handleAdmin(request, env, url, owner) {
   if (url.pathname === "/_admin/sent/stop" || url.pathname === "/_admin/notices/dismiss") return handleSentAdmin(request, env, url);
   // Blocking someone, and unblocking (blocks.js).
   if (url.pathname === "/_admin/blocks" || url.pathname.startsWith("/_admin/blocks/")) return handleBlocks(request, env, url);
+  // Muting someone, and unmuting (mutes.js).
+  if (url.pathname === "/_admin/mutes" || url.pathname.startsWith("/_admin/mutes/")) return handleMutes(request, env, url);
   if (url.pathname === "/_admin/notifications/seen") {
     await pushDevicesSeen(env);
     return Response.redirect(`${url.origin}/`, 303);

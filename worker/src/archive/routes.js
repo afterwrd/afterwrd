@@ -2,6 +2,7 @@
 // same tables, told apart by `source`), Facebook's record of their life there (facebook_*), friends, groups and
 // events. Of the Facebook download, only the sections chosen when importing are served.
 import { blockedAmong, blockedList } from "../blocks.js";
+import { isMuted, mutedList } from "../mutes.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, ownHost } from "../items.js";
 import { broughtUntil, commentsToBring, leftToBring, windowOf } from "../before.js";
@@ -907,6 +908,8 @@ async function fromFriend(ctx, id, load) {
     const data = await load(connection);
     // Their signed name, if it's changed since the owner approved them (names.js): shown, with a way to use it.
     if (connection.identity) connection.renamed = (await peopleShown(ctx.db, [String(connection.identity)])).tags.get(String(connection.identity))?.renamed ?? null;
+    // Muted (mutes.js): their page says so, with Unmute.
+    connection.muted = await isMuted(ctx.db, connection.identity);
     connection.facebook = await facebook;
     await noteAnswer(ctx.db, connection).run();
     if (data instanceof Response) return data; // somewhere else to go (a photo in a signed post: friendPhoto)
@@ -954,7 +957,7 @@ async function friendsIndex(ctx) {
   // Requests show only what their site said when it connected: nothing is fetched from a site you haven't approved,
   // so a stranger can't slow this page down or see when you look at it.
   return { friends, facebook, requests: requests.results, introductions: introductions.results,
-    checks: await recentChecks(db), blocked: await blockedList(db) };
+    checks: await recentChecks(db), blocked: await blockedList(db), muted: await mutedList(db) };
 }
 
 /** Who a friend on afterwrd is in the owner's Facebook download, if the owner has linked them. */

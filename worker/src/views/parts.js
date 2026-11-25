@@ -326,6 +326,15 @@ export function composer({ action = null, max = null, placeholder = "Write somet
 }
 
 /**
+ * Mute (or, `muted`, Unmute) for `person` (mutes.js), going back to `back`. No asking first: it's undone as easily, and
+ * nobody's told.
+ */
+export const muteButton = ({ person, name, back, muted = false }) => muted
+  ? html`<form method="post" action="/_admin/mutes/${person}/unmute"><input type="hidden" name="back" value="${back}"><button>Unmute ${name}</button></form>`
+  : html`<form method="post" action="/_admin/mutes"><input type="hidden" name="person" value="${person}"><input type="hidden" name="name" value="${name}">
+    <input type="hidden" name="back" value="${back}"><button>Mute ${name}</button></form>`;
+
+/**
  * A Block button for `person` (blocks.js) (asks first: ui.js), going back to `back`. `look`: the button's class. A friend's ends
  * the friendship too.
  */

@@ -135,7 +135,7 @@ run_groups() {
 }
 run_polls() { three_sites polls.mjs group; }
 run_mentions() { three_sites mentions.mjs group; }
-run_safety() { three_sites safety.mjs; } # docs/safety-plan.md: removing comments, comments off
+run_safety() { three_sites safety.mjs group; } # docs/safety-plan.md: removing comments, comments off, mute
 # Daily limits (src/allowances.js, docs/signed-conversations.md step 8), small enough to reach (TEST_LIMITS, local sites
 # only: limits.js): Bob's site, 40 calls a caller and a day of 90 seconds; Cat's, 3 records a writer and 2 notices from
 # one writer (1 to the phone); the group's, 3 records a member.

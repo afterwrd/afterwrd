@@ -19,6 +19,7 @@ import { signedLink } from "./friends.js";
 import { DATE_RE, parseRecord, writtenAt } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { frozenUntil, itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
+import { mutedAmong } from "./mutes.js";
 import { friendsAmong, peopleShown } from "./names.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
 import { ANSWERS, cleanEvent, hasDate } from "./calendar.js";
@@ -350,8 +351,10 @@ export async function pullNew(env, from, ms = 4000) {
 
 /** Friends' posts kept here, newest first, with who they're from. */
 export async function friendItems(db, { limit = 100, connection = null } = {}) {
+  // All friends' (Home): not those the owner's muted (mutes.js). One friend's (their page): everything.
   const { results } = await db.prepare(`SELECT c.*, k.name, k.origin, k.avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
-    WHERE k.approved_at IS NOT NULL ${connection ? "AND c.connection_id = ?" : ""} ORDER BY c.created_at DESC LIMIT ?`)
+    WHERE k.approved_at IS NOT NULL ${connection ? "AND c.connection_id = ?" : "AND c.author NOT IN (SELECT person FROM mutes)"}
+    ORDER BY c.created_at DESC LIMIT ?`)
     .bind(...(connection ? [connection, limit] : [limit])).all();
   return copiesShown(db, results);
 }
@@ -375,12 +378,13 @@ async function copiesShown(db, rows) {
     const t = r.tally ? JSON.parse(String(r.tally)) : null;
     return Object.keys(t?.votes ?? t?.answers ?? {});
   });
-  const [names, me, mine, known] = await Promise.all([namesFor(db, people), db.prepare("SELECT person FROM own_identity WHERE id = 1").first(),
+  const [names, me, mine, known, muted] = await Promise.all([namesFor(db, people), db.prepare("SELECT person FROM own_identity WHERE id = 1").first(),
     // The owner's newest record on each (what their next one follows: lists.js prev).
     rows.length ? db.prepare(`SELECT item, fp FROM sent WHERE item IN (SELECT value FROM json_each(?)) AND ${TAKEN_SQL} ORDER BY created_at, rowid`)
-      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }, friendsAmong(db, people)]);
+      .bind(JSON.stringify(rows.map((r) => String(r.id)))).all() : { results: [] }, friendsAmong(db, people),
+    mutedAmong(db, rows.map((r) => String(r.author)))]);
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
-  return rows.map((r) => ({ ...copyFromRow(r, { names, me: me ? String(me.person) : null, known }),
+  return rows.map((r) => ({ ...copyFromRow(r, { names, me: me ? String(me.person) : null, known }), muted: muted.has(String(r.author)),
     list: r.list_n && me ? { host: String(r.author), me: String(me.person), seen: { n: Number(r.list_n), h: String(r.list_head) },
       mine: last.get(String(r.id)) ?? null, frozenUntil: frozenUntil(JSON.parse(String(r.content)).before_until) } : null }));
 }

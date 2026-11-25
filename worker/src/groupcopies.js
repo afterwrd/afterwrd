@@ -14,6 +14,7 @@
 // - notes from the group (POST /_p/notes, notes.js): receiveGroupNote.
 import { rateWindow } from "./limits.js";
 import { blockedAmong, isBlocked } from "./blocks.js";
+import { mutedAmong } from "./mutes.js";
 import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
@@ -229,6 +230,8 @@ export async function groupCopiesShown(env, group, rows, people = []) {
   // Someone the owner's blocked (blocks.js): their posts folded away, and they're counted in polls and events unnamed.
   const blocked = await blockedAmong(db, people);
   for (const p of blocked) names.set(p, "someone you've blocked");
+  // Someone the owner's muted (mutes.js): their posts fold to one line, with a way to see each.
+  const muted = await mutedAmong(db, rows.map((r) => String(r.author)));
   const last = new Map(mine.results.map((r) => [String(r.item), String(r.fp)]));
   // The owner's newest record on each date of a repeating event (step 6d: each date's list is its own).
   const repeating = rows.filter((r) => JSON.parse(String(r.content)).event?.rrule).map((r) => String(r.id));
@@ -239,7 +242,7 @@ export async function groupCopiesShown(env, group, rows, people = []) {
   return rows.map((r) => {
     const name = names.get(String(r.author)) ?? "Someone";
     const shown = Object.assign(copyFromRow({ ...r, name, origin: "", connection_id: 0 }, { names, me: me?.person ?? null, known: friends }),
-      { blocked: blocked.has(String(r.author)) });
+      { blocked: blocked.has(String(r.author)), muted: muted.has(String(r.author)) });
     const event = /** @type {any} */ (shown.event);
     if (event?.rrule && me) event.listBase = { host: String(group.identity), me: me.person };
     if (event?.dates && me) {

@@ -12,7 +12,7 @@ import { icon, initial } from "./nav.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { friendFace } from "./friends.js";
-import { blockButton, collage, edited, moreMenu, menuEdit, ownerFace, pollBlock } from "./parts.js";
+import { blockButton, collage, edited, moreMenu, menuEdit, muteButton, ownerFace, pollBlock } from "./parts.js";
 import { eventBlock, eventForm, guestPicker, repeatingSigned } from "./events.js";
 import { eventFormValues, finishedAt } from "../calendar.js";
 
@@ -214,6 +214,7 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
     ${friendFace(ctx, c)}
     <span class="what"><a href="/friend/${c.id}/posts"><strong>${c.name}</strong></a></span>
     <a class="when" href="${page}" title="${fmtDatetime(item.created_at)}"><time>${fmtAgo(item.created_at)}</time></a>
+    ${!item.muted && moreMenu([muteButton({ person: item.author, name: c.name, back: `${ctx.url.pathname}${ctx.url.search}` })], "More")}
   </header>
   ${item.text && html`<div class="text">${linkify(item.text, item.mentions)}</div>`}
   ${edited(item)}
@@ -353,6 +354,10 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
   const stay = `?${new URLSearchParams({ in: "post", back: `${here}#gi-${item.id}` })}`;
   // From someone the owner's blocked (blocks.js): folded away.
   if (item.blocked && !item.mine) return html`<p class="card meta blocked" id="gi-${item.id}">Hidden: a post from someone you've blocked.</p>`;
+  // From someone the owner's muted (mutes.js): one line, except on the post's own page, where it's what they came for.
+  if (item.muted && !item.mine && !open) {
+    return html`<p class="card meta muted" id="gi-${item.id}">A post from ${item.name}, whom you've muted. <a href="${base}">Show it</a></p>`;
+  }
   return html`<article class="card social in-group" id="gi-${item.id}" data-region="${base}" data-own-page data-person="${item.author}" data-name="${item.mine ? ctx.ownerName : item.name}">
   <header>
     ${item.mine ? ownerFace(ctx) : html`<span class="who who-${item.created_at % 6}" aria-hidden="true">${initial(item.name)}</span>`}
@@ -361,7 +366,8 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
     ${sign && moreMenu([editable && menuEdit(`edit-gi-${item.id}`),
       item.mine && signedDelete(relay, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back: `/groups/${g.id}`, inplace: "remove" }),
       !item.mine && may(item.author) && signedRemove(relay, "Remove this post, its photos and its comments from the group? This can’t be undone.", sign,
-        { back: `/groups/${g.id}`, inplace: "remove", group: g.id })])}
+        { back: `/groups/${g.id}`, inplace: "remove", group: g.id }),
+      !item.mine && muteButton({ person: item.author, name: item.name, back: open ? here : `/groups/${g.id}`, muted: item.muted })], "More")}
   </header>
   ${item.text && html`<div class="text">${linkify(item.text, item.here ? [...item.mentions, { name: "here" }] : item.mentions)}</div>`}
   ${edited(item)}
