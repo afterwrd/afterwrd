@@ -72,6 +72,9 @@ your local police and services.</p>
     <li>On your own posts, you can remove anyone's comment, or turn comments off.</li>
     <li>Mute someone to stop seeing their posts, and stay friends. Block them to stop hearing from them at all. Neither is
       told.</li>
+    <li>Something in a group worries you? <strong>Tell the admins</strong>, from its ⌄ menu. Someone else's comment on a
+      friend's post? Tell that friend, the same way. Only they see it, whoever wrote it isn't told, and you can choose not
+      to be named.</li>
     <li>In a group, its admins can remove posts, comments and members, and anyone can leave.</li>
   </ul>
 </section>

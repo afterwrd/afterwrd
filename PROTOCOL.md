@@ -2631,6 +2631,45 @@ records are then still refused.
 Source: `src/blocks.js` `handleBlocks`, `isBlocked`; `src/connect.js` `accept`, `ask`, `receiveIntroduction`;
 `src/friendhost.js` `handleFriendItems`.
 
+### 8.15 Telling the owner: `POST /_p/report`, `POST /_p/reports/check`
+
+A friend's site tells the owner here about someone else's comment on one of the owner's posts ("Tell Ann"). A group's
+site takes the same calls from members, about any member's post or comment, for its owner and admins (10.9). Reports
+go only to whoever runs the space: never to anyone central, and never to the person reported. A report isn't a record
+and isn't signed by a browser: the signed call (section 3) says which person's site sent it, which is enough, since
+nobody else reads it.
+
+Body of `POST /_p/report`:
+
+```json
+{ "item": "<the list it's on>", "about": "<the record's fingerprint>", "reason": "unkind", "note": "…", "named": true }
+```
+
+`reason` is one of `unkind`, `wrong`, `spam`, `illegal`, `other`; `note` at most 500 characters. On a person's site
+`about` must be a `comment` by someone other than the owner; on a group's, a `comment` or an `item` (a post or photo),
+by anyone but the caller. The host keeps a copy of what the record said, until 90 days after the report is dealt with,
+even if its writer deletes it. With `named: false` it keeps no record of who sent it: the daily cap is counted in its
+object's memory.
+
+| Status | When |
+|---|---|
+| 200 `{"ok": true, "id": "<report id>"}` | kept |
+| 400 | not a reason; `about` not on `item`; the caller's own; a kind this host doesn't take reports about |
+| 404 | the caller may not see `item`, or `about` isn't there any more |
+| 409 `You've told them about this already.` | the same person, about the same record |
+| 429 | more than 10 from one person in a day (UTC) |
+
+A site from before reports answers 404 `Not found.`: the reporter's site says theirs needs updating.
+
+A report is dealt with when what it's about is removed (a `remove` of it, or of the post it's on), when its writer is
+removed from the group, or when whoever runs the space leaves it, with an optional word back (300 characters).
+
+`POST /_p/reports/check` `{ids: [<report id>…]}` (at most 50) answers `{reports: [{id, outcome, word}]}`: `outcome` is
+null while open, else `removed`, `left` or `member`. The reporter's site asks hourly at most, and says what became of
+it in Notifications; for `illegal` still open after 3 days, it says where else to turn.
+
+Source: `src/reports.js`; `src/friendhost.js`, `src/groupposts.js` (the calls); `src/groups.js` (`/_group/admin/reports`).
+
 ## 9. Notes
 
 A note is how one site tells another that something happened, so the receiver needn't poll every friend. Every note is
@@ -3468,6 +3507,7 @@ The member's site answers 202 `{"ok": true}`, and ignores notes about its own ow
 | `comment` | a comment on a post or photo | the post's writer, everyone who has commented there, and those mentioned, not the writer | `item`, `photo?`, `entry`, `receipt`, `delegations`, `people`, `names` |
 | `change` | an event's writer moved it, or called it off with `change` | those going or who might | as `comment` |
 | `calloff` | an admin called off an event, or one date of one | those going or who might (to that date) | as `comment`, with `date` for one date |
+| `report` | a member raised something with the admins (8.15) | the owner and admins | `id`, `illegal` (true for "might be illegal": the admin's site may buzz their phones, 3 a day from a group at most). What it is, and who raised it, only from `GET /_group/admin/reports` |
 | `gone` | a whole event still to come was deleted or removed | those going or who might | `item`, `cancelled: true` |
 | `closed` | the owner closed the group | every member | `item` (the group's id), `entry`, `receipt`, `delegations`, `people` |
 
@@ -3889,6 +3929,7 @@ owner's browser and their own site, and aren't part of the protocol.
 | `GET /_p/items/<id>[?after=<n>]` | an approved friend who may see the item | 8.8 |
 | `POST /_p/records` | an approved friend | 8.10 |
 | `POST /_p/records/check` | an approved friend | 8.11 |
+| `POST /_p/report`, `POST /_p/reports/check` | an approved friend | 8.15 |
 | `GET /_p/posts[?page=<n>]`, `GET /_p/posts/<key>` | an approved friend | 8.13 |
 | `GET /_p/albums`, `GET /_p/albums/<key>[?page=<n>]` | an approved friend | 8.13 |
 | `GET /_p/photos/<sha256>` | an approved friend | 8.13 |
@@ -3912,10 +3953,12 @@ owner's browser and their own site, and aren't part of the protocol.
 | `GET /_group/members`, `GET /_group/members/list[?after=<n>]` | members | 10.6 |
 | `POST /_group/records` | members, and people waiting | 10.7 |
 | `GET /_group/admin/members`, `POST /_group/admin/link`, `/about`, `/here`, `/end` | admins (`end`: the owner) | 10.8 |
+| `GET /_group/admin/reports`, `POST /_group/admin/reports/leave` `{about, word?}` | admins | 8.15 |
 | `GET /_p/items?since=<t>`, `?before=<t>`, `?id=<id>` | members | 10.9 |
 | `GET /_p/items/<id>[?after=<n>]`, `GET /_p/items/<id>/dates/<date>[?after=<n>]` | members | 10.9 |
 | `POST /_p/items` | members | 10.9 |
 | `POST /_p/records` | members | 10.9 |
 | `POST /_p/records/check` | members | 10.9 |
+| `POST /_p/report`, `POST /_p/reports/check` | members | 8.15 |
 | `POST /_p/people` | members | 10.9 |
 | `GET` or `HEAD /files/<sha256>?exp=<t>&sig=<s>` | a browser with a link the group signed for a member | 10.10 |

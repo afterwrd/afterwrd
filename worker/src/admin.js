@@ -4,6 +4,7 @@
 // scripts/owner.mjs makes the first device link for a new site from the terminal.
 import { handleBlocks } from "./blocks.js";
 import { handleMutes } from "./mutes.js";
+import { handleReportsAdmin } from "./reports.js";
 import { handleSentAdmin } from "./sentchecks.js";
 import { handleKeys, identitySummary } from "./keys.js";
 import { handleItems } from "./items.js";
@@ -73,6 +74,8 @@ export async function handleAdmin(request, env, url, owner) {
   if (url.pathname === "/_admin/blocks" || url.pathname.startsWith("/_admin/blocks/")) return handleBlocks(request, env, url);
   // Muting someone, and unmuting (mutes.js).
   if (url.pathname === "/_admin/mutes" || url.pathname.startsWith("/_admin/mutes/")) return handleMutes(request, env, url);
+  // Telling a friend or a group's admins about something, and leaving what's been raised (reports.js).
+  if (url.pathname.startsWith("/_admin/reports/")) return handleReportsAdmin(request, env, url);
   if (url.pathname === "/_admin/notifications/seen") {
     await pushDevicesSeen(env);
     return Response.redirect(`${url.origin}/`, 303);

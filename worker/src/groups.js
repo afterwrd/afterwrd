@@ -23,6 +23,8 @@
 //   POST /_group/admin/link       a new invite link (the old one stops working)
 //   POST /_group/admin/about      {name, about}
 //   POST /_group/admin/here       {on}: whether any member may use @here (mentions.js), or only the owner and admins
+//   GET  /_group/admin/reports    what members have raised with the admins (reports.js)
+//   POST /_group/admin/reports/leave   {about, word?}: looked at, and left
 // Closing (step 6e): the owner's signed `close` on the members list closes the group. Every member's site is told (a
 // signed note; anyone missed sees it at their next pull), and for CLOSE_SECONDS (30 days) it answers read-only: its
 // members list, posts and threads, and members deleting what they wrote. Then it empties itself, and its owner's site
@@ -49,6 +51,7 @@ import { hostingKey } from "./keys.js";
 import { setGroupIdentity } from "./groupidentity.js";
 import { callMember, groupSelf, signedMember, signedMembers, takeJoin, takeMemberRecord } from "./groupmembers.js";
 import { outbox } from "./outbox.js";
+import { leaveIt, raised } from "./reports.js";
 import { bodyBytes, siteCalling } from "./calls.js";
 
 export const MAX_MEMBERS = 1000; // besides its owner (docs/signed-conversations.md: up to 1,000 members)
@@ -381,6 +384,17 @@ export async function handleGroupApi(request, env, url) {
     if (member.role !== "owner") return json({ error: "Only the group's owner can do that." }, 403);
     if (!shut || shut.goes > now()) return json({ error: "Close the group first: it goes 30 days after." }, 409);
     await empty(env);
+    return json({ ok: true });
+  }
+  // What members have raised (reports.js): read, and left, by any admin; each named by the group's members list.
+  if (route === "GET /_group/admin/reports") {
+    const names = async (people) => new Map((await db.prepare(`SELECT identity, name FROM group_members WHERE identity IN (SELECT value FROM json_each(?))`)
+      .bind(JSON.stringify(people)).all()).results.map((r) => [String(r.identity), String(r.name)]));
+    return json({ reports: await raised(db, names) });
+  }
+  if (route === "POST /_group/admin/reports/leave") {
+    const body = await request.json().catch(() => ({}));
+    await leaveIt(db, String(body?.about ?? ""), String(member.identity), body?.word);
     return json({ ok: true });
   }
   if (shut) return json({ error: "This group has closed." }, 409);

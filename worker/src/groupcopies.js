@@ -584,6 +584,22 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     return json({ ok: true }, 202);
   }
   if (note.kind === "closed") return groupClosed(env, url, group, me, note);
+  // Something raised with the admins (reports.js), for this site's owner as one of them: quietly in Notifications, and on
+  // the phone too if it might be illegal (a few a day from one group at most). What it is, they see on Things to look at.
+  if (note.kind === "report") {
+    if (!["owner", "admin"].includes(String(group.role)) || typeof note.id !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(note.id)) return json({ ok: true }, 202);
+    const illegal = note.illegal === true;
+    const buzzed = Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM notices WHERE group_id = ? AND kind = 'report' AND about = 'illegal' AND created_at > ?")
+      .bind(g, now() - 86400).first())?.n ?? 0);
+    const kept = await keepNotice(env.DB, { kind: "report", fp: `report-${note.id}`, group: g, item: "reports", target: "reports", actor: String(group.name),
+      text: illegal ? "someone thinks something here might be illegal." : "someone has raised something with the admins." });
+    if (kept && illegal) {
+      await env.DB.prepare("UPDATE notices SET about = 'illegal' WHERE kind = 'report' AND fp = ?").bind(`report-${note.id}`).run();
+      if (buzzed < 3) notifyLater(env, url.origin, work, { title: String(group.name), text: "Someone thinks something here might be illegal. Have a look.",
+        hidden: "Something to look at", url: `/groups/${g}/reports`, tag: `report-g${g}-${note.id}` });
+    }
+    return json({ ok: true }, 202);
+  }
   if (!["comment", "change", "calloff"].includes(note.kind)) return json({ error: "That didn't work." }, 400);
   const { entry, receipt } = note;
   const item = String(note.item ?? "");

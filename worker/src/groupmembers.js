@@ -7,6 +7,7 @@
 //                                owner) close (step 6e: groups.js)
 //   GET  /_group/members         …with `list`: the members list as signed, for members' sites to check
 import { checkCall, signCall } from "./signedcalls.js";
+import { markMemberRemoved } from "./reports.js";
 import { hostingKeyFor, identityState, checkProfile, keepNewerProfile } from "./identities.js";
 import { keepKnown, lookupsFor, ownHost, sentDelegationOf, withDelegation } from "./items.js";
 import { listEntries, readList, takeRecord } from "./hosted.js";
@@ -135,6 +136,8 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
     if (record.kind === "remove") {
       const { n, fp, taken } = answer.entry;
       await tell(target, { sent: body.sent, entry: { n, fp, taken, prev: await headAt(db, self.list, n - 1) }, receipt: answer.receipt });
+      // Anything reported about what they wrote here is dealt with (reports.js).
+      if (target.identity) await markMemberRemoved(db, String(target.identity), record.author);
     }
     await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
   }

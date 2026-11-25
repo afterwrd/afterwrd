@@ -205,6 +205,87 @@ await Promise.all([ann.waitForNavigation(), ann.click('article.in-group header f
 await ann.goto(`${A}/groups/${annGroup}`);
 check("Unmuted, it's back in the group", n(stateA, "mutes") === 0 && (await text(ann)).includes("Anyone for Saturday?"));
 
+// --- Tell the admins, and Tell Ann (step 4) ----------------------------------------------------------------------------
+
+const catGroup = await letInto(ann, A, annGroup, cat, C, stateC);
+const second = await signedGroupPost(bob, bobGroup, groupPerson, { type: "post", text: "Something nasty" });
+check("Cat joins the group, and Bob posts again", second.status === 200, JSON.stringify(second));
+const groupPost = (words) => sql(stateG, "SELECT id, content FROM items WHERE type = 'post'").find((r) => JSON.parse(r.content).text === words)?.id;
+/** Cat opens "Tell …" from a ⌄ menu (`menu`), picks `reason`, and sends it; returns what the page then says. */
+async function tell(page, menu, reason, { note = "", named = true } = {}) {
+  await page.click(`${menu} > summary`);
+  await Promise.all([page.waitForNavigation(), page.click(`${menu} a[href*="/report?"]`)]);
+  await page.click(`form.report input[name=reason][value=${reason}]`);
+  if (note) await page.type("form.report textarea[name=note]", note);
+  if (!named) await page.click("form.report input[name=named]");
+  await Promise.all([page.waitForNavigation(), page.click("form.report button.primary")]);
+  return text(page);
+}
+const saturday = groupPost("Anyone for Saturday?");
+const nastyId = groupPost("Something nasty");
+await cat.goto(`${C}/groups/${catGroup}`);
+const said = await tell(cat, `#gi-${saturday} header details.more`, "unkind", { note: "Not kind to Dan" });
+check("Cat tells the admins about Bob's post, named", said.includes("The admins of Walkers have been told"), said);
+check("…which the group keeps, with who and why", sql(stateG, "SELECT reporter_name, reason, note FROM reports").some((r) => r.reporter_name === "Cat Example"
+  && r.reason === "unkind" && r.note === "Not kind to Dan"));
+await cat.goto(`${C}/groups/${catGroup}`);
+const again = await tell(cat, `#gi-${saturday} header details.more`, "spam");
+check("…and once is enough", again.includes("You've told them about this already"), again);
+check("Ann, who runs it, is told quietly", await waitFor(() => n(stateA, "notices WHERE kind = 'report'") === 1));
+await ann.goto(`${A}/activity`);
+check("…in Notifications", (await text(ann)).includes("someone has raised something with the admins"));
+await ann.goto(`${A}/groups/${annGroup}/reports`);
+let page_ = await text(ann);
+check("Ann's Things to look at shows what, why, and who", page_.includes("Anyone for Saturday?") && page_.includes("Unkind or bullying")
+  && page_.includes("raised by Cat Example") && page_.includes("Not kind to Dan"));
+
+// Unnamed, and might be illegal: the group's site keeps no record of who.
+await cat.goto(`${C}/groups/${catGroup}/posts/${nastyId}`);
+await tell(cat, "article.in-group header details.more", "illegal", { named: false });
+check("Cat tells them about the other post without being named: nothing there says who", sql(stateG, `SELECT reporter, reporter_name FROM reports WHERE about = '${nastyId}'`)
+  .every((r) => r.reporter === null && r.reporter_name === null) && n(stateG, `reports WHERE about = '${nastyId}'`) === 1);
+check("…and Ann's site marks it as maybe illegal", await waitFor(() => n(stateA, "notices WHERE kind = 'report' AND about = 'illegal'") === 1));
+await ann.goto(`${A}/groups/${annGroup}/reports`);
+check("…shown as raised by one who chose not to be named", (await text(ann)).includes("raised by 1 who chose not to be named"));
+
+// Ann leaves the first, with a word back, and removes the second.
+await ann.type(`#r-${saturday} textarea[name=word]`, "Talked to Bob");
+await Promise.all([ann.waitForNavigation(), ann.click(`#r-${saturday} form button`)]);
+check("Ann leaves the first, with a word back", sql(stateG, `SELECT outcome, word FROM reports WHERE about = '${saturday}'`).every((r) => r.outcome === "left" && r.word === "Talked to Bob"));
+await ann.goto(`${A}/groups/${annGroup}/posts/${nastyId}`);
+await ann.click("article.in-group header details.more > summary");
+await Promise.all([settled(ann), ann.click("article.in-group header form[data-sign=remove] button")]);
+check("…and removing the second deals with what was raised about it", await waitFor(() => sql(stateG, `SELECT outcome FROM reports WHERE about = '${nastyId}'`)[0]?.outcome === "removed"));
+
+// "Tell Ann": Cat, about Bob's comment on Ann's post. Not about Ann's own.
+await cat.goto(onC);
+await openComments(cat);
+check("Cat isn't offered Tell Ann about Ann's own comment", !(await cat.$('.comment[data-name="Ann Example"] a[href*="/report?"]')));
+const toAnn = await tell(cat, '.comment[data-name="Bob Example"] details.more', "spam");
+check("Cat tells Ann about Bob's comment", toAnn.includes("Ann Example has been told"), toAnn);
+await ann.goto(`${A}/`);
+check("Ann's Home says a comment's been raised", (await text(ann)).includes("on your posts has been raised with you"));
+await Promise.all([ann.waitForNavigation(), ann.click('a[href="/reports"]')]);
+check("…and her Things to look at shows it", (await text(ann)).includes("Still coming?") && (await text(ann)).includes("Spam"));
+await ann.goto(annsPage);
+await openComments(ann);
+await fromMenu(ann, '.comment[data-name="Bob Example"] details.more', "form[data-sign=remove] button");
+check("Removing it deals with it, and Home goes quiet", n(stateA, "reports WHERE handled_at IS NULL") === 0
+  && sql(stateA, "SELECT outcome FROM reports")[0]?.outcome === "removed");
+
+// What Cat hears back, at her site's next asking; and, for "might be illegal" nobody looks at, where else to turn.
+sql(stateC, `INSERT INTO reports_sent (id, group_id, item, post, reason, created_at) VALUES ('never-looked-at-${"x".repeat(12)}', ${catGroup}, '${saturday}', '${saturday}', 'illegal', strftime('%s','now') - 4 * 86400)`);
+sql(stateC, "UPDATE reports_sent SET checked_at = 0");
+await cat.goto(`${C}/`);
+check("Cat is told what became of each", await waitFor(async () => { await cat.goto(`${C}/`); return n(stateC, "notices WHERE kind = 'reported'") === 4; }),
+  String(n(stateC, "notices WHERE kind = 'reported'")));
+await cat.goto(`${C}/activity`);
+page_ = await text(cat);
+check("…in Notifications: left, with the word back; removed; and removed by Ann", page_.includes("looked at what you raised, and left it. “Talked to Bob”")
+  && page_.includes("The admins looked at what you raised, and removed it") && page_.includes("Ann Example looked at what you raised, and removed it"));
+check("…and where else to turn for what nobody's looked at", page_.includes("haven't looked at what you raised yet") && Boolean(await cat.$('a[href="/help"]')));
+check("Bob is told nothing about any of it", n(stateB, "notices WHERE kind IN ('report', 'reported')") === 0);
+
 // --- Getting help (step 3) ----------------------------------------------------------------------------------------------
 
 await ann.goto(`${A}/`);

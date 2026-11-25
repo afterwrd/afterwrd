@@ -4,12 +4,15 @@
 import { blockedAmong, blockedList } from "../blocks.js";
 import { isMuted, mutedList } from "../mutes.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
-import { dateOver, ownHost } from "../items.js";
+import { dateOver, namesFor, ownHost } from "../items.js";
+import { callFriend } from "../calls.js";
 import { broughtUntil, commentsToBring, leftToBring, windowOf } from "../before.js";
 import { tidyBefore } from "../clearout.js";
 import { groupsToBring, groupsToBringOver } from "../beforegroups.js";
 import { groupWordsToBring } from "../beforehistory.js";
 import * as itemViews from "../views/items.js";
+import * as reportViews from "../views/reports.js";
+import { checkSentReports, openCount, raised } from "../reports.js";
 import { workOut } from "../itemkinds.js";
 import { loadThread, ownItem, ownItemCount, ownItems, ownItemsWhere, photoItem, thread as itemComments } from "../items.js";
 import { postId as postAddress } from "../../public/static/activity.js";
@@ -48,7 +51,7 @@ import * as groupViews from "../views/groups.js";
 import * as homeViews from "../views/home.js";
 
 // The signed-in pages' views, by area (each file in views/ draws one area).
-const views = { ...archiveViews, ...homeViews, ...friendViews, ...groupViews, ...eventViews, ...itemViews };
+const views = { ...archiveViews, ...homeViews, ...friendViews, ...groupViews, ...eventViews, ...itemViews, ...reportViews };
 
 const PAGE_SIZE = 50;
 export const AFTERWRD_KIND = "afterwrd"; // the Posts filter's choice for posts written here
@@ -86,6 +89,11 @@ const ROUTES = [
   [/^\/memories$/, null, memories, views.memoriesPage],
   // Where to turn when something's wrong that afterwrd can't put right (views/help.js).
   [/^\/help$/, null, async () => ({}), views.helpPage],
+  // Telling a friend, or a group's admins, about something; and what's been raised with the owner, or a group they run.
+  [/^\/friend\/(\d+)\/report$/, null, friendReportForm, views.reportFormPage],
+  [/^\/groups\/(\d+)\/report$/, null, groupReportForm, views.reportFormPage],
+  [/^\/reports$/, null, ownReports, views.reportsPage],
+  [/^\/groups\/(\d+)\/reports$/, null, groupReports, views.reportsPage],
   [/^\/timeline$/, "timeline", timeline, views.timelinePage],
   [/^\/posts$/, "posts", posts, views.postsPage],
   // (Always shown: Posts is always published, for posts written here. So it can start alongside the header.)
@@ -847,13 +855,17 @@ async function home(ctx, params) {
   ctx.work?.waitUntil?.(tidyBefore(ctx.env).catch(() => {}));
   // …then what the owner sent elsewhere, checked with its hosts (sentchecks.js), once an hour at most.
   ctx.work?.waitUntil?.(checkSentRound(ctx.env, ctx.url.origin).catch(() => {}));
+  // …and what the owner has raised with friends or groups' admins, and what became of it (reports.js), hourly at most.
+  ctx.work?.waitUntil?.(checkSentReports(ctx.env, ctx.url.origin).catch(() => {}));
+  // Comments friends have raised about the owner's posts, waiting to be looked at: one quiet line (reports.js).
+  const reportsWaiting = await openCount(db);
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
-    return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
+    return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows, reportsWaiting,
       newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver, statusAway };
   }
   return {
-    own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows,
+    own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows, reportsWaiting,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver, statusAway,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
@@ -966,6 +978,46 @@ async function friendsIndex(ctx) {
 async function facebookSelf(db, connection) {
   return first(db, `SELECT p.id, p.name FROM friend_links l JOIN facebook_people p ON p.name = l.person_name COLLATE NOCASE AND p.is_me = 0
     WHERE l.connection_id = ? LIMIT 1`, [connection.id]);
+}
+
+/** The form for telling someone about something (reports.js): what, from the link that opened it. */
+function reportAsk(ctx, params, base) {
+  const [item, about, post] = ["item", "about", "post"].map((k) => String(params.get(k) ?? ""));
+  if (![item, about, post].every((x) => /^[A-Za-z0-9_-]{43}$/.test(x))) return null;
+  return { ...base, item, about, post, back: safeNext(params.get("back") ?? "/", ctx.url) };
+}
+
+async function friendReportForm(ctx, params, id) {
+  const c = await first(ctx.db, "SELECT id, name FROM connections WHERE id = ? AND approved_at IS NOT NULL", [Number(id)]);
+  return c && reportAsk(ctx, params, { where: "friend", place: Number(c.id), to: String(c.name), placeName: String(c.name) });
+}
+
+async function groupReportForm(ctx, params, id) {
+  const g = await first(ctx.db, "SELECT id, name FROM groups WHERE id = ? AND joined_at IS NOT NULL AND identity IS NOT NULL", [Number(id)]);
+  return g && reportAsk(ctx, params, { where: "group", place: Number(g.id), to: "the admins", placeName: String(g.name) });
+}
+
+/** What friends have raised about comments on the owner's posts. */
+async function ownReports(ctx) {
+  return { where: "own", reports: await raised(ctx.db, (people) => namesFor(ctx.db, people)) };
+}
+
+/** What members have raised with a group's admins, for an admin: from the group's site. */
+async function groupReports(ctx, params, id) {
+  return fromGroup(ctx, id, async (g) => {
+    if (!["owner", "admin"].includes(String(g.role))) throw new Error("Only the group's admins see what's been raised.");
+    const data = await callFriend(ctx.env, ctx.url.origin, String(g.origin), "/_group/admin/reports");
+    const text = (v, max = 5000) => (typeof v === "string" ? v.slice(0, max) : null);
+    const list = (v) => (Array.isArray(v) ? v.map((x) => text(x, 500)).filter(Boolean).slice(0, 50) : []);
+    const ok = /^[A-Za-z0-9_-]{43}$/;
+    // As the group's site said it, kept to its shape.
+    const reports = (Array.isArray(data?.reports) ? data.reports : []).filter((r) => ok.test(r?.about ?? "") && ok.test(r?.post ?? "")).slice(0, 500)
+      .map((r) => ({ about: r.about, post: r.post, authorName: text(r.authorName, 100) ?? "Someone",
+        copy: { kind: r.copy?.kind === "item" ? "item" : "comment", text: text(r.copy?.text) ?? "", photos: Number(r.copy?.photos) || 0 },
+        reasons: list(r.reasons), notes: list(r.notes), reporters: list(r.reporters), unnamed: Number(r.unnamed) || 0, first: Number(r.first) || 0,
+        open: r.open === true, outcome: text(r.outcome, 20), handledByName: text(r.handledByName, 100), handledAt: Number(r.handledAt) || null, word: text(r.word, 300) }));
+    return { where: "group", group: { id: Number(g.id), name: String(g.name) }, reports };
+  });
 }
 
 async function friendHome(ctx, params, id) {

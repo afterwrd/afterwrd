@@ -64,7 +64,7 @@ function friendsStatus(unreachable, unmoved, away) {
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "" }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting = 0, onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "" }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -83,6 +83,8 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], onThisDay, fri
   or comment from it. One face, fingerprint or PIN lets it.</p>
   <div class="row"><button class="chip primary">Let this browser sign</button></div><p class="error" role="alert"></p></div>`)}
     <script type="module" src="${asset("/static/ui/letsign.js")}" integrity="${integrity("/static/ui/letsign.js")}"></script>
+    ${reportsWaiting > 0 && html`<p class="notice"><a href="/reports">${reportsWaiting === 1 ? "A comment" : `${reportsWaiting} comments`} on your posts</a>
+      ${reportsWaiting === 1 ? "has" : "have"} been raised with you by a friend. Have a look when you can.</p>`}
     ${securityFix && html`<p class="notice alert">afterwrd ${securityFix} fixes a security problem, and this site is older.
       <a href="/_admin/update">Update now</a>.</p>`}
     ${(auto.problem || auto.on && (auto.last?.result && auto.last.result !== "done" || auto.waiting?.needsHand)) && html`<p class="notice alert">

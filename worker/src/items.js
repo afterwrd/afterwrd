@@ -23,6 +23,7 @@ import { CHANGE_SECONDS, dateTally, eventShown, eventTrouble, pollShown, pollTro
 import { dateList } from "./lists.js";
 import { ANSWERS, cleanEvent, eventChanged, finishedAt, hasDate, onDate, ruleDates } from "./calendar.js";
 import { choicesMask } from "./polls.js";
+import { markRemoved } from "./reports.js";
 import { audienceOf, writtenAt } from "../public/static/records.js";
 
 export const ID_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -478,6 +479,8 @@ export async function recordOn(env, host, id, sent, origin = null, { guests: gue
   }
   // Taken, so its key is the writer's: kept, to pass on with it.
   await keepKnown(env.DB, delegation);
+  // Removed: anything reported about it is dealt with (reports.js).
+  if (record.kind === "remove") await markRemoved(env.DB, record.about, record.author);
   if (answer.deleted) {
     // An event still to come: its guests are told it's off, and their copies go (notes.js).
     if (now_.type === "event" && origin) {

@@ -67,6 +67,7 @@ import m0052 from "../migrations/0052_learning.sql";
 import m0053 from "../migrations/0053_comment_counts.sql";
 import m0054 from "../migrations/0054_comments_off.sql";
 import m0055 from "../migrations/0055_mutes.sql";
+import m0056 from "../migrations/0056_reports.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -126,6 +127,7 @@ const MIGRATIONS = [
   ["0053_comment_counts.sql", m0053],
   ["0054_comments_off.sql", m0054],
   ["0055_mutes.sql", m0055],
+  ["0056_reports.sql", m0056],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

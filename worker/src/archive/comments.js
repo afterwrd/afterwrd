@@ -39,11 +39,11 @@ export async function loadThreads(db, keys) {
 // ('own' rows), and friends' invitations to their events and changes to them, from friends still here. (A friend's new
 // post is a notice too, but only for the live bar.)
 const NOTICES = `FROM notices n JOIN connections co ON co.id = n.connection_id AND co.approved_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled', 'removed', 'missing')`;
+  WHERE n.kind IN ('comment', 'mention', 'hidden', 'invite', 'changed', 'cancelled', 'removed', 'missing', 'reported')`;
 // A group's (groupcopies.js): comments, mentions, @here, changes to events, and its closing, while the owner's in it.
 // One date of a repeating event called off (6d) has its target as "<post>?date=<date>".
 const GROUP_NOTICES = `FROM notices n JOIN groups g ON g.id = n.group_id AND g.joined_at IS NOT NULL
-  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled', 'closed', 'removed', 'missing')`;
+  WHERE n.kind IN ('comment', 'mention', 'here', 'hidden', 'changed', 'cancelled', 'closed', 'removed', 'missing', 'report', 'reported')`;
 const NOTIFICATIONS_SQL = `
   SELECT 'here' AS source, c.id, c.target, c.text, c.created_at, COALESCE(u.name, c.author_name) AS name, c.author_id,
     NULL AS connection_id, NULL AS friend, NULL AS own_post, NULL AS kind, NULL AS date, c.mentions, NULL AS about

@@ -420,7 +420,25 @@ function friendActivityItem(c) {
  * A comment or mention on a signed post (afterwrd 2: notes.js notices): on a friend's post the owner's in, or on their
  * own ("own"). `target` is the post, or <post>/photos/<n> for one of its photos.
  */
+/**
+ * Something raised with whoever runs a space (reports.js): "report", to them (a group's admins); "reported", to whoever
+ * raised it, saying what became of it, or, if nobody's looked, where else to turn.
+ */
+function reportItem(c, href, label) {
+  const late = c.kind === "reported" && String(c.text ?? "").includes("Getting help");
+  return html`<article class="card activity${c.isNew ? " new" : ""}">
+  <div class="body">
+    <header>
+      <span class="what"><strong>${c.friend}</strong>: ${c.text} <a href="${late ? "/help" : href}">${late ? "Getting help" : label}</a></span>
+      ${c.isNew && raw('<span class="badge badge-new">New</span>')}
+      <time title="${fmtDatetime(c.created_at)}">${fmtAgo(c.created_at)}</time>
+    </header>
+  </div>
+</article>`;
+}
+
 function noticeItem(c) {
+  if (c.kind === "reported") return reportItem(c, `/friend/${c.connection_id}/posts/${c.target}`, "The post");
   // A friend's invitation to their event, or a change to it (as before: friendEventItem).
   if (["invite", "changed", "cancelled"].includes(c.kind)) return friendEventItem(c);
   if (c.kind === "removed" || c.kind === "missing") return sentItem(c, `/friend/${c.connection_id}/posts/${c.target}`);
@@ -503,6 +521,8 @@ function friendEventItem(c) {
 
 /** A comment in a group on a post the owner wrote or commented on, or a change to an event they're going to. */
 function groupActivityItem(c) {
+  if (c.kind === "report") return reportItem(c, `/groups/${c.connection_id}/reports`, "Have a look");
+  if (c.kind === "reported") return reportItem(c, `/groups/${c.connection_id}/posts/${c.target}`, "The post");
   const href = c.kind === "closed" ? `/groups/${c.connection_id}` : `/groups/${c.connection_id}/posts/${c.target}${c.date ? `?date=${encodeURIComponent(c.date)}` : ""}`;
   if (c.kind === "removed" || c.kind === "missing") return sentItem(c, href);
   // A mention receipt the group's site doesn't bear out (receipts.js, step 6c).

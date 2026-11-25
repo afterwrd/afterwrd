@@ -16,6 +16,9 @@
 //   GET  /_p/items/<id>/dates/<date>   one date's list of a repeating event (step 6d: its answers and calling off),
 //                            with what /_p/items/<id> sends with it
 //   POST /_p/records/check   what became of the member's records here (sentchecks.js answerCheck)
+//   POST /_p/report          {item, about, reason, note?, named}: a member telling the admins about a post or comment
+//                            here (reports.js); the owner and admins are sent a note. POST /_p/reports/check: what became
+//                            of what they told
 //   POST /_p/people          {people, keys}: identities and delegations a member's site is missing (a pull with
 //                            `since` sends only those new to this site since: friendhost.js learntSince)
 //   POST /_p/records         {sent, delegation, profile?}: the member's own comment, edit, delete, vote, answer, end or
@@ -48,6 +51,7 @@ import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { selfHosted } from "./hosting.js";
 import { ownUsage } from "./allowances.js";
+import { answerReportCheck, markRemoved, takeReport } from "./reports.js";
 
 const SINCE_PAGE = 50;
 const PEOPLE_AT_ONCE = 200; // people, and delegations, asked for in one POST /_p/people
@@ -114,6 +118,18 @@ export async function handleGroupItems(request, env, url) {
   if (request.method === "POST" && url.pathname === "/_p/records/check") {
     const answer = await answerCheck(env, String(member.identity), body, { host: self.person, rolesOf: (people) => roleProofs(env, self, people) });
     return json(answer, answer.status ?? 200);
+  }
+  // Telling the admins (reports.js): about any member's post or comment here, apart from the teller's own. The owner and
+  // admins are sent a note, which buzzes their phones for "might be illegal".
+  if (request.method === "POST" && url.pathname === "/_p/reports/check") return json(await answerReportCheck(db, body?.ids));
+  if (request.method === "POST" && url.pathname === "/_p/report") {
+    if (shut) return json({ error: "This group has closed." }, 409);
+    const taken = await takeReport(env, { reporter: String(member.identity), reporterName: String(member.name ?? "A member"), body,
+      mayReport: (record) => record.kind === "comment" || record.kind === "item" });
+    if (taken.error) return json({ error: taken.error }, taken.status);
+    const { results } = await db.prepare("SELECT id FROM group_members WHERE approved_at IS NOT NULL AND role IN ('owner', 'admin') ORDER BY id").all();
+    if (results.length) await outbox(env).sendNote({ origin: url.origin, kind: "report", item: taken.item, fp: taken.id, recipients: results.map((r) => Number(r.id)) });
+    return json({ ok: true, id: taken.id });
   }
   // Posts from afterwrd 1 whose 30 days are up: their comments from before go in first (step 10e: before.js).
   const brought = { rules: await groupRules(env, self, false), table: "group_comments" };
@@ -475,6 +491,8 @@ async function memberRecord(env, url, self, member, body, { shut = false } = {})
     return json({ error: said[answer.refused] ?? answer.refused }, 409);
   }
   await keepKnown(db, mine.delegation);
+  // Removed by an admin: anything reported about it is dealt with (reports.js).
+  if (record.kind === "remove") await markRemoved(db, record.about, record.author);
   if (answer.deleted) {
     // An event still to come: those going, or who might, are told it's off.
     if (now_.type === "event" && !now_.event?.cancelled && finishedAt(now_.event) > now()) {
@@ -566,6 +584,12 @@ async function memberNames(env, people) {
 export async function groupNoteFor(env, note, member, shared = new Map()) {
   const db = env.DB;
   if (note.kind === "gone" || note.kind === "gone-off") return { v: 2, kind: "gone", item: note.item, cancelled: note.kind === "gone-off" };
+  // Something raised with the admins (reports.js): to the owner and admins, saying only that, and whether it might be
+  // illegal. What it is, and who raised it, they see on the group's Things to look at.
+  if (note.kind === "report") {
+    const row = await db.prepare("SELECT reason, handled_at FROM reports WHERE id = ?").bind(note.fp).first();
+    return row && !row.handled_at ? { v: 2, kind: "report", id: note.fp, illegal: row.reason === "illegal" } : null;
+  }
   // What's the same for every member, worked out once a run (shared: the Outbox's, as notes.js noteFor's).
   const once = (part, work) => {
     const key = `${note.id ?? note.item}\n${part}`;

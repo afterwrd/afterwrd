@@ -98,8 +98,11 @@ export function commentsButton(count) {
 export const whoTags = (p) => html`${p.label && html`<span class="from">${p.label}</span>`}${p.warn && html`<span class="from warn">${p.warn}</span>`}${p.renamed
   && html`<span class="from">now calling themselves ${p.renamed}</span>`}`;
 
-export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null, say = true } = {}) {
+export function itemThread(ctx, item, comments, list, { region = false, action = `/_admin/items/${item.id}/records`, owner = null, moderate = null, say = true, report = null } = {}) {
   const back = ctx.url.pathname + ctx.url.search;
+  // Telling whoever runs it about a comment (reports.js): a group's admins, or the friend whose post it is (not about
+  // their own comments).
+  const tell = (c) => report && c.author !== owner?.person && html`<a href="${report.href}?${new URLSearchParams({ item: item.id, about: c.fp, post: report.post, back })}">${report.label}</a>`;
   const sign = { item: item.id, host: list.host, seen: list.seen, prev: list.mine };
   const name = (c) => (c.author === list.me ? ctx.ownerName : c.name ?? "Someone");
   return html`<section class="thread" id="t-${item.id}" aria-label="Comments"${region && raw(' data-region=""')}>
@@ -113,7 +116,7 @@ export function itemThread(ctx, item, comments, list, { region = false, action =
         signedDelete(action, "Delete this comment?", { ...sign, about: c.fp }, { back, inplace: "refresh" })])}
       ${c.author !== list.me && c.author && moreMenu([moderate?.may(c.author) && signedRemove(action, moderate.group ? "Remove this comment? Everyone in the group will see it was removed by you."
         : "Remove this comment? Everyone who can see the post will see you removed it.",
-        { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group }), c.author !== owner?.person && blockButton({ person: c.author, name: name(c), back })])}
+        { ...sign, about: c.fp }, { back, inplace: "refresh", group: moderate.group }), tell(c), c.author !== owner?.person && blockButton({ person: c.author, name: name(c), back })])}
     </div>
     ${edited(c)}
     ${c.author === list.me && c.editable && signedEdit(`edit-c-${c.fp}`, `c-${c.fp}`, action, c.text, back, MAX_COMMENT, { ...sign, about: c.fp })}
@@ -230,7 +233,8 @@ export function friendItemCard(ctx, item, { thread = null, list = null, open = f
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${page}">
     ${commentsButton(item.comments)}
-    ${thread && list ? itemThread(ctx, item, thread, list, { action: `/_admin/friend/${c.id}/items/${item.id}/records`, owner: { name: c.name, person: item.author } })
+    ${thread && list ? itemThread(ctx, item, thread, list, { action: `/_admin/friend/${c.id}/items/${item.id}/records`, owner: { name: c.name, person: item.author },
+      report: { href: `/friend/${c.id}/report`, label: `Tell ${c.name}`, post: item.id } })
       : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
 </article>`;
@@ -269,7 +273,8 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
     ${postWords(item, postThread)}
     ${(postProblem ?? problem) && html`<p class="notice alert">${postProblem ?? problem}</p>`}
     ${photoComments(ctx, { post: item, photo: { id: m.item }, thread, list, postThread, action: `/_admin/friend/${c.id}/items/${m.item}/records`,
-      postAction: `/_admin/friend/${c.id}/items/${item.id}/records`, opts: { owner: { name: c.name, person: item.author } } })}
+      postAction: `/_admin/friend/${c.id}/items/${item.id}/records`, opts: { owner: { name: c.name, person: item.author },
+        report: { href: `/friend/${c.id}/report`, label: `Tell ${c.name}`, post: item.id } } })}
     ${!postThread && fromPost(`/friend/${c.id}/posts/${item.id}`, `${c.name}'s`, item.text)}
   </aside>
 </main>
@@ -367,6 +372,7 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
       item.mine && signedDelete(relay, "Delete this post, its photos and its comments? This can’t be undone.", sign, { back: `/groups/${g.id}`, inplace: "remove" }),
       !item.mine && may(item.author) && signedRemove(relay, "Remove this post, its photos and its comments from the group? This can’t be undone.", sign,
         { back: `/groups/${g.id}`, inplace: "remove", group: g.id }),
+      !item.mine && html`<a href="/groups/${g.id}/report?${new URLSearchParams({ item: item.id, about: item.id, post: item.id, back: here })}">Tell the admins</a>`,
       !item.mine && muteButton({ person: item.author, name: item.name, back: open ? here : `/groups/${g.id}`, muted: item.muted })], "More")}
   </header>
   ${item.text && html`<div class="text">${linkify(item.text, item.here ? [...item.mentions, { name: "here" }] : item.mentions)}</div>`}
@@ -398,7 +404,8 @@ export function groupItemCard(ctx, g, item, { thread = null, list = null, open =
   ${problem && html`<p class="notice alert">${problem}</p>`}
   <details class="comments"${open && raw(" open")} data-thread="${base}">
     ${commentsButton(item.comments)}
-    ${thread && list ? itemThread(ctx, item, thread, list, { action: relay, moderate: { group: g.id, may } })
+    ${thread && list ? itemThread(ctx, item, thread, list, { action: relay, moderate: { group: g.id, may },
+      report: { href: `/groups/${g.id}/report`, label: "Tell the admins", post: item.id } })
       : html`<section class="thread" id="t-${item.id}" aria-label="Comments"></section>`}
   </details>
 </article>`;
@@ -427,7 +434,8 @@ export function signedGroupPhoto(ctx, { membership: g, group: info, item, index,
     ${postWords(item, postThread)}
     ${(postProblem ?? problem) && html`<p class="notice alert">${postProblem ?? problem}</p>`}
     ${photoComments(ctx, { post: item, photo: { id: m.item }, thread, list, postThread, action: `/_groups/${g.id}/items/${m.item}/records`,
-      postAction: `/_groups/${g.id}/items/${item.id}/records`, opts: { moderate: { group: g.id, may: mayModerate(g, ownerPerson, (postThread?.list ?? list)?.me) } } })}
+      postAction: `/_groups/${g.id}/items/${item.id}/records`, opts: { moderate: { group: g.id, may: mayModerate(g, ownerPerson, (postThread?.list ?? list)?.me) },
+        report: { href: `/groups/${g.id}/report`, label: "Tell the admins", post: item.id } } })}
     ${!postThread && fromPost(`/groups/${g.id}/posts/${item.id}`, item.mine ? "your" : item.name ? `${item.name}'s` : "the", item.text)}
   </aside>
 </main>
