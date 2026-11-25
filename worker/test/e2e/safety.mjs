@@ -286,6 +286,54 @@ check("…in Notifications: left, with the word back; removed; and removed by An
 check("…and where else to turn for what nobody's looked at", page_.includes("haven't looked at what you raised yet") && Boolean(await cat.$('a[href="/help"]')));
 check("Bob is told nothing about any of it", n(stateB, "notices WHERE kind IN ('report', 'reported')") === 0);
 
+// --- Groups (step 5): rules, remove and clear up, removed stays removed -------------------------------------------------
+
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await ann.type("#about textarea[name=rules]", "Be kind.\nNo selling.");
+await Promise.all([ann.waitForNavigation(), ann.click("#about button")]);
+check("Ann writes the group's rules", sql(stateG, "SELECT rules FROM groups")[0]?.rules === "Be kind.\nNo selling.");
+await cat.goto(`${C}/groups/${catGroup}`);
+check("…and members see them on the group's page", (await text(cat)).includes("The group's rules"));
+
+// Cat posts; Bob comments on it; then Ann removes Bob, and clears up everything he wrote.
+const catsPost = await signedGroupPost(cat, catGroup, groupPerson, { type: "post", text: "Cat's walk" });
+await bob.goto(`${B}/groups/${bobGroup}/posts/${catsPost.id}`);
+check("Bob comments on Cat's post", (await comment(bob, "Rubbish walk")) === "");
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await Promise.all([ann.waitForNavigation(), ann.click(`li.member[data-from="${B}"] button[data-clear]`)]);
+const bobPerson = sql(stateA, `SELECT identity FROM connections WHERE origin = '${B}'`)[0].identity;
+check("Remove and clear up removes Bob, and remembers he was removed", n(stateG, `group_members WHERE identity = '${bobPerson}'`) === 0
+  && n(stateG, `group_removed WHERE person = '${bobPerson}'`) === 1);
+check("…and his post goes, whole", sql(stateG, `SELECT deleted_at FROM lists WHERE id = '${saturday}'`)[0]?.deleted_at !== null);
+await cat.goto(`${C}/groups/${catGroup}/posts/${catsPost.id}`);
+await openComments(cat);
+check("…and his comment on Cat's post, removed by the group", (await text(cat)).includes("A comment was removed by the group.") && !(await text(cat)).includes("Rubbish walk"));
+await ann.goto(`${A}/groups/${annGroup}/members`);
+check("Ann's Members lists him as removed", (await text(ann, "#removed")).includes("Bob Example"));
+
+// Bob can't ask again with a new invite link; the join page shows the rules; until Ann lets him.
+const askToJoin = async () => {
+  await ann.goto(`${A}/groups/${annGroup}/members`);
+  await ann.click("#make");
+  await ann.waitForSelector("#link:not([hidden])");
+  const link = await ann.$eval("#link-url", (i) => i.value);
+  await bob.goto(`${B}/groups`);
+  await bob.type("#join input[name=link]", link);
+  await Promise.all([bob.waitForNavigation(), bob.click("#join button:not([type=button])")]);
+};
+await waitFor(() => n(stateB, `groups WHERE origin = '${G}' AND joined_at IS NOT NULL`) === 0);
+await askToJoin();
+check("Asking to join shows the group's rules", (await text(bob)).includes("Be kind.") && (await text(bob)).includes("By asking to join, you agree to them."));
+await bob.click("#go");
+await bob.waitForFunction(() => document.getElementById("error")?.textContent, { timeout: 15_000 }).catch(() => {});
+check("…but Bob, removed, can't ask again", (await bob.$eval("#error", (e) => e.textContent).catch(() => "")).includes("You can't join this group"));
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await Promise.all([ann.waitForNavigation(), ann.click("#removed form button")]);
+check("Ann lets him ask again", n(stateG, "group_removed") === 0);
+await askToJoin();
+await Promise.all([bob.waitForNavigation({ timeout: 30_000 }), bob.click("#go")]);
+check("…and now he can", await waitFor(() => n(stateG, `group_members WHERE identity = '${bobPerson}' AND approved_at IS NULL`) === 1));
+
 // --- Getting help (step 3) ----------------------------------------------------------------------------------------------
 
 await ann.goto(`${A}/`);

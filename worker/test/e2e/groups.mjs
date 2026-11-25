@@ -445,7 +445,7 @@ check("Download everything carries no group keys", !exported.includes("key") && 
 // Bob, an admin, sees the controls a member would; deleting, and admins removing (signed, with where they stood).
 await bob.goto(`${B}/groups/${bobGroup}/members`);
 const bobControls = await bob.$$eval(".member-list button[data-group-record]", (l) => l.map((b) => b.textContent));
-check("Bob, an admin, can remove Cat but not Ann, nor make admins", bobControls.join() === "Remove", bobControls.join());
+check("Bob, an admin, can remove Cat but not Ann, nor make admins", bobControls.join() === "Remove,Remove and clear up", bobControls.join());
 const commentCards = async (page) => page.$$eval("article.in-group .comment:not(.gone)", (l) => l.map((c) => ({ id: c.id.slice(2),
   text: c.querySelector(".said").textContent, canDelete: Boolean(c.querySelector(".under .delete")) })));
 await bob.goto(`${B}/groups/${bobGroup}/posts/${bobPost}`);
@@ -970,9 +970,13 @@ check("…and the group's list says so, signed by Ann", n(stateG, `lists WHERE i
 check("Cat's site no longer gets in", (await call(G, "/_p/items", catKey)).status === 401);
 check("the owner can't just leave: there's no Leave for her", !(await ann.$('button[data-group-record="leave"]')));
 
-// Cat asks again with the invite link, and Ann lets her back in.
+// Removed, Cat can't ask again until an admin lets her (docs/safety-plan.md 3.4: safety.mjs checks the refusal); Ann
+// does, from Removed on Members, then Cat asks again with the invite link, and Ann lets her back in.
+check("Ann's Members lists Cat as removed", n(stateG, "group_removed") === 1);
+await ann.goto(`${A}/groups/${annGroup}/members`);
+await Promise.all([ann.waitForNavigation(), ann.click("#removed form button")]);
 await join(cat, C, link);
-check("Cat can ask again after being removed", n(stateG, `group_members WHERE origin = '${C}' AND approved_at IS NULL`) === 1);
+check("Cat can ask again once Ann lets her", n(stateG, `group_members WHERE origin = '${C}' AND approved_at IS NULL`) === 1);
 // Still only asking, she can't leave (she isn't in): she can forget the group here instead, and ask again later.
 const asking = sql(stateC, "SELECT id FROM groups")[0].id;
 await post(cat, `/_groups/${asking}/forget`, {});

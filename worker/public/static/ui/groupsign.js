@@ -32,7 +32,8 @@ document.addEventListener("click", async (e) => {
     const fields = { kind, author: key.person, host: at.host, item: at.item, seen: at.seen ?? null, prev: at.prev ?? null,
       ...(d.about && { about: d.about }), ...(at.role_at && ["approve", "remove", "role"].includes(kind) && { role_at: at.role_at }) };
     const made = await makeRecord(fields, kind === "role" ? { role: d.role } : joining ? { name: at.name } : undefined, key);
-    const done = await post(joining ? "/_groups/join" : `/_groups/${d.group}/records`, { sent: made.sent, ...(joining && { link: d.link }) });
+    // data-clear: "Remove and clear up", everything they wrote goes too (docs/safety-plan.md 3.4).
+    const done = await post(joining ? "/_groups/join" : `/_groups/${d.group}/records`, { sent: made.sent, ...(joining && { link: d.link }), ...(d.clear && { clear: true }) });
     if (joining) location.assign(`/groups/${done.id}`);
     else if (done.go) location.assign(done.go);
     else location.reload();

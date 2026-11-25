@@ -1307,7 +1307,9 @@ async function groupComments(ctx, g, id, owner, people = []) {
     // How each is known here (names.js): "your friend", "not your friend Bob", a friend's new name.
     if (c.author) Object.assign(c, t.tags.get(c.author));
     // Removed by the group's owner, or one of its admins (lists.js GroupRules).
-    if (c.removedBy) c.removedByName = c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}` : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
+    // …or by the group itself, clearing up after someone removed (groupposts.js clearUp).
+    if (c.removedBy) c.removedByName = c.removedBy === t.host ? "the group" : c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}`
+      : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
   }
   const me = await ownHost(ctx.env);
   const problem = t.problem ? `${g.name}'s site sent a conversation that doesn't add up, so what's after that isn't shown.`

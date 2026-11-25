@@ -24,6 +24,7 @@
 //   POST /_group/admin/about      {name, about}
 //   POST /_group/admin/here       {on}: whether any member may use @here (mentions.js), or only the owner and admins
 //   GET  /_group/admin/reports    what members have raised with the admins (reports.js)
+//   POST /_group/admin/unremove   {person}: someone removed may ask to join again
 //   POST /_group/admin/reports/leave   {about, word?}: looked at, and left
 // Closing (step 6e): the owner's signed `close` on the members list closes the group. Every member's site is told (a
 // signed note; anyone missed sees it at their next pull), and for CLOSE_SECONDS (30 days) it answers read-only: its
@@ -41,7 +42,7 @@ import { actorId, groupId, iso, tidy, CONTEXT } from "../public/static/activity.
 import { fromB64url, PROTOCOL } from "../public/static/signed.js";
 import { parseRecord } from "../public/static/records.js";
 import { delegationsFor, peopleFor } from "./friendhost.js";
-import { roleProofs } from "./groupposts.js";
+import { clearUp, roleProofs } from "./groupposts.js";
 import pkg from "../package.json";
 import { mediaStore } from "./media.js";
 import { groupLinkPage, messagePage } from "./views/pages.js";
@@ -61,6 +62,7 @@ const MAX_WAITING = 50;
 export const MAX_GROUP_PHOTOS = 8; // each is two files to copy from the member's site: within the free plan's 50 calls
 export const MAX_GROUP_TEXT = 5000;
 export const MAX_GROUP_NAME = 100;
+export const MAX_GROUP_RULES = 2000;
 export const MAX_GROUP_ABOUT = 1000;
 const LINK_SECONDS = 14 * 86400;
 const LINK_REQUESTS = 100; // requests to join one invite link can make
@@ -128,6 +130,7 @@ export async function groupObject(db, site, group, member) {
   const closed = closedGroup(group);
   return {
     type: "Group", id: groupId(site, group.id), name: group.name, summary: group.about || undefined, published: iso(group.created_at),
+    "afterwrd:rules": group.rules || undefined,
     attributedTo: o ? { type: "Person", id: actorId(o.origin), name: o.name } : undefined,
     "afterwrd:members": members.results.length, "afterwrd:role": member.role,
     "afterwrd:waiting": waiting ? waiting.results[0].n : undefined,
@@ -150,6 +153,9 @@ async function groupMembers(env, site, group, member, { all = false } = {}) {
     WHERE m.group_id = ? ${all ? "" : "AND m.approved_at IS NOT NULL"} ORDER BY m.role = 'member', m.name COLLATE NOCASE`).bind(group.id).all();
   return tidy({
     "@context": CONTEXT, type: "Collection", context: await groupObject(db, site, group, member), totalItems: results.length,
+    // For admins: who's been removed, and can't ask to join again until an admin lets them.
+    ...(all && { "afterwrd:removed": (await db.prepare("SELECT person, name, removed_at FROM group_removed ORDER BY removed_at DESC LIMIT 200").all()).results
+      .map((r) => ({ "afterwrd:person": r.person, name: r.name, "afterwrd:removedAt": iso(r.removed_at) })) }),
     items: results.map((m) => ({
       type: "Person", id: actorId(m.origin), name: m.name, "afterwrd:role": m.role,
       "afterwrd:joinedAt": iso(m.approved_at), ...(all && { "afterwrd:member": m.id, "afterwrd:waiting": !m.approved_at }),
@@ -317,7 +323,7 @@ export async function handleJoinLink(request, env, url) {
   // Which group it is, and where its members list is up to, for the joiner's browser to sign its `join` (members.js).
   if (request.method === "GET" && action === "/info") {
     const list = await db.prepare("SELECT n, head FROM lists WHERE id = ?").bind(self.list).first();
-    return json({ id: group.id, name: group.name, about: group.about, owner: owner?.name, person: self.person,
+    return json({ id: group.id, name: group.name, about: group.about, rules: group.rules ?? null, owner: owner?.name, person: self.person,
       members: list && Number(list.n) > 0 ? { n: Number(list.n), h: String(list.head) } : null });
   }
   if (request.method !== "POST" || action !== "/accept") return new Response("Not found", { status: 404 });
@@ -363,7 +369,9 @@ export async function handleGroupApi(request, env, url) {
   if (!member || !group) return json({ error: "Not a member of this group." }, 401);
   const shut = closedGroup(group);
   const record = (body) => takeMemberRecord(env, group, member, body, { maxMembers: maxMembers(env), closed: Boolean(shut),
-    tell: (m, proof) => tellRemoved(env, m, proof), onClose: (entry) => closed(env, url.origin, group, entry) });
+    tell: (m, proof) => tellRemoved(env, m, proof), onClose: (entry) => closed(env, url.origin, group, entry),
+    // "Remove and clear up" (docs/safety-plan.md 3.4): everything they wrote here goes too, removed by the group itself.
+    onRemoved: async (target, body) => { if (body?.clear === true) await clearUp(env, String(target.identity)); } });
   // Someone still waiting may take back their request: a signed `leave` (members.js only lets them do that).
   if (!member.approved_at && route === "POST /_group/records") return record(await request.json().catch(() => ({})));
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
@@ -417,8 +425,15 @@ export async function handleGroupApi(request, env, url) {
     const body = await request.json().catch(() => ({}));
     const name = typeof body.name === "string" ? body.name.trim().slice(0, MAX_GROUP_NAME) : "";
     if (!name) return json({ error: "Give the group a name." }, 400);
-    await db.prepare("UPDATE groups SET name = ?, about = ? WHERE id = ?")
-      .bind(name, cleanText(body.about).slice(0, MAX_GROUP_ABOUT) || null, group.id).run();
+    // Its rules too (docs/safety-plan.md 3.4), when the form sends them.
+    await db.prepare(`UPDATE groups SET name = ?, about = ?${body.rules !== undefined ? ", rules = ?" : ""} WHERE id = ?`)
+      .bind(name, cleanText(body.about).slice(0, MAX_GROUP_ABOUT) || null, ...(body.rules !== undefined ? [cleanText(body.rules).slice(0, MAX_GROUP_RULES) || null] : []), group.id).run();
+    return json({ ok: true });
+  }
+  // Someone removed may ask to join again (docs/safety-plan.md 3.4).
+  if (route === "POST /_group/admin/unremove") {
+    const body = await request.json().catch(() => ({}));
+    await db.prepare("DELETE FROM group_removed WHERE person = ?").bind(String(body?.person ?? "")).run();
     return json({ ok: true });
   }
   return json({ error: "Not found." }, 404);

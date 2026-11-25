@@ -79,6 +79,8 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
   const got = await theirs(env, caller.person, body);
   if (got.error) return json({ error: got.error }, 400);
   if (got.record.kind !== "join" || got.record.item !== self.list) return json({ error: "That isn't a request to join this group." }, 400);
+  // Removed by an admin (docs/safety-plan.md 3.4): not again, until an admin lets them ask.
+  if (await env.DB.prepare("SELECT 1 FROM group_removed WHERE person = ?").bind(got.record.author).first()) return json({ error: "You can't join this group." }, 403);
   const waiting = await env.DB.prepare("SELECT COUNT(*) AS n FROM group_members WHERE approved_at IS NULL").first();
   if (Number(waiting?.n ?? 0) >= maxWaiting) return json({ error: "Too many people are waiting to join this group. Try again later." }, 429);
   const answer = await takeRecord(env.DB, { sent: body.sent, host: self, lookups: got.lookups });
@@ -103,7 +105,7 @@ export async function takeJoin(env, group, caller, body, { maxWaiting }) {
  * removed member's site, told. Once the group's `closed`, nothing more is taken (members.js); `onClose(entry)`: the
  * owner's close, just taken.
  */
-export async function takeMemberRecord(env, group, member, body, { maxMembers, tell, closed = false, onClose }) {
+export async function takeMemberRecord(env, group, member, body, { maxMembers, tell, closed = false, onClose, onRemoved = async (_target, _body, _record) => {} }) {
   const self = await groupSelf(env);
   if (!self) return json({ error: "This group isn't ready yet." }, 409);
   const got = await theirs(env, String(member.identity), body);
@@ -136,8 +138,13 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
     if (record.kind === "remove") {
       const { n, fp, taken } = answer.entry;
       await tell(target, { sent: body.sent, entry: { n, fp, taken, prev: await headAt(db, self.list, n - 1) }, receipt: answer.receipt });
-      // Anything reported about what they wrote here is dealt with (reports.js).
+      // Anything reported about what they wrote here is dealt with (reports.js); and a member (not someone only asking)
+      // can't ask to join again until an admin lets them (docs/safety-plan.md 3.4).
       if (target.identity) await markMemberRemoved(db, String(target.identity), record.author);
+      if (target.identity && target.approved_at) {
+        await db.prepare("INSERT OR REPLACE INTO group_removed (person, name, removed_at) VALUES (?, ?, ?)").bind(String(target.identity), String(target.name ?? "Someone"), now()).run();
+        await onRemoved(target, body, record);
+      }
     }
     await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
   }

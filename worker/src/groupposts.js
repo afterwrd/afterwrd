@@ -38,7 +38,7 @@ import { DAILY_RECORDS_SAID, listEntries, overDailyRecords, readList, takeRecord
 import { checkProfile, identityState, keepNewerProfile } from "./identities.js";
 import { eventTrouble, pollTrouble } from "./itemkinds.js";
 import { dateOver, ID_RE, itemGone, keepKnown, kindPlan, lookupsFor, photosOf, refreshDate, refreshItem, sentRecord, withDelegation } from "./items.js";
-import { ownIdentity } from "./keys.js";
+import { hostingKey, ownIdentity } from "./keys.js";
 import { buildIfDue } from "./before.js";
 import { tidyBefore } from "./clearout.js";
 import { rateWindow } from "./limits.js";
@@ -46,7 +46,7 @@ import { dateList, parseListId, signHead } from "./lists.js";
 import { says } from "./mentions.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
 import { outbox } from "./outbox.js";
-import { DATE_RE, parseRecord, WITH_CONTENT } from "../public/static/records.js";
+import { DATE_RE, makeRecord, parseRecord, WITH_CONTENT } from "../public/static/records.js";
 import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { selfHosted } from "./hosting.js";
@@ -81,6 +81,54 @@ export async function groupRules(env, self, admins) {
     admin: (person, at) => roles.roleOf(person) === "admin" && Boolean(at) && Number.isSafeInteger(at.n) && roles.heads.get(at.n) === at.h
       && (roles.changedAt.get(person) ?? 0) <= at.n,
   };
+}
+
+/**
+ * Everything `author` wrote here removed by the group itself, with its hosting key (lists.js GroupRules lets the host
+ * remove), once an admin has removed them and asked for it: "Remove and clear up" (docs/safety-plan.md 3.4). Their posts
+ * go whole (photos and comments with them); their comments on others' posts go one by one. Readers see each "removed
+ * by" the group. Uncapped, as admins' removals are, so a clear-up doesn't stop half way. Returns how many went.
+ */
+export async function clearUp(env, author) {
+  const db = env.DB;
+  const self = await hostOf(env);
+  if (!self) return 0;
+  const key = await hostingKey(env);
+  const rules = await groupRules(env, self, false);
+  const lookups = lookupsFor(env);
+  const { results } = await db.prepare("SELECT DISTINCT list FROM authored WHERE author = ? LIMIT 2000").bind(author).all();
+  let removed = 0;
+  for (const { list } of results) {
+    const item = await db.prepare("SELECT author, type FROM items WHERE id = ?").bind(String(list)).first();
+    if (!item) continue; // one date's answers of a repeating event: not words
+    let targets;
+    if (String(item.author) === author) {
+      targets = item.type === "post" ? [String(list)] : []; // a photo goes with its post
+    } else {
+      const entries = await listEntries(db, String(list));
+      const records = entries.map((e) => (e.sent ? parseRecord(fromB64url(e.sent.record)) : null));
+      const gone = new Set(records.filter((r) => r && (r.kind === "delete" || r.kind === "remove")).map((r) => r.about));
+      targets = entries.filter((e, i) => records[i]?.kind === "comment" && records[i].author === author && !gone.has(e.fp)).map((e) => e.fp);
+    }
+    for (const about of targets) {
+      const at = await db.prepare("SELECT n, head, deleted_at FROM lists WHERE id = ?").bind(String(list)).first();
+      if (!at || at.deleted_at) break;
+      const made = await makeRecord({ kind: "remove", author: self.person, host: self.person, item: String(list),
+        seen: { n: Number(at.n), h: String(at.head) }, prev: null, about }, undefined, key);
+      const answer = await takeRecord(db, { sent: made.sent, host: self, lookups, group: rules });
+      if (answer.refused) continue;
+      removed += 1;
+      await markRemoved(db, about, self.person);
+      if (answer.deleted) {
+        for (const photo of await photosOf(db, String(list))) {
+          await tombstone(db, photo);
+          await itemGone(env, photo);
+        }
+        await itemGone(env, String(list));
+      }
+    }
+  }
+  return removed;
 }
 
 /** A member's signed name, if they sent one: kept, to name them to others in the group. */

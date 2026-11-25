@@ -257,6 +257,8 @@ export function groupJoinPage(ctx, { info = null, link = "", error = null }) {
 <p class="crumbs"><a href="/groups">Groups</a> /</p>
 <h1>Join ${info.name}?</h1>
 ${info.about && html`<p>${info.about}</p>`}
+${info.rules && html`<section class="card rules"><h2>The group's rules</h2><p>${info.rules}</p>
+  <p class="meta">By asking to join, you agree to them.</p></section>`}
 <p class="meta">${info.owner}'s group, at <strong>${host(info.origin)}</strong>. Its members will see your name and your
 site's address, and what you post there is kept there. Its admins let people in, so you'll be asking. You can leave
 whenever you like, and joining shares nothing else of yours.</p>
@@ -275,6 +277,7 @@ export function groupHead(ctx, g, info, tab) {
   <h1>${info?.name ?? g.name}</h1>
 </div>
 ${(info?.about ?? g.about) && html`<p>${info?.about ?? g.about}</p>`}
+${info?.rules && html`<details class="rules"><summary>The group's rules</summary><p>${info.rules}</p></details>`}
 <p class="meta">${groupWhere(g)}${info && ` · ${info.members} ${info.members === 1 ? "member" : "members"}`}. Only its members see it.</p>
 ${closedNotice(g)}
 ${info && mentionData("mention-group", { people: info.people ?? [], here: Boolean(info.mayHere) })}
@@ -397,7 +400,7 @@ export function groupPage(ctx, data) {
 }
 
 /** Who's in a group. For its admins: requests to join, the invite link, roles, and (its owner) deleting it. */
-export function groupMembersPage(ctx, { membership: g, group: info, members, max, connected, friends = [], deleteCommand = null, gone = false }) {
+export function groupMembersPage(ctx, { membership: g, group: info, members, removed = [], max, connected, friends = [], deleteCommand = null, gone = false }) {
   const owner = g.role === "owner";
   const shut = closedGroup(g);
   const here = `/groups/${g.id}/members`;
@@ -435,16 +438,17 @@ export function groupMembersPage(ctx, { membership: g, group: info, members, max
   const choices = (m) => {
     if (!runs(g) || shut || m.id === null || m.role === "owner" || m.from === ctx.url.origin) return [];
     if (m.waiting) return [["approve", "Let in", true], ["decline", "Decline"]];
-    if (m.role === "admin") return owner ? [["member", "Stop being admin"], ["remove", "Remove"]] : [];
-    return [...(owner ? [["admin", "Make admin"]] : []), ["remove", "Remove"]];
+    if (m.role === "admin") return owner ? [["member", "Stop being admin"], ["remove", "Remove"], ["clear", "Remove and clear up"]] : [];
+    return [...(owner ? [["admin", "Make admin"]] : []), ["remove", "Remove"], ["clear", "Remove and clear up"]];
   };
   // Each decision is a record signed in this browser (ui/groupsign.js).
-  const SIGNED = { approve: ["approve"], decline: ["remove"], remove: ["remove"], admin: ["role", "admin"], member: ["role", "member"] };
+  const SIGNED = { approve: ["approve"], decline: ["remove"], remove: ["remove"], clear: ["remove"], admin: ["role", "admin"], member: ["role", "member"] };
   const decide = (m) => {
     const list = m.join ? choices(m) : [];
-    return list.length > 0 && html`${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : action === "remove" ? " danger" : ""}" data-group-record="${SIGNED[action][0]}"
+    return list.length > 0 && html`${list.map(([action, label, primary]) => html`<button class="chip${primary ? " primary" : action === "remove" || action === "clear" ? " danger" : ""}" data-group-record="${SIGNED[action][0]}"
         data-group="${g.id}" data-about="${m.join}" ${SIGNED[action][1] ? raw(`data-role="${SIGNED[action][1]}"`) : ""}
-        ${action === "remove" && raw(`data-ask="Remove them from the group? What they posted stays." data-ask-ok="Remove"`)}>${label}</button>`)}`;
+        ${action === "remove" && raw(`data-ask="Remove them from the group? What they posted stays. They can't ask to join again unless you let them." data-ask-ok="Remove"`)}
+        ${action === "clear" && raw(`data-clear="1" data-ask="Remove them, and everything they've posted or commented here? Everyone will see it was removed by the group. This can't be undone." data-ask-ok="Remove all of it"`)}>${label}</button>`)}`;
   };
   const waiting = members.filter((m) => m.waiting);
   const inGroup = members.filter((m) => !m.waiting);
@@ -471,11 +475,20 @@ ${waiting.length > 0 && html`<section class="requests">
 </section>`}
 ${!gone && html`<h2>Members <span class="meta">${inGroup.length}${runs(g) && ` of up to ${max + 1}`}</span></h2>
 <ul class="member-list">${inGroup.map((m) => person(m, decide(m)))}</ul>`}
+${runs(g) && !shut && removed.length > 0 && html`<section id="removed">
+  <h2>Removed</h2>
+  <p class="meta">They can't ask to join again, even with an invite link, unless an admin lets them.</p>
+  <ul class="member-list">${removed.map((r) => html`<li class="card member"><div class="member-top"><span class="what"><strong>${r.name}</strong></span></div>
+    <div class="actions-row"><form method="post" action="/_groups/${g.id}/unremove"><input type="hidden" name="person" value="${r.person}">
+      <input type="hidden" name="back" value="${here}#removed"><button class="chip">Let them ask again</button></form></div></li>`)}</ul>
+</section>`}
 ${runs(g) && !shut && html`<section class="card" id="about">
-  <h2>Name and description</h2>
+  <h2>Name, description and rules</h2>
   <form class="stack" method="post" action="/_groups/${g.id}/about">
     <input name="name" required maxlength="100" value="${name}" aria-label="Group name">
     <textarea name="about" rows="2" maxlength="1000" placeholder="What it's for (optional)" aria-label="What it's for">${info.about ?? ""}</textarea>
+    <label>The group's rules <span class="meta">(optional: shown to anyone asking to join, and on the group's pages)</span>
+      <textarea name="rules" rows="4" maxlength="2000" placeholder="Be kind. No selling. What's said here stays here.">${info.rules ?? ""}</textarea></label>
     <div class="actions-row"><button class="chip">Save</button></div>
   </form>
 </section>

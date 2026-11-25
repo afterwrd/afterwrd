@@ -25,7 +25,7 @@
 // there (group_mine), read-only, until migration (docs/signed-conversations.md, step 10).
 import { groupId } from "../public/static/activity.js";
 import { safeNext } from "./auth.js";
-import { cleanName, closedGroup, MAX_GROUP_ABOUT, MAX_GROUP_NAME } from "./groups.js";
+import { cleanName, closedGroup, MAX_GROUP_ABOUT, MAX_GROUP_NAME, MAX_GROUP_RULES } from "./groups.js";
 import { handleGroupSites } from "./groupsites.js";
 import { handleGroupIdentity } from "./groupidentity.js";
 import { callFriend } from "./calls.js";
@@ -67,7 +67,7 @@ export function parseGroup(g, site, n, env) {
   const waiting = g["afterwrd:waiting"];
   const owner = person(g.attributedTo, env);
   return {
-    name: text(g.name, 300)?.trim() || "A group", about: text(g.about ?? g.summary, 2000),
+    name: text(g.name, 300)?.trim() || "A group", about: text(g.about ?? g.summary, 2000), rules: text(g["afterwrd:rules"], 2000),
     owner: owner.name, ownerFrom: owner.from, members: count(g["afterwrd:members"]) ?? 1,
     role: ROLES.includes(g["afterwrd:role"]) ? g["afterwrd:role"] : "member",
     waiting: Number.isSafeInteger(waiting) && waiting >= 0 ? waiting : 0,
@@ -97,6 +97,10 @@ export function parseGroupMembers(data, site, n, env) {
       // Waiting, and in the group before afterwrd 2 (step 10d: beforegroups.js): the owner's browser lets them in.
       before: m?.["afterwrd:before"] === true,
     })).filter((m) => m.name),
+    // For admins: who's been removed, and can't ask again until an admin lets them (docs/safety-plan.md 3.4).
+    removed: (Array.isArray(data?.["afterwrd:removed"]) ? data["afterwrd:removed"].slice(0, 200) : [])
+      .filter((r) => /^[A-Za-z0-9_-]{43}$/.test(r?.["afterwrd:person"] ?? ""))
+      .map((r) => ({ person: r["afterwrd:person"], name: cleanName(r.name), at: seconds(r["afterwrd:removedAt"]) })),
   };
 }
 
@@ -171,7 +175,7 @@ export async function linkInfo(env, url, link) {
   if (!person) throw new Refusal("That group's site needs updating before anyone can join it. Its owner can update it from their Update page.");
   const members = info.members && Number.isSafeInteger(info.members.n) && /^[A-Za-z0-9_-]{43}$/.test(info.members.h ?? "")
     ? { n: info.members.n, h: info.members.h } : null;
-  return { ...target, id, name: cleanName(info.name, "A group"), about: text(info.about, 2000), owner: cleanName(info.owner), joined: joined?.id ?? null,
+  return { ...target, id, name: cleanName(info.name, "A group"), about: text(info.about, 2000), rules: text(info.rules, 2000), owner: cleanName(info.owner), joined: joined?.id ?? null,
     person, members };
 }
 
@@ -282,7 +286,8 @@ export async function handleGroupActions(request, env, url) {
         }
       }
       const body = await request.json().catch(() => ({}));
-      const { record, fp } = await relayGroupRecord(env, group, body.sent, (p, b) => call(env, group, p, b));
+      // "Remove and clear up" (docs/safety-plan.md 3.4): the group removes everything they wrote there too.
+      const { record, fp } = await relayGroupRecord(env, group, body.sent, (p, b) => call(env, group, p, b), { clear: body.clear === true });
       if (record.kind === "leave") {
         await forgetGroup(db, group);
         return json({ ok: true, go: "/groups" });
@@ -325,7 +330,11 @@ export async function handleGroupActions(request, env, url) {
     } else if (action === "/about") {
       await admin(env, group, "about", {
         name: String(form.get("name") ?? "").slice(0, MAX_GROUP_NAME), about: String(form.get("about") ?? "").slice(0, MAX_GROUP_ABOUT),
+        ...(form.has("rules") && { rules: String(form.get("rules") ?? "").slice(0, MAX_GROUP_RULES) }),
       });
+    } else if (action === "/unremove") {
+      // Someone removed may ask to join again (docs/safety-plan.md 3.4).
+      await admin(env, group, "unremove", { person: String(form.get("person") ?? "") });
     } else {
       return new Response("Not found", { status: 404 });
     }

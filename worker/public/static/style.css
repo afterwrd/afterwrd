@@ -937,3 +937,8 @@ details.more .menu a:hover, details.more .menu button:hover { background: var(--
 .help section { margin-top: 1.6rem; }
 .help ul { padding-left: 1.2rem; }
 .help li { margin: 0.5rem 0; }
+
+/* A group's rules (views/groups.js) */
+.rules p { white-space: pre-line; }
+details.rules { margin: 0.5rem 0; }
+details.rules summary { cursor: pointer; color: var(--muted); }

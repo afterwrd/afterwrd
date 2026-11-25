@@ -158,13 +158,13 @@ export async function waitingPoint(env, group) {
 }
 
 /** POST /_groups/<id>/records: the owner's signed record about the group's members, passed on. Returns {record, fp}. */
-export async function relayGroupRecord(env, group, sent, send) {
+export async function relayGroupRecord(env, group, sent, send, { clear = false } = {}) {
   const { record, body } = await ready(env, sent, ["approve", "remove", "role", "leave", "close"], String(group.identity));
   let reply;
-  try { reply = await send("/_group/records", body); } catch (error) {
+  try { reply = await send("/_group/records", { ...body, ...(clear && record.kind === "remove" && { clear: true }) }); } catch (error) {
     // A leave is kept to send again (sentchecks.js).
     await keepSent(env, record, sent, null, error);
-    if (!(error.status === 409 && error.message === "duplicate")) throw new Refusal(`${error.message}.${willRetry(record)}`);
+    if (!(error.status === 409 && error.message === "duplicate")) throw new Refusal(`${String(error.message).replace(/\.$/, "")}.${willRetry(record)}`);
     reply = {};
   }
   return { record, fp: await keepSent(env, record, sent, reply.receipt ?? null) };

@@ -3591,6 +3591,25 @@ what it sent stay.
 Source: `src/groupjoin.js` `keepSent`, `relayGroupRecord`; `src/groupcopies.js` `pullGroup`, `trim`, `pullGroups`,
 `postSigned`, `relayToGroup`; `src/membership.js` `refresh`, `forgetGroup`; `src/sentchecks.js` `keepSent`.
 
+### 10.15 Rules, removed members, and clearing up
+
+Added for safety (docs/safety-plan.md 3.4); a group's site from before answers as it did, and members' sites cope.
+
+- **Rules.** `POST /_group/admin/about` also takes `rules` (at most 2,000 characters; empty clears them). The group
+  object (10.6) carries them as `"afterwrd:rules"`, and `GET /_join/<token>/info` as `rules`, so the joiner's site shows
+  them before they ask ("By asking to join, you agree to them").
+- **Removed stays removed.** When an admin's `remove` takes out a member who was in (not someone only asking), the
+  group keeps their person id. A later `join` from it is refused: `POST /_join/<token>/accept` answers 403 `You can't
+  join this group.`, whatever the link. Leaving doesn't count. Admins see who's there in `GET /_group/admin/members`
+  as `"afterwrd:removed": [{"afterwrd:person", name, "afterwrd:removedAt"}]`, and `POST /_group/admin/unremove`
+  `{person}` lets them ask again.
+- **Clearing up.** `POST /_group/records` with a member's `remove` may carry `clear: true`. Once the removal is taken,
+  the group removes everything that person wrote there with its own hosting key, as `GroupRules` lets a host: each of
+  their posts whole (photos and comments with it), and each of their comments on others' posts. Readers show these as
+  removed by the group. They aren't held to the per-person cap.
+
+Source: `src/groups.js`, `src/groupmembers.js` `takeJoin`, `takeMemberRecord`; `src/groupposts.js` `clearUp`.
+
 ## 11. Site checks
 
 A site can't vouch for itself. Tampered code can answer any question about itself with a copy of the real code. So
@@ -3954,6 +3973,7 @@ owner's browser and their own site, and aren't part of the protocol.
 | `POST /_group/records` | members, and people waiting | 10.7 |
 | `GET /_group/admin/members`, `POST /_group/admin/link`, `/about`, `/here`, `/end` | admins (`end`: the owner) | 10.8 |
 | `GET /_group/admin/reports`, `POST /_group/admin/reports/leave` `{about, word?}` | admins | 8.15 |
+| `POST /_group/admin/unremove` `{person}` | admins | 10.15 |
 | `GET /_p/items?since=<t>`, `?before=<t>`, `?id=<id>` | members | 10.9 |
 | `GET /_p/items/<id>[?after=<n>]`, `GET /_p/items/<id>/dates/<date>[?after=<n>]` | members | 10.9 |
 | `POST /_p/items` | members | 10.9 |
