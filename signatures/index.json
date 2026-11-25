@@ -1,6 +1,12 @@
 {
-  "seq": 33,
+  "seq": 34,
   "releases": [
+    {
+      "version": "2.3.0",
+      "manifest_sha256": "0f2afe348557e12444bd65561aa3467018d80f391a8cdfc07969f6decd68def5",
+      "signed_at": "2026-11-25T21:35:27Z",
+      "etag": "6d040099fdd266238f55afeaae0a84d38ed7db99100a1ddf6f06d748955a5429"
+    },
     {
       "version": "2.2.1",
       "manifest_sha256": "9ae2f9d1fecf552ed971aaa908641085471a6cc9b08f6c894aaccfafef674671",
@@ -200,6 +206,6 @@
       "etag": "7d08fbae9f17aca7cdfb4dc641c214d5c3026a0f4c323642e38a0852316507e1"
     }
   ],
-  "signature": "xnrIMYdDwDwmidHL0ckTXBurerXjBZpgTfTyPr6EPHtX2r8pN+KtqCBN7gH3gJ7PsPcdRfdA1eF5UiSjXKKABQ==",
-  "signature2": "rJtG52K/xWDzpmftty8FyrzARLSHduxNChYT0mBNN83uUU41z04icjpTI1zJlBNFW8zs8/ablUZKoYlZeSoBDQ=="
+  "signature": "Lz8wIL26uMvZtfC3P8rVALeazozfw83nO+C+DiV1BHwVad7psin/QWHXcRdmug4kcfzoLnRmdUwuuV6g09lJCg==",
+  "signature2": "Mz44+RoIDcMOM7+X1S4IPAZl3t+/fRdwNHlmGa9M6eqdjVmsZ98dSzIz0sw4wbH31frPasdQeNxb9Dmo3Lc5DQ=="
 }
