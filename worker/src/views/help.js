@@ -15,7 +15,8 @@ const tel = (number) => html`<a class="tel" href="tel:${number.replace(/\s/g, ""
  * "Something not working?" (afterwrd.app's own pages say theirs in their footer).
  */
 export const helpBody = ({ version = null } = {}) => html`<nav class="contents" aria-label="On this page">
-  <a href="#how">How afterwrd works</a> · <a href="#safe">Staying safe</a> · <a href="#bugs">Something not working?</a>
+  <a href="#how">How afterwrd works</a> · <a href="#site">Looking after your site</a> · <a href="#safe">Staying safe</a> ·
+  <a href="#bugs">Something not working?</a>
 </nav>
 
 <section id="how">
@@ -50,6 +51,47 @@ export const helpBody = ({ version = null } = {}) => html`<nav class="contents" 
   <h3>Your things are yours</h3>
   <p><strong>Download everything</strong> gives you all of it, to keep or to bring to another site. Nothing you post is used for
   anything else, and nobody is shown adverts.</p>
+</section>
+
+<section id="site">
+  <h2>Looking after your site</h2>
+  <h3>Your Cloudflare account is the key to your site</h3>
+  <p>Anyone who gets into it can get into your site. Give it a strong password you use nowhere else, turn on two-step sign-in
+  (in Cloudflare: My Profile → Authentication), and keep its backup codes somewhere safe. If you can, keep an account just
+  for afterwrd.</p>
+  <h3>Your recovery code</h3>
+  <p>If you lose every phone and computer that signs for you, your recovery code lets you sign again (it takes 7 days, and
+  any devices you still have are told, in case it isn't you). Your site doesn't keep it: write it down, or keep it in your
+  password manager. You'll find it, and can make a new one, in <strong>Your devices</strong>.</p>
+  <h3>Your devices</h3>
+  <p>Open device links only on your own phones and computers. If <strong>Your devices</strong> lists one you don't recognise,
+  remove it, or sign out everywhere.</p>
+  <h3>Updates and friends' checks</h3>
+  <p>Let afterwrd update itself, and let your friends' sites check yours: both are on the <strong>Update</strong> page. A
+  check looks at three things: that your site is running exactly a signed afterwrd release; that every version put live
+  since the last check was one too; and that apps and API tokens in your Cloudflare account did only what installing,
+  updating and groups do.</p>
+  <h3 id="checks">If a check finds something</h3>
+  <p>Home tells you, and <strong>Update</strong> shows what it found.</p>
+  <ul>
+    <li><strong>"Couldn't check"</strong> usually means your site or Cloudflare was busy. There's nothing to do unless it
+      keeps happening.</li>
+    <li><strong>"Needs a look"</strong>:
+      <ol>
+        <li>Read what it found. If the check was on an older afterwrd than your site runs now, it checks again within a day
+          or so.</li>
+        <li>If you didn't change anything in Cloudflare yourself, then until it's sorted, don't post or import anything
+          private, and don't open device links.</li>
+        <li>Sign in to Cloudflare. Check your password and two-step sign-in, and look in the account's Audit Log (under
+          Manage Account) for sign-ins or changes you didn't make. Remove any API tokens (My Profile → API Tokens) or
+          Connected Applications (My Profile → Connected Applications) you don't recognise.</li>
+        <li>Tell us privately, at <a href="mailto:security@afterwrd.app">security@afterwrd.app</a>, with what it found.
+          We'll help you put it right.</li>
+      </ol></li>
+    <li>A site you've only just installed, and haven't used yet? Start again cleanly instead: see
+      <a href="https://afterwrd.app/check/#wrong">what to do with a new site</a>.</li>
+    <li>If your site's check of a friend's finds something, Home says so: let them know, so they can look.</li>
+  </ul>
 </section>
 
 <section id="safe">

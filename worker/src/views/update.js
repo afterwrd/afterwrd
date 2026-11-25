@@ -118,7 +118,7 @@ function checksPart(grant, failure, attempts = []) {
     ${escape(day(failure.checked_at))}${failure.version ? ` (afterwrd ${escape(failure.version)})` : ""} and found something that needs a look:</p>
     <ul>${failure.problems.map((p) => `<li>${escape(p)}</li>`).join("")}</ul>
     <p class="meta">If you didn't change anything in Cloudflare yourself, ask ${escape(failure.name)} about it, and see
-    <a href="https://afterwrd.app/check/#wrong">what to do</a>.</p></div>` : "";
+    <a href="/help#checks">what to do</a>.</p></div>` : "";
   if (grant.on) return `${found}<p id="checks-on">Your friends' sites check yours by themselves now and then, and tell you if anything's wrong.</p>`;
   const names = attempts.map((a) => `${escape(a.name)}'s`);
   const tried = attempts.length ? `<p class="notice" id="check-attempts">${names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`}

@@ -18,7 +18,7 @@ export function resultHtml(r, whose = "theirs", by = null) {
   else {
     if (r.code === "matches") say(true, `${Your} site is running exactly <b>afterwrd ${escape(r.version)}</b>, every file the same as the published release.`);
     else if (r.code === "different") {
-      say(false, `${Your} site's code is <b>not</b> the published afterwrd ${escape(r.version)}. Don't use it yet: see <a href="https://afterwrd.app/check/#wrong">what to do</a>.`);
+      say(false, `${Your} site's code is <b>not</b> the published afterwrd ${escape(r.version)}. Don't use it yet: see <a href="/help#checks">what to do</a>.`);
       lines.push(`<ul class="check-files">${(r.files ?? []).map((f) => `<li>${escape(f.name)}: ${escape(f.why)}</li>`).join("")}</ul>`);
     } else if (r.code === "no-release") say(false, `It says it's afterwrd ${escape(r.version)}, but there's no such release.`);
     else if (r.code === "release-unavailable") say(false, `Couldn't download afterwrd ${escape(r.version)} from GitHub to compare with. Check again later.`);
