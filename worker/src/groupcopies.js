@@ -41,6 +41,8 @@ import { decode, fromB64url } from "../public/static/signed.js";
 import { html, json, now, Refusal } from "./util.js";
 import { keepGroupUsage } from "./allowances.js";
 
+const REPORT_NOTICES = 20; // a day from one group: things raised with its admins (reports.js)
+
 export const KEEP = 50; // a group's newest posts kept here (docs/signed-conversations.md section 3)
 const PULL_SECONDS = 3600;
 const PAGES = 3;
@@ -589,13 +591,18 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   if (note.kind === "report") {
     if (!["owner", "admin"].includes(String(group.role)) || typeof note.id !== "string" || !/^[A-Za-z0-9_-]{16,64}$/.test(note.id)) return json({ ok: true }, 202);
     const illegal = note.illegal === true;
+    const at = now();
     const buzzed = Number((await env.DB.prepare("SELECT COUNT(*) AS n FROM notices WHERE group_id = ? AND kind = 'report' AND about = 'illegal' AND created_at > ?")
-      .bind(g, now() - 86400).first())?.n ?? 0);
-    const kept = await keepNotice(env.DB, { kind: "report", fp: `report-${note.id}`, group: g, item: "reports", target: "reports", actor: String(group.name),
-      text: illegal ? "someone thinks something here might be illegal." : "someone has raised something with the admins." });
-    if (kept && illegal) {
-      await env.DB.prepare("UPDATE notices SET about = 'illegal' WHERE kind = 'report' AND fp = ?").bind(`report-${note.id}`).run();
-      if (buzzed < 3) notifyLater(env, url.origin, work, { title: String(group.name), text: "Someone thinks something here might be illegal. Have a look.",
+      .bind(g, at - 86400).first())?.n ?? 0);
+    // A budget of their own (REPORT_NOTICES a day from a group), outside the one other notices share (notes.js), so
+    // neither can crowd out the other.
+    const kept = await env.DB.prepare(`INSERT INTO notices (kind, fp, group_id, own, target, actor, text, created_at, item, about)
+      SELECT 'report', ?1, ?2, 0, 'reports', ?3, ?4, ?5, 'reports', ?6
+      WHERE (SELECT COUNT(*) FROM notices WHERE group_id = ?2 AND kind = 'report' AND created_at > ?5 - 86400) < ?7
+      ON CONFLICT (kind, fp) DO NOTHING RETURNING id`).bind(`report-${note.id}`, g, String(group.name),
+      illegal ? "someone thinks something here might be illegal." : "someone has raised something with the admins.", at, illegal ? "illegal" : null, REPORT_NOTICES).first();
+    if (kept && illegal && buzzed < 3) {
+      notifyLater(env, url.origin, work, { title: String(group.name), text: "Someone thinks something here might be illegal. Have a look.",
         hidden: "Something to look at", url: `/groups/${g}/reports`, tag: `report-g${g}-${note.id}` });
     }
     return json({ ok: true }, 202);

@@ -5,14 +5,17 @@
 //
 // On the site holding what's reported (a group's, or the person's whose post it's on):
 //   POST /_p/report           {item, about, reason, note?, named}: kept, with a copy of what was said; answers {id}
-//   POST /_p/reports/check    {ids}: what became of each ({id, outcome, word}), for the reporter's site
+//   POST /_p/reports/check    {ids}: what became of each ({id, outcome, word}), for the reporter's site: unsigned, as
+//                             a report's id is its own secret (app.js), so it doesn't say again who reported
 // and, for a group's owner and admins (groups.js):
 //   GET  /_group/admin/reports            what's been raised, newest first, grouped by what it's about
 //   POST /_group/admin/reports/leave      {about, word?}: looked at, and left
 // A removal of what was reported (lists.js), or of its writer from the group (groupmembers.js), deals with it too.
 //
-// Who reported is kept only if they chose to be named (ticked by default); otherwise nothing on this site says who,
-// and the daily cap (DAILY a reporter, once a record) is counted in the object's memory, not in rows.
+// Who reported is kept only if they chose to be named (ticked by default); otherwise nothing on this site says who. The
+// daily caps (DAILY a reporter, once a thing) are kept under the day's salted hashes (report_caps), so they hold across
+// restarts without naming anyone. Whoever runs a site can still change its code: nothing here pretends otherwise.
+// A report about an admin's own post or comment goes to the others who run the group, never to them.
 //
 // On the reporter's own site: reports_sent, asked about hourly (checkSentReports), with a quiet notice when one's dealt
 // with, and, for "might be illegal" left a few days, where else to turn (Getting help).
@@ -20,7 +23,7 @@ import { safeNext } from "./auth.js";
 import { callFriend } from "./calls.js";
 import { listEntries } from "./hosted.js";
 import { keepNotice } from "./notes.js";
-import { html, now, randomToken } from "./util.js";
+import { html, json, now, randomToken, sha256 } from "./util.js";
 import { messagePage } from "./views/pages.js";
 import { parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
@@ -42,23 +45,57 @@ const CHECK_SECONDS = 3600;
 const ILLEGAL_PUSHES = 3; // phone notifications a day from one space for "might be illegal"
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 const REPORT_ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const PER_THING = 20; // open reports kept about one thing; more are answered with one already there
+const LISTED = 200; // things listed on Things to look at (every open one first)
 
 // --- the host's side --------------------------------------------------------------------------------------------------
 
-/** @type {{ day: number, counts: Map<string, number>, pairs: Set<string> }} */
-let today = { day: -1, counts: new Map(), pairs: new Set() };
 const dayNow = () => Math.floor(Date.now() / 86_400_000);
 
-/** For tests: the day's counts forgotten, as at midnight. */
-export const forgetToday = () => { today = { day: -1, counts: new Map(), pairs: new Set() }; };
+/**
+ * The day's caps for `reporter` reporting `about`: why not, or null (and counted). Kept under SHA-256 of the day's
+ * random salt with the person (and the thing), so they last through restarts and updates but name nobody; the salt
+ * and yesterday's rows go with today's first report.
+ */
+async function overCap(db, reporter, about) {
+  const day = dayNow();
+  const fresh = `${day}:${randomToken()}`;
+  await db.batch([
+    db.prepare(`INSERT INTO settings (key, value) VALUES ('report_salt', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      WHERE substr(settings.value, 1, instr(settings.value, ':') - 1) != ?2`).bind(fresh, String(day)),
+    db.prepare("DELETE FROM report_caps WHERE day < ?").bind(day),
+  ]);
+  const salt = String((await db.prepare("SELECT value FROM settings WHERE key = 'report_salt'").first())?.value ?? fresh);
+  const [person, pair] = await Promise.all([sha256(`${salt} ${reporter}`), sha256(`${salt} ${reporter} ${about}`)]);
+  if (!(await db.prepare("INSERT INTO report_caps (key, n, day) VALUES (?, 1, ?) ON CONFLICT(key) DO NOTHING RETURNING n").bind(pair, day).first())) {
+    return { error: "You've told them about this already.", status: 409 };
+  }
+  const counted = await db.prepare(`INSERT INTO report_caps (key, n, day) VALUES (?1, 1, ?2) ON CONFLICT(key) DO UPDATE SET n = n + 1
+    WHERE report_caps.n < ?3 RETURNING n`).bind(person, day, DAILY).first();
+  return counted ? null : { error: "That's a lot for one day. Try again tomorrow.", status: 429 };
+}
+
+/**
+ * Reports whose post or comment has gone with its list (a whole post deleted or removed, its photos with it) are dealt
+ * with as removed; and what was dealt with long enough ago goes, copy and all.
+ */
+async function tidyReports(db) {
+  const at = now();
+  await db.batch([
+    db.prepare(`UPDATE reports SET handled_at = ?, outcome = 'removed' WHERE handled_at IS NULL
+      AND item IN (SELECT id FROM lists WHERE deleted_at IS NOT NULL)`).bind(at),
+    db.prepare("DELETE FROM reports WHERE handled_at IS NOT NULL AND handled_at < ?").bind(at - KEEP_SECONDS),
+  ]);
+}
 
 /**
  * A report from `reporter` (a person id; `reporterName`, as this site knows them) about record `about` on list `item`.
- * `mayReport(record)`: whether this host takes reports about that record (a person's site: only comments by others on
- * the owner's posts). Returns {id, reason, item} or {error, status}.
- * @param {any} env @param {{ reporter: string, reporterName: string, body: any, mayReport: (record: any) => boolean }} what
+ * `refuse(record)`: why this host won't take a report about that record, or null (a person's site: only comments by
+ * others on the owner's posts; a group's: not when there's nobody to tell but its writer). Returns {id, reason, item,
+ * author} or {error, status}.
+ * @param {any} env @param {{ reporter: string, reporterName: string, body: any, refuse: (record: any) => Promise<string | null> }} what
  */
-export async function takeReport(env, { reporter, reporterName, body, mayReport }) {
+export async function takeReport(env, { reporter, reporterName, body, refuse }) {
   const db = env.DB;
   const item = String(body?.item ?? "");
   const about = String(body?.about ?? "");
@@ -69,29 +106,29 @@ export async function takeReport(env, { reporter, reporterName, body, mayReport 
   const record = entry?.sent ? parseSent(entry.sent) : null;
   if (!record) return { error: "That isn't there any more.", status: 404 };
   if (record.record.author === reporter) return { error: "That's yours.", status: 400 };
-  if (!mayReport(record.record)) return { error: "That can't be reported here.", status: 400 };
-  // The cap, in memory: so many a day from one person, and once for each thing.
-  if (today.day !== dayNow()) today = { day: dayNow(), counts: new Map(), pairs: new Set() };
-  const pair = `${reporter} ${about}`;
-  if (today.pairs.has(pair) || (await db.prepare("SELECT 1 FROM reports WHERE reporter = ? AND about = ?").bind(reporter, about).first())) {
+  const refused = await refuse(record.record);
+  if (refused) return { error: refused, status: 400 };
+  // Once a thing (a named report, for good; any, for the day), and so many a day from one person.
+  if (await db.prepare("SELECT 1 FROM reports WHERE reporter = ? AND about = ?").bind(reporter, about).first()) {
     return { error: "You've told them about this already.", status: 409 };
   }
-  if ((today.counts.get(reporter) ?? 0) >= DAILY) return { error: "That's a lot for one day. Try again tomorrow.", status: 429 };
-  today.counts.set(reporter, (today.counts.get(reporter) ?? 0) + 1);
-  today.pairs.add(pair);
+  const over = await overCap(db, reporter, about);
+  if (over) return over;
+  await tidyReports(db);
+  const author = String(record.record.author);
+  // Plenty open about it already: answered with one of those, whose outcome is this one's too.
+  const open = await db.prepare("SELECT id, COUNT(*) OVER () AS n FROM reports WHERE about = ? AND handled_at IS NULL ORDER BY created_at LIMIT 1").bind(about).first();
+  if (open && Number(open.n) >= PER_THING) return { id: String(open.id), reason, item, author };
   const named = body?.named !== false;
   const id = randomToken();
-  const copy = { kind: record.record.kind, text: String(record.content?.text ?? "").slice(0, 5000),
-    photos: Array.isArray(record.content?.photos) ? record.content.photos.length : 0 };
-  const at = now();
-  await db.batch([
-    db.prepare(`INSERT INTO reports (id, item, about, author, reason, note, reporter, reporter_name, copy, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, item, about, record.record.author, reason, note || null,
-      named ? reporter : null, named ? String(reporterName).slice(0, 100) : null, JSON.stringify(copy), at),
-    // Dealt with long enough ago: gone, copy and all.
-    db.prepare("DELETE FROM reports WHERE handled_at IS NOT NULL AND handled_at < ?").bind(at - KEEP_SECONDS),
-  ]);
-  return { id, reason, item };
+  // What it said, kept once for each thing.
+  const first = !(await db.prepare("SELECT 1 FROM reports WHERE about = ? LIMIT 1").bind(about).first());
+  const copy = first ? { kind: record.record.kind, text: String(record.content?.text ?? "").slice(0, 5000),
+    photos: Array.isArray(record.content?.photos) ? record.content.photos.length : 0 } : null;
+  await db.prepare(`INSERT INTO reports (id, item, about, author, reason, note, reporter, reporter_name, copy, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, item, about, author, reason, note || null,
+    named ? reporter : null, named ? String(reporterName).slice(0, 100) : null, JSON.stringify(copy), now()).run();
+  return { id, reason, item, author };
 }
 
 /** The record and its content, from an entry as stored ({record, sig, content, salt}), or null. */
@@ -105,6 +142,19 @@ function parseSent(sent) {
   }
 }
 
+/**
+ * POST /_p/reports/check, unsigned (app.js): a report's id is a 256-bit secret only its reporter's site has, so asking
+ * by it needn't say again who's asking. At most 50 ids, in a small body.
+ */
+export async function handleReportCheck(request, env) {
+  if (request.method !== "POST") return json({ error: "Not found." }, 404);
+  const text = await request.text().catch(() => "");
+  if (text.length > 8192) return json({ error: "Too much." }, 413);
+  let body = null;
+  try { body = JSON.parse(text); } catch {}
+  return json(await answerReportCheck(env.DB, body?.ids));
+}
+
 /** What became of each of `ids` (POST /_p/reports/check), for the reporter's site. */
 export async function answerReportCheck(db, ids) {
   const list = (Array.isArray(ids) ? ids : []).filter((i) => typeof i === "string" && REPORT_ID_RE.test(i)).slice(0, 50);
@@ -114,22 +164,31 @@ export async function answerReportCheck(db, ids) {
 }
 
 /**
- * What's been raised, for those running the space: one entry for each thing reported (open first, then what was dealt
- * with in the last 30 days), with every reason, note and named reporter, and how many chose not to be named.
- * `names(people)`: a Map of person id to the name this site knows them by.
+ * What's been raised, for those running the space: one entry for each thing reported (every open one first, then what
+ * was dealt with in the last 30 days), with every reason, note and named reporter, and whether anyone chose not to be
+ * named (not how many: one person can raise something unnamed again another day). Never what's about `exclude`'s own
+ * post or comment: an admin isn't shown what's been raised about them. `names(people)`: a Map of person id to name.
  */
-export async function raised(db, names) {
-  const { results } = await db.prepare(`SELECT * FROM reports WHERE handled_at IS NULL OR handled_at > ? ORDER BY created_at DESC LIMIT 500`)
-    .bind(now() - SHOWN_SECONDS).all();
+export async function raised(db, names, { exclude = null } = {}) {
+  await tidyReports(db);
+  const since = now() - SHOWN_SECONDS;
+  // Which things, chosen whole, so a flood about one can't push others off.
+  const { results: things } = await db.prepare(`SELECT about, MAX(handled_at IS NULL) AS open, MIN(created_at) AS first FROM reports
+    WHERE (handled_at IS NULL OR handled_at > ?1) AND author IS NOT ?2 GROUP BY about ORDER BY open DESC, first DESC LIMIT ?3`)
+    .bind(since, exclude, LISTED).all();
+  const abouts = things.map((t) => String(t.about));
+  const { results } = abouts.length ? await db.prepare(`SELECT * FROM reports WHERE about IN (SELECT value FROM json_each(?1))
+    AND (handled_at IS NULL OR handled_at > ?2) ORDER BY created_at`).bind(JSON.stringify(abouts), since).all() : { results: [] };
   const by = new Map();
   for (const r of results) {
     const about = String(r.about);
-    const one = by.get(about) ?? { about, item: String(r.item), author: String(r.author), copy: JSON.parse(String(r.copy)), reasons: [], notes: [],
-      reporters: [], unnamed: 0, first: Number(r.created_at), open: false, outcome: null, handledBy: null, handledAt: null, word: null };
+    const one = by.get(about) ?? { about, item: String(r.item), author: String(r.author), copy: null, reasons: [], notes: [],
+      reporters: [], unnamed: false, first: Number(r.created_at), open: false, outcome: null, handledBy: null, handledAt: null, word: null };
+    const copy = JSON.parse(String(r.copy ?? "null"));
+    if (copy && !one.copy) one.copy = copy;
     if (!one.reasons.includes(String(r.reason))) one.reasons.push(String(r.reason));
     if (r.note) one.notes.push(String(r.note));
-    if (r.reporter_name) one.reporters.push(String(r.reporter_name)); else one.unnamed += 1;
-    one.first = Math.min(one.first, Number(r.created_at));
+    if (r.reporter_name) one.reporters.push(String(r.reporter_name)); else one.unnamed = true;
     if (r.handled_at === null || r.handled_at === undefined) one.open = true;
     else if (!one.handledAt || Number(r.handled_at) > one.handledAt) {
       Object.assign(one, { outcome: String(r.outcome), handledBy: r.handled_by ? String(r.handled_by) : null, handledAt: Number(r.handled_at), word: r.word ?? null });
@@ -137,6 +196,7 @@ export async function raised(db, names) {
     by.set(about, one);
   }
   const all = [...by.values()];
+  for (const r of all) r.copy ??= { kind: "comment", text: "", photos: 0 };
   // A photo's comments: where to go is the post it's in.
   const photos = new Map((await db.prepare("SELECT photo, post FROM item_photos WHERE photo IN (SELECT value FROM json_each(?))")
     .bind(JSON.stringify(all.map((r) => r.item))).all()).results.map((r) => [String(r.photo), String(r.post)]));
@@ -151,13 +211,14 @@ export async function raised(db, names) {
 }
 
 /** How many things are waiting to be looked at. */
-export const openCount = async (db) => Number((await db.prepare("SELECT COUNT(DISTINCT about) AS n FROM reports WHERE handled_at IS NULL").first())?.n ?? 0);
+export const openCount = async (db) => Number((await db.prepare(`SELECT COUNT(DISTINCT about) AS n FROM reports WHERE handled_at IS NULL
+  AND item NOT IN (SELECT id FROM lists WHERE deleted_at IS NOT NULL)`).first())?.n ?? 0);
 
-/** Looked at, and left (by `by`), with an optional word back to whoever raised it. */
+/** Looked at, and left (by `by`, never about their own), with an optional word back to whoever raised it. */
 export async function leaveIt(db, about, by, word) {
   if (!ID_RE.test(String(about))) return;
-  await db.prepare("UPDATE reports SET handled_at = ?, handled_by = ?, outcome = 'left', word = ? WHERE about = ? AND handled_at IS NULL")
-    .bind(now(), by, typeof word === "string" && word.trim() ? word.trim().slice(0, MAX_WORD) : null, about).run();
+  await db.prepare("UPDATE reports SET handled_at = ?, handled_by = ?, outcome = 'left', word = ? WHERE about = ? AND handled_at IS NULL AND author != ?")
+    .bind(now(), by, typeof word === "string" && word.trim() ? word.trim().slice(0, MAX_WORD) : null, about, by).run();
 }
 
 /** What was reported has been removed (by `by`): a removal on its list, of it or of the post it's on. */
@@ -206,9 +267,17 @@ export async function sendReport(env, from, host, where, { item, post, about, re
 export async function checkSentReports(env, from) {
   const db = env.DB;
   const at = now();
+  // Raised with a friend who isn't one any more, or a group the owner's no longer in: nothing more will come.
+  await db.batch([
+    db.prepare(`UPDATE reports_sent SET outcome = 'gone', done_at = ?1 WHERE outcome IS NULL AND (
+      (connection_id IS NOT NULL AND connection_id NOT IN (SELECT id FROM connections WHERE approved_at IS NOT NULL))
+      OR (group_id IS NOT NULL AND group_id NOT IN (SELECT id FROM groups WHERE joined_at IS NOT NULL)))`).bind(at),
+    db.prepare("DELETE FROM reports_sent WHERE done_at IS NOT NULL AND done_at < ?").bind(at - KEEP_SECONDS),
+  ]);
+  // The longest unasked first, so none waits behind the rest.
   const { results } = await db.prepare(`SELECT r.*, c.origin AS c_origin, c.name AS c_name, g.origin AS g_origin, g.name AS g_name
     FROM reports_sent r LEFT JOIN connections c ON c.id = r.connection_id LEFT JOIN groups g ON g.id = r.group_id
-    WHERE r.outcome IS NULL AND r.checked_at < ? LIMIT 100`).bind(at - CHECK_SECONDS).all();
+    WHERE r.outcome IS NULL AND r.checked_at < ? ORDER BY r.checked_at, r.created_at LIMIT 100`).bind(at - CHECK_SECONDS).all();
   const byHost = new Map();
   for (const r of results) {
     const origin = r.c_origin ?? r.g_origin;
@@ -218,7 +287,13 @@ export async function checkSentReports(env, from) {
   }
   for (const [origin, rows] of byHost) {
     let answer = null;
-    try { answer = await callFriend(env, from, String(origin), "/_p/reports/check", { body: { ids: rows.map((r) => String(r.id)) } }); } catch { answer = null; }
+    // Unsigned: the ids say which, and nothing says again who's asking.
+    try {
+      const res = await fetch(`${origin}/_p/reports/check`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: rows.map((r) => String(r.id)) }), redirect: "manual", signal: AbortSignal.timeout(10_000) });
+      const text = res.ok ? await res.text() : "";
+      answer = text && text.length < 65_536 ? JSON.parse(text) : null;
+    } catch { answer = null; }
     const outcomes = new Map((Array.isArray(answer?.reports) ? answer.reports : []).map((x) => [String(x.id), x]));
     for (const r of rows) {
       const where = r.connection_id ? { connection: Number(r.connection_id) } : { group: Number(r.group_id) };

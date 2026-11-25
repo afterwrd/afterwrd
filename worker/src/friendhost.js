@@ -13,8 +13,8 @@
 //                              name (kept, to name them to others in the thread). Answers with the receipt.
 //                              A comment tells the owner here, and those it's news to (notes.js).
 //   POST /_p/report            {item, about, reason, note?, named}: the calling site's owner telling the owner here about
-//                              someone else's comment on one of their posts (reports.js); POST /_p/reports/check: what
-//                              became of what they told
+//                              someone else's comment on one of their posts (reports.js). (What became of it is asked
+//                              unsigned: app.js, reports.js handleReportCheck.)
 //   POST /_p/before            the calling site's owner's comments from before afterwrd 2 on posts brought over: where
 //                              they are now, and then signed (before.js answerBefore).
 // (And POST /_p/notes, a friend's site telling this one about something new: notes.js.)
@@ -30,7 +30,7 @@ import { json, now } from "./util.js";
 import { noticeOwn } from "./notes.js";
 import { answerCheck, mineSince } from "./sentchecks.js";
 import { answerBefore, buildIfDue } from "./before.js";
-import { answerReportCheck, illegalMayBuzz, takeReport } from "./reports.js";
+import { illegalMayBuzz, takeReport } from "./reports.js";
 import { notifyLater } from "./push.js";
 import { tidyBefore } from "./clearout.js";
 
@@ -191,14 +191,13 @@ export async function handleFriendItems(request, env, url, work) {
     return json(answer, answer.status ?? 200);
   }
   // Telling the owner here about someone else's comment on one of their posts (reports.js): never about the owner's own.
-  if (request.method === "POST" && (url.pathname === "/_p/report" || url.pathname === "/_p/reports/check")) {
+  if (request.method === "POST" && url.pathname === "/_p/report") {
     let asked = null;
     try { asked = JSON.parse(new TextDecoder().decode(body)); } catch {}
-    if (url.pathname === "/_p/reports/check") return json(await answerReportCheck(db, asked?.ids));
     if (!ID_RE.test(String(asked?.item ?? "")) || !(await mayCallerSee(db, String(asked.item), caller.connection.id))) return json({ error: "That post isn't here any more." }, 404);
     const owner = (await ownHost(env))?.person;
     const taken = await takeReport(env, { reporter: caller.person, reporterName: String(caller.connection.name), body: asked,
-      mayReport: (record) => record.kind === "comment" && record.author !== owner });
+      refuse: async (record) => (record.kind === "comment" && record.author !== owner ? null : "That can't be reported here.") });
     if (taken.error) return json({ error: taken.error }, taken.status);
     // "Might be illegal" buzzes the owner's phones, a few a day at most; anything else waits quietly on Home.
     if (taken.reason === "illegal" && (await illegalMayBuzz(db))) {

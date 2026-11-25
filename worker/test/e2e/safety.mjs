@@ -210,6 +210,7 @@ check("Unmuted, it's back in the group", n(stateA, "mutes") === 0 && (await text
 const catGroup = await letInto(ann, A, annGroup, cat, C, stateC);
 const second = await signedGroupPost(bob, bobGroup, groupPerson, { type: "post", text: "Something nasty" });
 check("Cat joins the group, and Bob posts again", second.status === 200, JSON.stringify(second));
+const bobPersonG = () => sql(stateG, `SELECT identity FROM group_members WHERE name = 'Bob Example'`)[0]?.identity ?? "";
 const groupPost = (words) => sql(stateG, "SELECT id, content FROM items WHERE type = 'post'").find((r) => JSON.parse(r.content).text === words)?.id;
 /** Cat opens "Tell …" from a ⌄ menu (`menu`), picks `reason`, and sends it; returns what the page then says. */
 async function tell(page, menu, reason, { note = "", named = true } = {}) {
@@ -238,6 +239,17 @@ await ann.goto(`${A}/groups/${annGroup}/reports`);
 let page_ = await text(ann);
 check("Ann's Things to look at shows what, why, and who", page_.includes("Anyone for Saturday?") && page_.includes("Unkind or bullying")
   && page_.includes("raised by Cat Example") && page_.includes("Not kind to Dan"));
+// R2 (security review): 600 reports about one harmless thing don't push the real one off the page.
+const flood = "f".repeat(43);
+sql(stateG, `WITH RECURSIVE s(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM s WHERE value < 600)
+  INSERT INTO reports (id, item, about, author, reason, copy, created_at) SELECT 'flood-' || value, '${flood}', '${flood}', '${bobPersonG()}', 'spam', 'null',
+  strftime('%s','now') FROM s`);
+await ann.goto(`${A}/groups/${annGroup}/reports`);
+check("a flood about one thing doesn't push other reports off Things to look at", (await text(ann)).includes("Anyone for Saturday?"));
+sql(stateG, `DELETE FROM reports WHERE about = '${flood}'`);
+// R1: the day's caps are kept in the database, under hashes that name nobody.
+check("the day's caps are kept, naming nobody", n(stateG, "report_caps") === 2
+  && sql(stateG, "SELECT key FROM report_caps").every((r) => /^[0-9a-f]{64}$/.test(r.key) && !r.key.includes(bobPersonG())));
 
 // Unnamed, and might be illegal: the group's site keeps no record of who.
 await cat.goto(`${C}/groups/${catGroup}/posts/${nastyId}`);
@@ -246,7 +258,17 @@ check("Cat tells them about the other post without being named: nothing there sa
   .every((r) => r.reporter === null && r.reporter_name === null) && n(stateG, `reports WHERE about = '${nastyId}'`) === 1);
 check("…and Ann's site marks it as maybe illegal", await waitFor(() => n(stateA, "notices WHERE kind = 'report' AND about = 'illegal'") === 1));
 await ann.goto(`${A}/groups/${annGroup}/reports`);
-check("…shown as raised by one who chose not to be named", (await text(ann)).includes("raised by 1 who chose not to be named"));
+check("…shown as raised without a name, and not how many", (await text(ann)).includes("raised without a name"));
+// R7: what became of a report is asked without saying who asks.
+const unsignedCheck = await fetch(`${G}/_p/reports/check`, { method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ ids: sql(stateG, `SELECT id FROM reports WHERE about = '${nastyId}'`).map((r) => r.id) }) });
+check("what became of a report can be asked unsigned, by its id alone", unsignedCheck.status === 200 && (await unsignedCheck.json()).reports?.length === 1);
+// R3: a report about the owner's own post, with nobody else running the group, isn't taken.
+const annsNotice = await signedGroupPost(ann, annGroup, groupPerson, { type: "post", text: "Ann's notice" });
+await cat.goto(`${C}/groups/${catGroup}/posts/${annsNotice.id}`);
+const aboutOwner = await tell(cat, "article.in-group header details.more", "unkind");
+check("a report about the owner's own post, with nobody else to tell, isn't taken", aboutOwner.includes("there's nobody else to tell")
+  && n(stateG, `reports WHERE about = '${annsNotice.id}'`) === 0, aboutOwner);
 
 // Ann leaves the first, with a word back, and removes the second.
 await ann.type(`#r-${saturday} textarea[name=word]`, "Talked to Bob");
@@ -261,6 +283,15 @@ check("…and removing the second deals with what was raised about it", await wa
 await cat.goto(onC);
 await openComments(cat);
 check("Cat isn't offered Tell Ann about Ann's own comment", !(await cat.$('.comment[data-name="Ann Example"] a[href*="/report?"]')));
+// R8: the form shows what's being reported, and a made-up one isn't there.
+await cat.click('.comment[data-name="Bob Example"] details.more > summary');
+await Promise.all([cat.waitForNavigation(), cat.click('.comment[data-name="Bob Example"] details.more a[href*="/report?"]')]);
+check("the Tell form shows what's being reported", (await text(cat)).includes("Still coming?"));
+const forged = new URL(cat.url());
+forged.searchParams.set("about", "z".repeat(43));
+check("…and a link about something that isn't there goes nowhere", (await cat.goto(forged.href)).status() === 404);
+await cat.goto(onC);
+await openComments(cat);
 const toAnn = await tell(cat, '.comment[data-name="Bob Example"] details.more', "spam");
 check("Cat tells Ann about Bob's comment", toAnn.includes("Ann Example has been told"), toAnn);
 await ann.goto(`${A}/`);
@@ -272,18 +303,35 @@ await openComments(ann);
 await fromMenu(ann, '.comment[data-name="Bob Example"] details.more', "form[data-sign=remove] button");
 check("Removing it deals with it, and Home goes quiet", n(stateA, "reports WHERE handled_at IS NULL") === 0
   && sql(stateA, "SELECT outcome FROM reports")[0]?.outcome === "removed");
+// R5: a report about a comment is dealt with when Ann deletes the whole post.
+await bob.goto(onB);
+check("Bob comments again", (await comment(bob, "Last word")) === "");
+await cat.goto(onC);
+await openComments(cat);
+await tell(cat, '.comment[data-name="Bob Example"]:has(.said) details.more', "unkind");
+check("Cat tells Ann about that one too", n(stateA, "reports WHERE handled_at IS NULL") === 1);
+await ann.goto(annsPage);
+await ann.click("article.own header details.more > summary");
+await Promise.all([ann.waitForNavigation(), ann.click("article.own header form[data-sign=delete] button")]);
+await ann.goto(`${A}/reports`);
+check("…and deleting the whole post deals with it", n(stateA, "reports WHERE handled_at IS NULL") === 0 && (await text(ann)).includes("Nothing waiting"));
 
 // What Cat hears back, at her site's next asking; and, for "might be illegal" nobody looks at, where else to turn.
+// R6: reports to a friend who's gone don't hold up the rest.
+sql(stateC, `WITH RECURSIVE s(value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM s WHERE value < 120)
+  INSERT INTO reports_sent (id, connection_id, item, post, reason, created_at) SELECT 'gone-friend-' || value, 999, '${saturday}', '${saturday}', 'spam',
+  strftime('%s','now') FROM s`);
 sql(stateC, `INSERT INTO reports_sent (id, group_id, item, post, reason, created_at) VALUES ('never-looked-at-${"x".repeat(12)}', ${catGroup}, '${saturday}', '${saturday}', 'illegal', strftime('%s','now') - 4 * 86400)`);
 sql(stateC, "UPDATE reports_sent SET checked_at = 0");
 await cat.goto(`${C}/`);
-check("Cat is told what became of each", await waitFor(async () => { await cat.goto(`${C}/`); return n(stateC, "notices WHERE kind = 'reported'") === 4; }),
+check("Cat is told what became of each", await waitFor(async () => { await cat.goto(`${C}/`); return n(stateC, "notices WHERE kind = 'reported'") === 5; }),
   String(n(stateC, "notices WHERE kind = 'reported'")));
 await cat.goto(`${C}/activity`);
 page_ = await text(cat);
 check("…in Notifications: left, with the word back; removed; and removed by Ann", page_.includes("looked at what you raised, and left it. “Talked to Bob”")
   && page_.includes("The admins looked at what you raised, and removed it") && page_.includes("Ann Example looked at what you raised, and removed it"));
 check("…and where else to turn for what nobody's looked at", page_.includes("haven't looked at what you raised yet") && Boolean(await cat.$('a[href="/help"]')));
+check("…and those raised with a friend who's gone are marked so", n(stateC, "reports_sent WHERE outcome = 'gone'") === 120);
 check("Bob is told nothing about any of it", n(stateB, "notices WHERE kind IN ('report', 'reported')") === 0);
 
 // --- Groups (step 5): rules, remove and clear up, removed stays removed -------------------------------------------------

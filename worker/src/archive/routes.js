@@ -987,14 +987,28 @@ function reportAsk(ctx, params, base) {
   return { ...base, item, about, post, back: safeNext(params.get("back") ?? "/", ctx.url) };
 }
 
+/**
+ * What's being reported, as read and checked from where it is (a thread just read): its writer's name and words, or
+ * null if it isn't there, so the form only ever asks about something the owner can see.
+ */
+function reportedIn(t, about) {
+  const e = Array.isArray(t?.entries) ? t.entries.find((x) => x.fp === about && x.state === "ok" && x.record) : null;
+  return e ? { name: String(e.name ?? "Someone"), text: String(e.content?.text ?? "").slice(0, 2000), post: e.record.kind === "item",
+    photos: Array.isArray(e.content?.photos) ? e.content.photos.length : 0 } : null;
+}
+
 async function friendReportForm(ctx, params, id) {
-  const c = await first(ctx.db, "SELECT id, name FROM connections WHERE id = ? AND approved_at IS NOT NULL", [Number(id)]);
-  return c && reportAsk(ctx, params, { where: "friend", place: Number(c.id), to: String(c.name), placeName: String(c.name) });
+  const c = await first(ctx.db, "SELECT * FROM connections WHERE id = ? AND approved_at IS NOT NULL", [Number(id)]);
+  const ask = c && reportAsk(ctx, params, { where: "friend", place: Number(c.id), to: String(c.name), placeName: String(c.name) });
+  const what = ask && reportedIn(await friendThread(ctx.env, ctx.url.origin, c, ask.item).catch(() => null), ask.about);
+  return what ? { ...ask, what } : null;
 }
 
 async function groupReportForm(ctx, params, id) {
-  const g = await first(ctx.db, "SELECT id, name FROM groups WHERE id = ? AND joined_at IS NOT NULL AND identity IS NOT NULL", [Number(id)]);
-  return g && reportAsk(ctx, params, { where: "group", place: Number(g.id), to: "the admins", placeName: String(g.name) });
+  const g = await first(ctx.db, "SELECT * FROM groups WHERE id = ? AND joined_at IS NOT NULL AND identity IS NOT NULL", [Number(id)]);
+  const ask = g && reportAsk(ctx, params, { where: "group", place: Number(g.id), to: "the admins", placeName: String(g.name) });
+  const what = ask && reportedIn(await groups_.groupThread(ctx.env, ctx.url.origin, g, ask.item).catch(() => null), ask.about);
+  return what ? { ...ask, what } : null;
 }
 
 /** What friends have raised about comments on the owner's posts. */
@@ -1014,7 +1028,7 @@ async function groupReports(ctx, params, id) {
     const reports = (Array.isArray(data?.reports) ? data.reports : []).filter((r) => ok.test(r?.about ?? "") && ok.test(r?.post ?? "")).slice(0, 500)
       .map((r) => ({ about: r.about, post: r.post, authorName: text(r.authorName, 100) ?? "Someone",
         copy: { kind: r.copy?.kind === "item" ? "item" : "comment", text: text(r.copy?.text) ?? "", photos: Number(r.copy?.photos) || 0 },
-        reasons: list(r.reasons), notes: list(r.notes), reporters: list(r.reporters), unnamed: Number(r.unnamed) || 0, first: Number(r.first) || 0,
+        reasons: list(r.reasons), notes: list(r.notes), reporters: list(r.reporters), unnamed: r.unnamed === true || Number(r.unnamed) > 0, first: Number(r.first) || 0,
         open: r.open === true, outcome: text(r.outcome, 20), handledByName: text(r.handledByName, 100), handledAt: Number(r.handledAt) || null, word: text(r.word, 300) }));
     return { where: "group", group: { id: Number(g.id), name: String(g.name) }, reports };
   });

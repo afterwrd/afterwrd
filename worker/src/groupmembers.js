@@ -143,10 +143,13 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
       if (target.identity) await markMemberRemoved(db, String(target.identity), record.author);
       if (target.identity && target.approved_at) {
         await db.prepare("INSERT OR REPLACE INTO group_removed (person, name, removed_at) VALUES (?, ?, ?)").bind(String(target.identity), String(target.name ?? "Someone"), now()).run();
-        await onRemoved(target, body, record);
       }
     }
     await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
+    // Only once they're out: anything more (clearing up what they wrote) mustn't leave them in if it goes wrong.
+    if (record.kind === "remove" && target.identity && target.approved_at) {
+      try { await onRemoved(target, body, record); } catch (error) { console.error("After removing a member:", error); }
+    }
   }
   if (record.kind === "close") await onClose(answer.entry);
   return json({ ok: true, receipt: answer.receipt, n: answer.entry?.n ?? null });

@@ -168,8 +168,8 @@ export async function keepNotice(db, { kind, fp, connection = null, group = null
   const by = group === null ? "connection_id" : "group_id";
   const row = await db.prepare(`INSERT INTO notices (kind, fp, ${by}, own, target, actor, text, created_at, item, author)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?12, ?13
-    WHERE (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - ?9) < ?10
-      AND (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND created_at > ?8 - 86400) < ?11
+    WHERE (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND kind != 'report' AND created_at > ?8 - ?9) < ?10
+      AND (SELECT COUNT(*) FROM notices WHERE ${by} = ?3 AND kind != 'report' AND created_at > ?8 - 86400) < ?11
       AND (?13 IS NULL OR (SELECT COUNT(*) FROM notices WHERE author = ?13 AND created_at > ?8 - ?14) < ?15)
     ON CONFLICT (kind, fp) DO NOTHING RETURNING id`)
     .bind(kind, fp, group ?? connection, own, target, snippet(actor, 100) || null, snippet(text) || null, at, rateWindow(RATE.seconds), RATE.count, DAILY, item,

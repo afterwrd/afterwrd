@@ -6,6 +6,7 @@
 // groups the owner's in, which carry a key (membership.js). A group's own Worker (with the secret GROUP_KEY) is afterwrd in
 // group mode: it answers only its members' sites and invite links (groups.js), and serves nothing else at all.
 import { handleFriendItems } from "./friendhost.js";
+import { handleReportCheck } from "./reports.js";
 import { withWork } from "./later.js";
 import { contentSecurityPolicy, newNonce, withNonce } from "./nonce.js";
 import { BRINGING_BYTES } from "./before.js";
@@ -163,9 +164,11 @@ async function route(request, env, work) {
   if (url.pathname === "/.well-known/afterwrd") {
     return (await handleIdentity(request, env, url)) ?? new Response("Not found", { status: 404 });
   }
+  // What became of reports, asked by their secret ids alone (reports.js): unsigned, so asking doesn't say who reported.
+  if (url.pathname === "/_p/reports/check") return handleReportCheck(request, env);
   // afterwrd 2: friends' sites asking about the owner's signed posts, and passing on their owners' comments (friendhost.js).
   if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check"
-    || url.pathname === "/_p/before" || url.pathname === "/_p/report" || url.pathname === "/_p/reports/check") return handleFriendItems(request, env, url, work);
+    || url.pathname === "/_p/before" || url.pathname === "/_p/report") return handleFriendItems(request, env, url, work);
   if (url.pathname === "/_p/notes" && request.method === "POST") return receiveNotes(request, env, url, work);
   if (url.pathname === "/_p/mention" && request.method === "POST") return receiveReceipt(request, env, url, work);
   // …and the rest: removing, introductions, checks, and the shared Facebook archive (friendcalls.js).
@@ -284,9 +287,11 @@ async function routeGroup(request, env, url) {
   // A member's site still on afterwrd 1 (SITE_MOVED).
   if (url.pathname.startsWith("/_group/") && fromAfterwrd1(request)) return json({ error: GROUP_MOVED }, 410);
   if (url.pathname.startsWith("/_group/")) return handleGroupApi(request, env, url);
+  // What became of reports, unsigned, as on a person's site (reports.js).
+  if (url.pathname === "/_p/reports/check") return handleReportCheck(request, env);
   // afterwrd 2 (step 6c): its posts, as signed items, to members' signed calls (groupposts.js).
   if (url.pathname === "/_p/items" || url.pathname.startsWith("/_p/items/") || url.pathname === "/_p/records" || url.pathname === "/_p/records/check"
-    || url.pathname === "/_p/people" || url.pathname === "/_p/report" || url.pathname === "/_p/reports/check") return handleGroupItems(request, env, url);
+    || url.pathname === "/_p/people" || url.pathname === "/_p/report") return handleGroupItems(request, env, url);
   const signed = await signedFile(request, env, url);
   if (signed) return signed;
   if (request.method === "GET" && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);

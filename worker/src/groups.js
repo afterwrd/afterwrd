@@ -142,6 +142,13 @@ export async function groupObject(db, site, group, member) {
   };
 }
 
+/** Clears up what a removed member wrote (groupposts.js clearUp), a go at a time; marked while there's more to go. */
+async function clearing(env, person) {
+  await env.DB.prepare("UPDATE group_removed SET clearing = 1 WHERE person = ?").bind(person).run();
+  const { more } = await clearUp(env, person);
+  if (!more) await env.DB.prepare("UPDATE group_removed SET clearing = 0 WHERE person = ?").bind(person).run();
+}
+
 /**
  * Who's in the group. For an admin (`all`), requests to join too. With each member's identity and join; the members
  * list as signed, to check and sign by, is GET /_group/members/list.
@@ -371,7 +378,7 @@ export async function handleGroupApi(request, env, url) {
   const record = (body) => takeMemberRecord(env, group, member, body, { maxMembers: maxMembers(env), closed: Boolean(shut),
     tell: (m, proof) => tellRemoved(env, m, proof), onClose: (entry) => closed(env, url.origin, group, entry),
     // "Remove and clear up" (docs/safety-plan.md 3.4): everything they wrote here goes too, removed by the group itself.
-    onRemoved: async (target, body) => { if (body?.clear === true) await clearUp(env, String(target.identity)); } });
+    onRemoved: async (target, body) => { if (body?.clear === true) await clearing(env, String(target.identity)); } });
   // Someone still waiting may take back their request: a signed `leave` (members.js only lets them do that).
   if (!member.approved_at && route === "POST /_group/records") return record(await request.json().catch(() => ({})));
   if (!member.approved_at) return json({ error: `Waiting for ${(await ownerOf(db))?.name ?? "the group"} to let you in.` }, 403);
@@ -387,7 +394,12 @@ export async function handleGroupApi(request, env, url) {
   // Running the group.
   if (!url.pathname.startsWith("/_group/admin/")) return json({ error: "Not found." }, 404);
   if (!isAdmin(member)) return json({ error: "Only the group's admins can do that." }, 403);
-  if (route === "GET /_group/admin/members") return json(await groupMembers(env, site, group, member, { all: true }));
+  if (route === "GET /_group/admin/members") {
+    // A clear-up with more to go carries on, a go at a time, whenever an admin looks (groupposts.js clearUp).
+    const left = await db.prepare("SELECT person FROM group_removed WHERE clearing = 1 LIMIT 1").first();
+    if (left) await clearing(env, String(left.person)).catch((error) => console.error("Clearing up:", error));
+    return json(await groupMembers(env, site, group, member, { all: true }));
+  }
   if (route === "POST /_group/admin/end") {
     if (member.role !== "owner") return json({ error: "Only the group's owner can do that." }, 403);
     if (!shut || shut.goes > now()) return json({ error: "Close the group first: it goes 30 days after." }, 409);
@@ -398,7 +410,8 @@ export async function handleGroupApi(request, env, url) {
   if (route === "GET /_group/admin/reports") {
     const names = async (people) => new Map((await db.prepare(`SELECT identity, name FROM group_members WHERE identity IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify(people)).all()).results.map((r) => [String(r.identity), String(r.name)]));
-    return json({ reports: await raised(db, names) });
+    // Never what's been raised about the asker's own posts and comments.
+    return json({ reports: await raised(db, names, { exclude: String(member.identity) }) });
   }
   if (route === "POST /_group/admin/reports/leave") {
     const body = await request.json().catch(() => ({}));

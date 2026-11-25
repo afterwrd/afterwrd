@@ -17,8 +17,8 @@
 //                            with what /_p/items/<id> sends with it
 //   POST /_p/records/check   what became of the member's records here (sentchecks.js answerCheck)
 //   POST /_p/report          {item, about, reason, note?, named}: a member telling the admins about a post or comment
-//                            here (reports.js); the owner and admins are sent a note. POST /_p/reports/check: what became
-//                            of what they told
+//                            here (reports.js); the owner and admins are sent a note (never whoever wrote it). What
+//                            became of it is asked unsigned (app.js)
 //   POST /_p/people          {people, keys}: identities and delegations a member's site is missing (a pull with
 //                            `since` sends only those new to this site since: friendhost.js learntSince)
 //   POST /_p/records         {sent, delegation, profile?}: the member's own comment, edit, delete, vote, answer, end or
@@ -51,7 +51,7 @@ import { decode, fingerprintOf, fromB64url } from "../public/static/signed.js";
 import { json, now } from "./util.js";
 import { selfHosted } from "./hosting.js";
 import { ownUsage } from "./allowances.js";
-import { answerReportCheck, markRemoved, takeReport } from "./reports.js";
+import { markRemoved, takeReport } from "./reports.js";
 
 const SINCE_PAGE = 50;
 const PEOPLE_AT_ONCE = 200; // people, and delegations, asked for in one POST /_p/people
@@ -87,12 +87,13 @@ export async function groupRules(env, self, admins) {
  * Everything `author` wrote here removed by the group itself, with its hosting key (lists.js GroupRules lets the host
  * remove), once an admin has removed them and asked for it: "Remove and clear up" (docs/safety-plan.md 3.4). Their posts
  * go whole (photos and comments with them); their comments on others' posts go one by one. Readers see each "removed
- * by" the group. Uncapped, as admins' removals are, so a clear-up doesn't stop half way. Returns how many went.
+ * by" the group. Uncapped, as admins' removals are; at most `limit` a go, so one go fits in a request. Returns
+ * {removed, more}: `more` when there's still some to go.
  */
-export async function clearUp(env, author) {
+export async function clearUp(env, author, { limit = 300 } = {}) {
   const db = env.DB;
   const self = await hostOf(env);
-  if (!self) return 0;
+  if (!self) return { removed: 0, more: false };
   const key = await hostingKey(env);
   const rules = await groupRules(env, self, false);
   const lookups = lookupsFor(env);
@@ -111,6 +112,7 @@ export async function clearUp(env, author) {
       targets = entries.filter((e, i) => records[i]?.kind === "comment" && records[i].author === author && !gone.has(e.fp)).map((e) => e.fp);
     }
     for (const about of targets) {
+      if (removed >= limit) return { removed, more: true };
       const at = await db.prepare("SELECT n, head, deleted_at FROM lists WHERE id = ?").bind(String(list)).first();
       if (!at || at.deleted_at) break;
       const made = await makeRecord({ kind: "remove", author: self.person, host: self.person, item: String(list),
@@ -128,7 +130,7 @@ export async function clearUp(env, author) {
       }
     }
   }
-  return removed;
+  return { removed, more: false };
 }
 
 /** A member's signed name, if they sent one: kept, to name them to others in the group. */
@@ -168,15 +170,19 @@ export async function handleGroupItems(request, env, url) {
     return json(answer, answer.status ?? 200);
   }
   // Telling the admins (reports.js): about any member's post or comment here, apart from the teller's own. The owner and
-  // admins are sent a note, which buzzes their phones for "might be illegal".
-  if (request.method === "POST" && url.pathname === "/_p/reports/check") return json(await answerReportCheck(db, body?.ids));
+  // admins are sent a note, which buzzes their phones for "might be illegal"; never whoever wrote it, if they're one of
+  // them. With nobody else to tell, it isn't taken.
   if (request.method === "POST" && url.pathname === "/_p/report") {
     if (shut) return json({ error: "This group has closed." }, 409);
+    const runners = (author) => db.prepare(`SELECT id FROM group_members WHERE approved_at IS NOT NULL AND role IN ('owner', 'admin')
+      AND identity IS NOT ? ORDER BY id`).bind(author).all().then((r) => r.results.map((x) => Number(x.id)));
     const taken = await takeReport(env, { reporter: String(member.identity), reporterName: String(member.name ?? "A member"), body,
-      mayReport: (record) => record.kind === "comment" || record.kind === "item" });
+      refuse: async (record) => (record.kind !== "comment" && record.kind !== "item" ? "That can't be reported here."
+        : (await runners(record.author)).length ? null
+        : "Only whoever wrote this runs the group, so there's nobody else to tell. If it's serious, see Getting help.") });
     if (taken.error) return json({ error: taken.error }, taken.status);
-    const { results } = await db.prepare("SELECT id FROM group_members WHERE approved_at IS NOT NULL AND role IN ('owner', 'admin') ORDER BY id").all();
-    if (results.length) await outbox(env).sendNote({ origin: url.origin, kind: "report", item: taken.item, fp: taken.id, recipients: results.map((r) => Number(r.id)) });
+    const recipients = await runners(taken.author);
+    if (recipients.length) await outbox(env).sendNote({ origin: url.origin, kind: "report", item: taken.item, fp: taken.id, recipients });
     return json({ ok: true, id: taken.id });
   }
   // Posts from afterwrd 1 whose 30 days are up: their comments from before go in first (step 10e: before.js).

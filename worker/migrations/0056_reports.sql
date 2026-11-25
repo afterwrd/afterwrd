@@ -2,9 +2,9 @@
 --
 -- On the site holding what's reported (a person's, for a comment on one of their posts; a group's, for a post or comment
 -- in it): one row a report. `about` is the record's fingerprint, `item` the list it's on, `author` who wrote it, `copy`
--- what it said ({kind, text, photos}), kept until 90 days after it's dealt with even if its writer deletes it, so
--- deleting doesn't make the problem go away. `reporter` is null when they chose not to be named: then nothing here says
--- who (the daily cap is counted in the object's memory). `outcome`: 'removed', 'left' or 'member' (its writer removed
+-- what it said ({kind, text, photos}: on the first report about it; later ones hold null), kept until 90 days after
+-- it's dealt with even if its writer deletes it, so deleting doesn't make the problem go away. `reporter` is null when
+-- they chose not to be named: then nothing here says who. `outcome`: 'removed', 'left' or 'member' (its writer removed
 -- from the group), with who dealt with it and any word back.
 CREATE TABLE reports (
     id             TEXT PRIMARY KEY,
@@ -24,6 +24,15 @@ CREATE TABLE reports (
 );
 CREATE INDEX reports_about ON reports (about);
 CREATE INDEX reports_open ON reports (handled_at, created_at);
+
+-- The day's caps on reports (10 a person, once a thing), kept across restarts without naming anyone: each key is a
+-- SHA-256 of the day's random salt (settings 'report_salt', made afresh each day) with the person, or the person and
+-- the thing. Yesterday's rows and salt go when today's first report comes.
+CREATE TABLE report_caps (
+    key  TEXT PRIMARY KEY,
+    n    INTEGER NOT NULL,
+    day  INTEGER NOT NULL
+);
 
 -- On the reporter's own site: what its owner reported, and where (a friend, or a group), so it can ask what became of
 -- each (hourly, as sent records are: sentchecks.js) and say so quietly in Notifications.

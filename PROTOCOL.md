@@ -2647,9 +2647,14 @@ Body of `POST /_p/report`:
 
 `reason` is one of `unkind`, `wrong`, `spam`, `illegal`, `other`; `note` at most 500 characters. On a person's site
 `about` must be a `comment` by someone other than the owner; on a group's, a `comment` or an `item` (a post or photo),
-by anyone but the caller. The host keeps a copy of what the record said, until 90 days after the report is dealt with,
-even if its writer deletes it. With `named: false` it keeps no record of who sent it: the daily cap is counted in its
-object's memory.
+by anyone but the caller. A group sends it to its owner and admins **apart from whoever wrote it**, and never lists it
+to them or lets them leave it; with nobody else running the group, it's refused (400). The host keeps a copy of what
+the record said (once for each thing), until 90 days after the report is dealt with, even if its writer deletes it.
+With `named: false` it keeps no record of who sent it. The daily caps (10 a person, once a thing a day, and a named
+report once a thing for good) are kept under SHA-256 of a random salt made each day with the person, and the person and
+the thing; the salt and the day's rows go when the next day's first report comes. That's what honest code keeps: the
+call itself is signed by the sender's site, so whoever runs the host could learn who by changing its code. At most 20
+reports about one thing are kept open; another is answered with the id of one already there, whose outcome it shares.
 
 | Status | When |
 |---|---|
@@ -2664,9 +2669,15 @@ A site from before reports answers 404 `Not found.`: the reporter's site says th
 A report is dealt with when what it's about is removed (a `remove` of it, or of the post it's on), when its writer is
 removed from the group, or when whoever runs the space leaves it, with an optional word back (300 characters).
 
-`POST /_p/reports/check` `{ids: [<report id>…]}` (at most 50) answers `{reports: [{id, outcome, word}]}`: `outcome` is
-null while open, else `removed`, `left` or `member`. The reporter's site asks hourly at most, and says what became of
-it in Notifications; for `illegal` still open after 3 days, it says where else to turn.
+`POST /_p/reports/check` `{ids: [<report id>…]}` (at most 50, body at most 8 KB) is **unsigned**: a report's id is a
+256-bit secret only its sender's site has, so asking needn't say again who's asking. It answers `{reports: [{id,
+outcome, word}]}`: `outcome` is null while open, else `removed`, `left` or `member`. A report whose post or comment has
+gone with its list (a whole post deleted or removed, its photos with it) counts as removed. The reporter's site asks
+hourly at most, the longest-unasked first, and says what became of it in Notifications; for `illegal` still open after
+3 days, it says where else to turn. Reports to a friend or group it no longer has are marked gone and not asked about.
+
+A group's `report` note (10.12) reaches its admins' sites through their own notice budget (20 a day from a group),
+apart from the one other notices share, so neither crowds out the other.
 
 Source: `src/reports.js`; `src/friendhost.js`, `src/groupposts.js` (the calls); `src/groups.js` (`/_group/admin/reports`).
 
@@ -3606,7 +3617,8 @@ Added for safety (docs/safety-plan.md 3.4); a group's site from before answers a
 - **Clearing up.** `POST /_group/records` with a member's `remove` may carry `clear: true`. Once the removal is taken,
   the group removes everything that person wrote there with its own hosting key, as `GroupRules` lets a host: each of
   their posts whole (photos and comments with it), and each of their comments on others' posts. Readers show these as
-  removed by the group. They aren't held to the per-person cap.
+  removed by the group. They aren't held to the per-person cap. The member is out before any of it starts; it goes 300
+  at a time, carrying on whenever an admin next reads `GET /_group/admin/members`.
 
 Source: `src/groups.js`, `src/groupmembers.js` `takeJoin`, `takeMemberRecord`; `src/groupposts.js` `clearUp`.
 
@@ -3948,7 +3960,8 @@ owner's browser and their own site, and aren't part of the protocol.
 | `GET /_p/items/<id>[?after=<n>]` | an approved friend who may see the item | 8.8 |
 | `POST /_p/records` | an approved friend | 8.10 |
 | `POST /_p/records/check` | an approved friend | 8.11 |
-| `POST /_p/report`, `POST /_p/reports/check` | an approved friend | 8.15 |
+| `POST /_p/report` | an approved friend | 8.15 |
+| `POST /_p/reports/check` | anyone, unsigned (by report id) | 8.15 |
 | `GET /_p/posts[?page=<n>]`, `GET /_p/posts/<key>` | an approved friend | 8.13 |
 | `GET /_p/albums`, `GET /_p/albums/<key>[?page=<n>]` | an approved friend | 8.13 |
 | `GET /_p/photos/<sha256>` | an approved friend | 8.13 |
@@ -3979,6 +3992,7 @@ owner's browser and their own site, and aren't part of the protocol.
 | `POST /_p/items` | members | 10.9 |
 | `POST /_p/records` | members | 10.9 |
 | `POST /_p/records/check` | members | 10.9 |
-| `POST /_p/report`, `POST /_p/reports/check` | members | 8.15 |
+| `POST /_p/report` | members | 8.15 |
+| `POST /_p/reports/check` | anyone, unsigned (by report id) | 8.15 |
 | `POST /_p/people` | members | 10.9 |
 | `GET` or `HEAD /files/<sha256>?exp=<t>&sig=<s>` | a browser with a link the group signed for a member | 10.10 |
