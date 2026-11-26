@@ -245,6 +245,23 @@ check("a new recovery code waits 7 days too", /^([0-9A-Z]{5}-){4}[0-9A-Z]{5}$/.t
 await phone.goto(`${BASE}/_admin`);
 await Promise.all([reloaded(phone), phone.click("button[data-sign=cancel]")]);
 check("…and can be cancelled", docs().length === 9 && !(await waitingCard(phone)));
+// The site takes only the document it made for the passkey to sign (security review 2026-11 H2): here, the same change
+// with a different hosting key slipped in, signed by the passkey with the same nonce, is refused, and nothing's added.
+const swapped = await phone.evaluate(async () => {
+  const S = await import("/static/signed.js");
+  const { passkeySigns } = await import("/static/passkey.js");
+  const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const recovery = (await S.recoveryKey(S.newRecoveryCode())).publicKey;
+  const start = await (await post("/_admin/keys/change/start", { change: "recovery", recovery })).json();
+  const made = S.decode(S.fromB64url(start.doc));
+  const other = await S.publicKeyText((await S.newKeyPair(true)).publicKey);
+  const bytes = S.encode({ ...made, hosting: other });
+  const response = await passkeySigns(start.nonce, [await S.fingerprintOf("identity", bytes)], start.allow);
+  const finish = await post("/_admin/keys/change/finish", { doc: S.b64url(bytes), response });
+  return { status: finish.status, ownHosting: made.hosting };
+});
+check("finishing a change with a document the site didn't make is refused", swapped.status === 400 && docs().length === 9
+  && swapped.ownHosting === docs()[8].hosting, JSON.stringify(swapped));
 
 // A release that fixes a security problem: Home says so, and so does the Update page. (A made-up release, saved as
 // if the owner's site had just checked GitHub.)

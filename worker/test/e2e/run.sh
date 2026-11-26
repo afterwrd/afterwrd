@@ -126,6 +126,8 @@ run_notifications() { # notifications on the owner's devices (src/push.js), thei
   (cd "$WORKER" && node test/sqlite.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$WORKER" && node --no-warnings test/sitecopy.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$WORKER" && node --no-warnings test/triggers.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  echo "== identities" # an identity's address is believed only once fetched from there (security review 2026-11 H1)
+  (cd "$WORKER" && node --no-warnings test/identities.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   three_sites notifications.mjs
 }
 # A closed group goes 30 seconds after, here, rather than 30 days (TEST_CLOSE_SECONDS, local sites only: groups.js).

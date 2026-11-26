@@ -9,7 +9,32 @@ const CHUNK = 1_900_000;
 export const HASH_RE = /^[0-9a-f]{64}$/;
 
 export function mediaStore(env, hash) {
-  return env.MEDIA.get(env.MEDIA.idFromName(`shard-${hash[0]}`));
+  // Every call carries the site's own key (OUTBOX_KEY), as calls to its other objects do (outbox.js allowed): another
+  // Worker in the account can be bound to these objects by naming this site's, but can't know it, so can't read or
+  // delete anyone's photos (security review 2026-11 L13).
+  const stub = env.MEDIA.get(env.MEDIA.idFromName(`shard-${hash[0]}`));
+  const key = typeof env.OUTBOX_KEY === "string" ? env.OUTBOX_KEY : "";
+  return {
+    has: (hashes) => stub.has(key, hashes),
+    keepOnly: (hashes) => stub.keepOnly(key, hashes),
+    remove: (hashes) => stub.remove(key, hashes),
+    fetch: (request) => {
+      const keyed = new Request(request);
+      keyed.headers.set("Afterwrd-Key", key);
+      return stub.fetch(keyed);
+    },
+  };
+}
+
+/** Whether `key` is the site's own (as outbox.js allowed; a site without one yet takes any, until its next update adds it). */
+function allowed(env, key) {
+  const own = env.OUTBOX_KEY;
+  if (typeof own !== "string" || !own) return true;
+  const a = new TextEncoder().encode(typeof key === "string" ? key : "");
+  const b = new TextEncoder().encode(own);
+  let differ = a.length ^ b.length;
+  for (let i = 0; i < b.length; i++) differ |= (a[i] ?? 0) ^ b[i];
+  return !differ;
 }
 
 export class MediaStore extends DurableObject {
@@ -27,12 +52,14 @@ export class MediaStore extends DurableObject {
   }
 
   /** Which of these hashes are stored here. */
-  has(hashes) {
+  has(key, hashes) {
+    if (!allowed(this.env, key)) throw new Error("Not allowed.");
     return hashes.filter((h) => this.sql.exec("SELECT 1 FROM files WHERE hash = ?", h).toArray().length);
   }
 
   /** Delete every file not in `hashes`, and any pieces left by uploads that never finished; returns how many went. */
-  keepOnly(hashes) {
+  keepOnly(key, hashes) {
+    if (!allowed(this.env, key)) throw new Error("Not allowed.");
     const keep = new Set(hashes);
     let removed = 0;
     for (const { hash } of this.sql.exec("SELECT hash FROM files").toArray()) {
@@ -46,7 +73,8 @@ export class MediaStore extends DurableObject {
   }
 
   /** Delete these files (when the owner deletes a post); returns how many went. */
-  remove(hashes) {
+  remove(key, hashes) {
+    if (!allowed(this.env, key)) throw new Error("Not allowed.");
     let removed = 0;
     for (const hash of hashes) {
       this.sql.exec("DELETE FROM chunks WHERE hash = ?", hash);
@@ -56,6 +84,7 @@ export class MediaStore extends DurableObject {
   }
 
   async fetch(request) {
+    if (!allowed(this.env, request.headers.get("Afterwrd-Key"))) return new Response("Not allowed", { status: 403 });
     const hash = new URL(request.url).pathname.slice(1);
     if (!HASH_RE.test(hash)) return new Response("Bad hash", { status: 400 });
     if (request.method === "PUT") return this.store(hash, request);

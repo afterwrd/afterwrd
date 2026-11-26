@@ -13,6 +13,7 @@
 // link), the tab takes this page's place instead, which gets most of the way. Without scripts: plain links, as before.
 
 const ONWARD = "afterwrd_onward"; // app.js ONWARD_COOKIE
+const TAB_PATHS = ["/photos", "/friend", "/groups", "/events", "/activity"]; // app.js TABS
 const TABS = "header.site nav.main a[href], header.site a.brand[href]";
 const nav = /** @type {any} */ (globalThis).navigation;
 /** A same-site address as path and query (no #part), or null. */
@@ -66,7 +67,7 @@ addEventListener("pageshow", (e) => {
   const way = onward();
   if (!way || way.from !== here()) return;
   setOnward(null);
-  if (typeof way.to !== "string" || !way.to.startsWith("/") || way.to.startsWith("//")) return;
+  if (!TAB_PATHS.includes(way.to)) return; // only one of the tabs, as the site allows (app.js TABS; security review 2026-11 W4)
   document.documentElement.dataset.onward = "";
   // Not while the page is still being brought back: Chrome can drop a move started then. Tried again if it was.
   const from = here();

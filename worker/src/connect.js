@@ -37,6 +37,7 @@ import { html, json, now, pageData, randomToken, Refusal, sha256 } from "./util.
 import { headerMe } from "./photos.js";
 import { confirmPage, connectionsMessage, connectionsPage, introducedPage, introducePage, togetherPage } from "./views/connections.js";
 import { rateWindow } from "./limits.js";
+import { later } from "./later.js";
 import { bodyBytes, bodyJson, callFriend, siteCalling } from "./calls.js";
 import { checkProfile, fetchIdentity, identityState } from "./identities.js";
 import { pullItems } from "./friendcopies.js";
@@ -48,7 +49,9 @@ const INSTALLER = "https://install.afterwrd.app/";
 const LINK_RE = /^\/_connect\/([\w-]{40,100})$/;
 const ASKS_WAITING = 20; // requests waiting for the owner, at most
 const ASKS = { hour: 30, perSite: 5 }; // requests without a link (with a reason) in an hour, at most: overall, and from one site
-const MEMBERS = { trust: 600, recheck: 60 }; // seconds: a group's member list counts this long; asked again no sooner
+// A group's member list, kept to check a request's reason: it counts this long, and is asked for again (after answering,
+// never while a stranger waits: security review 2026-11 M4) no more often than this, whether or not the group answers.
+const MEMBERS = { trust: 3600, refresh: 3600 };
 const MAX_NOTE = 300; // an introduction's note
 // Introductions: from one friend a day, and kept, at most; kept overall at most; for how long.
 const INTRODUCTIONS = { perFriendDay: 20, perFriend: 20, kept: 100, days: 60 };
@@ -206,23 +209,27 @@ async function reasonFor(env, origin, via) {
   if (!groupOrigin || !Number.isSafeInteger(id) || id <= 0) return null;
   const group = await db.prepare("SELECT * FROM groups WHERE origin = ? AND remote_id = ? AND joined_at IS NOT NULL").bind(groupOrigin, id).first();
   if (!group) return null;
+  // From the list kept here only: someone not yet proved (this is before their signature is checked) never makes this
+  // site call the group, so how long the answer takes says nothing about which groups the owner is in, and nobody can
+  // spend the owner's allowance at the group. A list that's old is asked for again after answering (the asker's site
+  // tries once more, a few seconds later).
   const cached = await db.prepare("SELECT * FROM group_member_cache WHERE group_id = ?").bind(group.id).first();
   const age = cached ? now() - cached.checked_at : Infinity;
+  if (age >= MEMBERS.refresh) later(refreshMembers(env, group, cached).catch(() => null));
   let listed = [];
   try { listed = JSON.parse(cached?.origins ?? "[]"); } catch {}
-  if (age < MEMBERS.trust && listed.includes(origin)) return { kind: "group", name: cached.name };
-  if (age < MEMBERS.recheck) return null;
-  let members;
-  let info;
-  try {
-    ({ group: info, members } = await loadMembers(env, group));
-  } catch {
-    return null;
-  }
+  return age < MEMBERS.trust && listed.includes(origin) ? { kind: "group", name: cached.name } : null;
+}
+
+/** Asks a group for its members again, for reasonFor; noted as asked even when it doesn't answer (kept as it was). */
+async function refreshMembers(env, group, cached) {
+  const db = env.DB;
+  await db.prepare(`INSERT INTO group_member_cache (group_id, name, origins, checked_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(group_id) DO UPDATE SET checked_at = excluded.checked_at`).bind(group.id, cached?.name ?? String(group.name ?? ""), cached?.origins ?? "[]", now()).run();
+  const { group: info, members } = await loadMembers(env, group);
   const origins = members.filter((m) => m.from && !m.waiting).map((m) => m.from);
   await db.prepare("INSERT OR REPLACE INTO group_member_cache (group_id, name, origins, checked_at) VALUES (?, ?, ?, ?)")
     .bind(group.id, info.name, JSON.stringify(origins), now()).run();
-  return origins.includes(origin) ? { kind: "group", name: info.name } : null;
 }
 
 /**
@@ -240,24 +247,32 @@ export async function receiveIntroduction(env, url, peer, body) {
   if (!peer.reached_at && (await pullItems(env, url.origin, peer)) === null) {
     return [{ error: `You haven't approved ${await ownerName(db)} as a friend yet.` }, 403];
   }
-  // Already friends (or asking), turned down, or already introduced by them: nothing to do, and nothing said about which.
+  // Every introduction counts against the day's limit, kept or not, before anything is looked up, and the answer is the
+  // same whatever's known: so nobody can find out by introducing people whom the owner here is friends with, has
+  // turned down or has blocked (security review 2026-11 M3). Counted in the same statement, so ones sent at once can't
+  // slip past.
+  const at = now();
+  const [, counted] = await db.batch([
+    db.prepare("DELETE FROM introduce_log WHERE at < ?").bind(at - 86400),
+    db.prepare(`INSERT INTO introduce_log (at, connection_id) SELECT ?1, ?2
+      WHERE (SELECT COUNT(*) FROM introduce_log WHERE connection_id = ?2 AND at > ?1 - 86400) < ?3 RETURNING at`).bind(at, peer.id, INTRODUCTIONS.perFriendDay),
+  ]);
+  if (!counted.results.length) return [{ error: "That's a lot of introductions for now. Try again later." }, 429];
+  // Already friends (or asking), turned down, or already introduced by them: nothing to do. Over what's kept from one
+  // friend, or overall: not kept either. The same answer for all of them.
   const known = await db.prepare(`SELECT 1 FROM connections WHERE origin = ?1 AND connected_at IS NOT NULL
     UNION SELECT 1 FROM declined_asks WHERE origin = ?1 UNION SELECT 1 FROM introductions WHERE origin = ?1 AND connection_id = ?2
     UNION SELECT 1 FROM blocks b JOIN identities i ON i.person = b.person WHERE i.origin = ?1`)
     .bind(origin, peer.id).first();
   if (known) return [{ ok: true }, 200];
-  const at = now();
-  // Limits checked in the same statement as the insert.
-  const [, kept] = await db.batch([
+  await db.batch([
     db.prepare("DELETE FROM introductions WHERE created_at < ?").bind(at - INTRODUCTIONS.days * 86400),
     db.prepare(`INSERT INTO introductions (connection_id, origin, name, note, created_at, asked)
-      SELECT ?1, ?2, ?3, ?4, ?5, ?9 WHERE (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1 AND created_at > ?5 - 86400) < ?6
-        AND (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1) < ?7 AND (SELECT COUNT(*) FROM introductions) < ?8
-      ON CONFLICT (connection_id, origin) DO NOTHING
-      RETURNING id`).bind(peer.id, origin, cleanName(body.name), note || null, at, INTRODUCTIONS.perFriendDay, INTRODUCTIONS.perFriend,
+      SELECT ?1, ?2, ?3, ?4, ?5, ?8 WHERE (SELECT COUNT(*) FROM introductions WHERE connection_id = ?1) < ?6 AND (SELECT COUNT(*) FROM introductions) < ?7
+      ON CONFLICT (connection_id, origin) DO NOTHING`).bind(peer.id, origin, cleanName(body.name), note || null, at, INTRODUCTIONS.perFriend,
       INTRODUCTIONS.kept, body.asked === true ? 1 : null),
   ]);
-  return kept.results.length ? [{ ok: true }, 200] : [{ error: "That's a lot of introductions for now. Try again later." }, 429];
+  return [{ ok: true }, 200];
 }
 
 /**
@@ -286,9 +301,12 @@ export async function passOnAsk(env, url, peer, body) {
   const friend = await db.prepare(`SELECT origin FROM connections WHERE origin = ? AND connected_at IS NOT NULL AND approved_at IS NOT NULL
     AND reached_at IS NOT NULL`).bind(origin).first();
   if (friend) {
-    // Whatever their site says, nothing is said back (it may already know them, or have turned them down).
-    await callFriend(env, url.origin, origin, "/_p/introduce", { body: { type: "Introduce", origin: peer.origin, name: peer.name, asked: true } })
+    // Whatever their site says, nothing is said back (it may already know them, or have turned them down); and it's
+    // told after answering, so how long the answer takes doesn't say whether they're a friend here either (security
+    // review 2026-11 L4). The asker's site tries again a few seconds later if it asked before this arrived.
+    const tell = callFriend(env, url.origin, origin, "/_p/introduce", { body: { type: "Introduce", origin: peer.origin, name: peer.name, asked: true } })
       .catch(() => null);
+    if (!later(tell)) await tell;
   }
   return [{ ok: true }, 200];
 }
@@ -350,7 +368,7 @@ export async function handleConnections(request, env, url, owner) {
     const back = safeNext(String(form.get("back") ?? "/friend"), url);
     try {
       const asked = await askToBeFriends(env, url.origin, { origin: form.get("origin"), group: form.get("group"),
-        through: form.get("through"), name: form.get("name") });
+        through: form.get("through"), name: form.get("name"), person: form.get("person") });
       // A request from an invite is decided on Friends, which warns if the name isn't the one invited.
       return Response.redirect(`${url.origin}${asked.decideOnFriends ? "/friend" : back}`, 303);
     } catch (error) {
@@ -554,12 +572,13 @@ function parseLink(link, url, env) {
  * call with the owner's signed name. Their identity is learnt first, at their own address, so this site knows who it's
  * asking; their answer (their signed name) comes from that address too. Returns { name } or { error, status }.
  */
-async function handshake(env, url, origin, path, extra = {}) {
+async function handshake(env, url, origin, path, extra = {}, expect = null) {
   const db = env.DB;
   const existing = await db.prepare("SELECT * FROM connections WHERE origin = ?").bind(origin).first();
   if (existing?.connected_at) return { error: `You're already connected with ${existing.name}.`, status: 409 };
   const identity = await fetchIdentity(env, origin).catch(() => null);
   if (!identity) return { error: `${host(origin)} needs a newer afterwrd, with signing set up in Your devices.`, status: 400, gone: true };
+  if (expect && identity.id !== expect) return { error: `The site at ${host(origin)} isn't theirs, so nothing was asked.`, status: 409 };
   let reply;
   try {
     reply = await callFriend(env, url.origin, origin, path,
@@ -588,8 +607,12 @@ async function handshake(env, url, origin, path, extra = {}) {
 export async function friendshipsOf(db, people) {
   const list = [...new Set(people.filter(Boolean))];
   if (!list.length) return new Map();
+  // By identity: someone's address is only their own claim until this site has fetched it from there, so a friendship
+  // is matched by the identity it's tied to (or, for one not tied yet, by an address this site has confirmed), never
+  // by an address alone (security review 2026-11 H1, F7).
   const { results } = await db.prepare(`SELECT i.person, i.origin, c.id, c.approved_at, c.reached_at, c.invited_as FROM identities i
-    LEFT JOIN connections c ON c.origin = i.origin AND c.connected_at IS NOT NULL
+    LEFT JOIN connections c ON c.connected_at IS NOT NULL
+      AND (c.identity = i.person OR (c.identity IS NULL AND c.origin = i.origin AND i.origin_checked_at IS NOT NULL))
     WHERE i.person IN (SELECT value FROM json_each(?)) AND i.frozen_at IS NULL`).bind(JSON.stringify(list)).all();
   return new Map(results.map((r) => [String(r.person), { origin: String(r.origin), id: r.id == null ? null : Number(r.id),
     state: r.id == null ? "none" : r.approved_at ? (r.reached_at ? "friends" : "asked") : r.invited_as ? "invited" : "asking" }]));
@@ -612,7 +635,7 @@ async function approve(env, connection) {
  * here), or else someone a friend introduced. If they've already asked, asking back is saying yes, apart from a
  * request from an invite, which is decided on Friends: then { decideOnFriends: true }.
  */
-export async function askToBeFriends(env, here, { origin: asked, group: groupId, through = null, name: knownAs = null }) {
+export async function askToBeFriends(env, here, { origin: asked, group: groupId, through = null, name: knownAs = null, person = null }) {
   const db = env.DB;
   const url = new URL(here);
   const origin = siteOrigin(asked, env);
@@ -635,10 +658,18 @@ export async function askToBeFriends(env, here, { origin: asked, group: groupId,
         : `Couldn't ask through ${friend.name}: ${error.message}`);
     }
     via = { introduction: true };
-    const done = await handshake(env, url, origin, "/_connect/ask", { via });
+    // The commenter's own site, as its address says now: only if it's theirs (whoever wrote the comment), so a name that
+    // claims someone else's address can't send this request to that someone else.
+    const expect = typeof person === "string" ? person : null;
+    let done = await handshake(env, url, origin, "/_connect/ask", { via }, expect);
+    // Their friend's site tells theirs after answering this one: once more, a few seconds later, if it hadn't yet.
+    if (done.error && done.error.startsWith("Without a friend link")) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      done = await handshake(env, url, origin, "/_connect/ask", { via }, expect);
+    }
     if (done.error) {
       throw new Refusal(done.gone ? `${name}'s site needs a newer afterwrd before you can ask this way. Send them a friend link instead.`
-        : /already|try again later/i.test(done.error) ? `Couldn't ask ${name}: ${done.error}`
+        : /already|try again later|isn't theirs/i.test(done.error) ? `Couldn't ask ${name}: ${done.error}`
         : `${name}'s site didn't take the request. Perhaps they're no longer friends with ${friend.name}, or their site needs a newer afterwrd. You could ask ${friend.name} to introduce you, or send ${name} a friend link.`);
     }
     await db.prepare("DELETE FROM introductions WHERE origin = ?").bind(origin).run();
@@ -654,7 +685,13 @@ export async function askToBeFriends(env, here, { origin: asked, group: groupId,
     via = { introduction: true };
     name = made.name;
   }
-  const done = await handshake(env, url, origin, "/_connect/ask", { via });
+  let done = await handshake(env, url, origin, "/_connect/ask", { via });
+  // Their site checks a group reason against the group's member list it keeps, asking the group for it again only after
+  // answering (reasonFor): once more, a few seconds later, in case that's what it was waiting for.
+  if (done.error && via.group && done.error.startsWith("Without a friend link")) {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    done = await handshake(env, url, origin, "/_connect/ask", { via });
+  }
   if (done.error) {
     throw new Refusal(done.gone ? `${name}'s site needs a newer afterwrd before you can ask this way. Send them a friend link instead.`
       : `Couldn't ask ${name}: ${done.error}`);

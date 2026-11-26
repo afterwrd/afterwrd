@@ -505,8 +505,10 @@ ${forget}
       document.querySelectorAll("button[data-install-now]").forEach((b) => { b.disabled = false; });
     }
   }));
-  // Back from Connect: carry on with what was asked for.
-  if (connected && autoGo) {
+  // Back from Connect (only from its own page here, never a link from elsewhere: security review 2026-11 L2): carry on
+  // with what was asked for.
+  const fromConnect = (() => { try { const r = new URL(document.referrer); return r.origin === location.origin && r.pathname.startsWith("/_cloudflare/"); } catch { return false; } })();
+  if (connected && autoGo && fromConnect) {
     history.replaceState(null, "", "/_admin/update");
     (autoGo === "groups" ? groupsGo ?? document.querySelector("#groups button[data-install-now]") : go)?.click();
   }

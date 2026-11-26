@@ -140,9 +140,16 @@ check("none of those got anyone a device link, or changed anything", sql("SELECT
 // The reviewers' attack: someone starts a recovery themselves (so they hold its PKCE secret, from the cookie), gets the
 // owner to allow a friend's check with its challenge, and brings the code back. A check's access only reads.
 const theirs = await fetch(`${BASE}/_auth/recover/start`, { redirect: "manual" });
-const [stateS, verifierV] = decodeURIComponent(theirs.headers.get("set-cookie").match(/__Host-recover=([^;]+)/)[1]).split(".");
+const recoverCookie = decodeURIComponent(theirs.headers.get("set-cookie").match(/__Host-recover=([^;]+)/)[1]);
+const [stateS, verifierV] = recoverCookie.split(".");
+// A cookie the site didn't make (its own state and secret, with no signature, or a made-up one) is refused before
+// anything is written or the update lock taken (security review 2026-11 L15).
+const madeUp = await fetch(`${BASE}/_auth/recover/finish`, { method: "POST", headers: { Origin: BASE, "Content-Type": "application/json",
+  Cookie: `__Host-recover=${stateS}.${verifierV}.not-its-signature` }, body: JSON.stringify({ code: "readonly.from-a-check", state: stateS }) });
+check("a recovery finish with a cookie the site didn't sign is refused before anything else", madeUp.status === 400
+  && (await madeUp.json()).error.includes("expired") && exchanges.at(-1)?.code_verifier !== verifierV);
 const taken = await fetch(`${BASE}/_auth/recover/finish`, { method: "POST", headers: { Origin: BASE, "Content-Type": "application/json",
-  Cookie: `__Host-recover=${stateS}.${verifierV}` }, body: JSON.stringify({ code: "readonly.from-a-check", state: stateS }) });
+  Cookie: `__Host-recover=${recoverCookie}` }, body: JSON.stringify({ code: "readonly.from-a-check", state: stateS }) });
 check("a code someone was given for a friend's check can't be turned into a way in", taken.status === 403
   && (await taken.json()).error.includes("not change it") && exchanges.at(-1)?.code_verifier === verifierV && deploys.length === 0);
 

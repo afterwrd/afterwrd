@@ -123,10 +123,15 @@ async function signedByPasskeyOf(doc, proof, statement) {
 const sameKeys = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const content = (d) => ({ origin: d.origin, passkeys: d.passkeys, recovery: d.recovery ?? null, hosting: d.hosting, owner: d.owner ?? null, closed: d.closed ?? false });
 
-/** "fast" (only passkeys added and/or a new hosting key) or "slow" (anything else). */
+/**
+ * "fast" (only passkeys added) or "slow" (anything else). A new hosting key is slow: whoever holds it signs every call
+ * the site makes as the owner's, so a stolen passkey mustn't be able to swap it at once, out of the owner's sight (it
+ * waits 7 days, shows on Your devices, and can be cancelled; security review 2026-11 H2).
+ */
 function classify(before, after) {
   const removed = before.passkeys.some((b) => !after.passkeys.some((p) => p.id === b.id && sameKeys(p, b)));
-  if (removed || after.recovery !== before.recovery || after.origin !== before.origin || after.closed) return "slow";
+  if (removed || after.recovery !== before.recovery || after.origin !== before.origin || after.hosting !== before.hosting
+    || after.closed) return "slow";
   return "fast";
 }
 
@@ -200,7 +205,7 @@ export async function readIdentity(chain, firstSeen, at, { owner = null } = {}) 
     if (doc.cancels) { state.problem = "unexpected"; break; }
     const kind = classify(before, doc);
     if (!(byRecovery || byPasskey)) { state.problem = "unsigned"; break; }
-    // Adding passkeys (or a new hosting key) counts from when the document before it did: what those keys signed is the
+    // Adding passkeys counts from when the document before it did: what those keys signed is the
     // owner's whenever a reader first meets it. Otherwise a reader who learnt the identity today (a new friend, a site
     // taking a move) would refuse yesterday's comment from the owner's second phone. Honest hosts' "taken at" times
     // are never before the key existed, so this lets nothing in that a reader who'd watched all along would refuse.

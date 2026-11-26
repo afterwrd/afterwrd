@@ -109,7 +109,8 @@ const onward = () => `<script nonce="${nonce()}">
   if (!found) return;
   let way = null;
   try { way = JSON.parse(decodeURIComponent(found[1])); } catch {}
-  if (!way || way.from !== location.pathname + location.search || typeof way.to !== "string" || !way.to.startsWith("/") || way.to.startsWith("//")) return;
+  // Only on to one of the tabs, as the site allows (app.js TABS): never anywhere a cookie could name (security review 2026-11 W4).
+  if (!way || way.from !== location.pathname + location.search || !["/photos", "/friend", "/groups", "/events", "/activity"].includes(way.to)) return;
   document.cookie = "afterwrd_onward=; path=/; max-age=0; samesite=strict";
   document.documentElement.dataset.onward = "";
   location.replace(way.to);

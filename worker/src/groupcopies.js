@@ -26,7 +26,7 @@ import { firstChanged, fitToKeep, keepThread, keptThread, withNew } from "./thre
 import { CLOSE_SECONDS, MAX_GROUP_PHOTOS } from "./groups.js";
 import { parseGroup, refresh } from "./membership.js";
 import { keepNotice, tellMention } from "./notes.js";
-import { pushAllowed, writerMayBuzz } from "./notify.js";
+import { eventsMayBuzz, pushAllowed, writerMayBuzz } from "./notify.js";
 import { checkPhotos, removeUnusedFiles } from "./posts.js";
 import { notifyLater } from "./push.js";
 import { checkGroupReceipts, queueReceipts } from "./receipts.js";
@@ -98,7 +98,10 @@ export async function pullGroup(env, from, group) {
       if (kept) statements.push(kept.statement);
     }
     for (const id of Array.isArray(data.gone) ? data.gone.slice(0, 500) : []) {
-      if (ID_RE.test(id)) statements.push(db.prepare("DELETE FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id));
+      if (ID_RE.test(id)) {
+        statements.push(db.prepare("DELETE FROM copies WHERE id = ? AND group_id = ?").bind(id, group.id),
+          db.prepare("UPDATE notices SET text = NULL WHERE item = ? AND group_id = ? AND text IS NOT NULL").bind(id, group.id)); // (security review 2026-11 L16)
+      }
     }
     since = Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
     statements.push(db.prepare("UPDATE groups SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(since, now(), group.id));
@@ -578,7 +581,8 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
     const was = copy && JSON.parse(String(copy.content));
     if (note.cancelled === true && was?.event && !was.event.cancelled && myAnswer(copy, me.person) !== "no") {
       const words = eventWords(was.event);
-      if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, group: g, item: id, target: id, actor: String(group.name), text: words })) {
+      if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, group: g, item: id, target: id, actor: String(group.name), text: words })
+        && await eventsMayBuzz(env.DB, { group: g })) {
         notifyLater(env, url.origin, work, { title: String(group.name), text: `Called off: ${words}`, hidden: "Called off an event you were going to",
           url: `/groups/${g}`, tag: `event-g${g}-${id}` });
       }
@@ -678,7 +682,8 @@ export async function receiveGroupNote(env, url, work, group, me, note) {
   if ((moved || cancelled) && myAnswer(copy, me.person) !== "no") {
     const kind = cancelled ? "cancelled" : "changed";
     const words = eventWords(now_.event);
-    if (await keepNotice(env.DB, { kind, fp: entry.fp, group: g, item, target: item, actor, text: words })) {
+    if (await keepNotice(env.DB, { kind, fp: entry.fp, group: g, item, target: item, actor, text: words })
+      && await eventsMayBuzz(env.DB, { group: g })) {
       notifyLater(env, url.origin, work, { title: String(group.name), text: `${cancelled ? "Called off" : "Changed"}: ${words}`,
         hidden: cancelled ? "Called off an event you're going to" : "Changed an event you're going to", url: link(item), tag: `event-g${g}-${item}` });
     }
@@ -731,7 +736,8 @@ async function dateCalledOff(env, url, work, { group, me, copy, was, item, date,
     .bind(JSON.stringify({ ...was, event: { ...was.event, skipped } }), tally ? JSON.stringify(tally) : null, entry.taken, item, g).run();
   if (mine === "going" || mine === "maybe") {
     const words = eventWords({ ...onDate(was.event, date), rrule: null });
-    if (await keepNotice(env.DB, { kind: "cancelled", fp: entry.fp, group: g, item, target: `${item}?date=${date}`, actor, text: words })) {
+    if (await keepNotice(env.DB, { kind: "cancelled", fp: entry.fp, group: g, item, target: `${item}?date=${date}`, actor, text: words })
+      && await eventsMayBuzz(env.DB, { group: g })) {
       notifyLater(env, url.origin, work, { title: String(group.name), text: `Called off: ${words}`, hidden: "Called off a date you were going to",
         url: `/groups/${g}/posts/${item}?date=${date}`, tag: `event-g${g}-${item}-${date}` });
     }

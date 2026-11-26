@@ -721,8 +721,8 @@ Then the reader compares it with the document in effect (`before`) and classifie
 
 | Change | Signed by | Takes effect |
 |---|---|---|
-| Only adds passkeys, and/or replaces `hosting` | a passkey in `before` | at once ("fast") |
-| Anything else: removes or alters a passkey, a new `recovery`, a new `origin`, `closed` | a passkey in `before`, or the recovery key | 7 days after the reader first saw it ("slow") |
+| Only adds passkeys | a passkey in `before` | at once ("fast") |
+| Anything else: removes or alters a passkey, a new `recovery`, a new `hosting`, a new `origin`, `closed` | a passkey in `before`, or the recovery key | 7 days after the reader first saw it ("slow") |
 | Anything at all | the recovery key | 7 days after the reader first saw it |
 
 A passkey counts as removed if no passkey in the new list has the same `id` and the same JSON serialisation.
@@ -809,6 +809,15 @@ doesn't know yet only once one of their records there checks against the chain g
 It learns at most 1,100 new identities from one answer, and 3,000 a day (UTC) from one sending site. So a host can't
 fill a reader with identities nobody signed anything with.
 
+**An address is only confirmed by fetching it.** An identity learnt any way but by fetching it from its own address
+(passed along, in a note, a group's owner beside its chain) says where it lives, but that is only its own claim: anyone
+can make an identity whose document names someone else's address. So a site accepts a signed call "from" an address
+with a known identity's hosting key only once it has fetched that identity from that very address itself
+(`origin_checked_at`); otherwise it fetches `<origin>/.well-known/afterwrd` first, and what the real site there says
+is what counts. Learning a chain that names a different address than before forgets the confirmation. A comment
+note's writer is learnt only once their comment checks, within the limits above (since 2.3.2). The one exception is a
+mention receipt (9.x), whose content is the writer's own signed comment and doesn't rely on where the call came from.
+
 **First seen.** For every document in the clean part of a chain it is given (below), the reader notes the time it
 first saw that document's fingerprint, once, in its own clock. These times are what the 7 days run from, and they are
 never taken from the sender. A document that doesn't read cleanly isn't noted, so nobody can start a change's 7 days
@@ -853,8 +862,12 @@ the changed fields. The site refuses a new change while one is pending. It appen
 reads with no problem, and only if nobody else appended meanwhile. The owner's browser signs the bytes the site gives
 it, with a passkey (`public/static/passkey.js` `passkeySigns`) or with the recovery key; it does not inspect them.
 
-> Note: the hosting key may change "fast", but no code path makes a document that changes only `hosting`; it changes
-> only with a move. Likewise nothing ever makes a document with `closed: true`.
+> Note: a new `hosting` key is slow (since 2.3.2). Whoever holds it signs every call the site makes, so someone with a
+> stolen passkey mustn't be able to replace it at once. Every change a site makes (`allow`, `remove`, `recovery`,
+> `devices`) carries the site's own hosting key while the identity is at the site's address, so removing a stolen
+> passkey also puts back any key it set. A cancel keeps the content of the document before the pending one, as above.
+> `change/finish` takes only the document `change/start` made: the nonce it hands out ends with that document's
+> fingerprint. Nothing ever makes a document with `closed: true`.
 
 Source: `src/keys.js` `start`, `finish`, `changeStart`, `changeFinish`, `recoverStart`, `recoverFinish`, `nextDocument`,
 `appendDocument`; `src/views/devices.js`.
@@ -2290,8 +2303,10 @@ so the asker learns nothing about B's friends, groups, introductions or refusals
    B itself (400 `That doesn't look like an afterwrd site.`).
 2. A reason: with `introduction: true`, B holds an introduction to A's origin, made in the last 60 days by a friend who
    is still approved and whose site has answered B. With `group`, B's owner is a member of that group (by origin and
-   id) and the group's member list includes A's origin as an approved member. B asks the group for its members
-   (section 10) at most once a minute per group and trusts the answer for 10 minutes. No reason: 403.
+   id) and the group's member list includes A's origin as an approved member. B checks only the member list it keeps,
+   never asking the group while the asker waits (so the time the answer takes says nothing about B's groups); a list
+   over an hour old is asked for again after answering, at most once an hour per group. A's site asks once more a few
+   seconds later if refused (since 2.3.2). No reason: 403.
 3. The signed call checks, from the identity at `Afterwrd-From` (allowance counted): otherwise 403. Only a call with
    a reason gets this far, so only then may B fetch the asker's identity.
 4. Rate: at most 30 proved asks per hour overall and 5 per asking origin, counted in the same statement that records
@@ -2349,9 +2364,13 @@ person, unsigned.
 |---|---|
 | `origin` is a valid origin (as in 8.3), not the receiver and not the caller | 400 `That isn't someone to be introduced to.` |
 | The caller's site has answered the receiver (friends both ways); if it never has, the receiver pulls from it once now (8.7) | 403 `You haven't approved <owner name> as a friend yet.` |
+| At most 20 a day from one friend, every introduction counted whether kept or not, before anything is looked up (in the count's own statement) | 429 `That's a lot of introductions for now. Try again later.` |
 | `origin` is already connected, declined, already introduced by this caller, or belongs to an identity the owner has blocked | 200 `{"ok": true}`, nothing kept |
-| At most 20 a day and 20 kept from one friend, 100 kept overall (in the insert's own statement) | 429 `That's a lot of introductions for now. Try again later.` |
+| Over 20 kept from one friend, or 100 kept overall | 200 `{"ok": true}`, nothing kept |
 | Otherwise | 200 `{"ok": true}`, kept for 60 days |
+
+The answer never depends on whom the owner knows: a friend can't use introductions to test who the owner is friends
+with, has turned down or has blocked (since 2.3.2).
 
 On the sending side, an owner may introduce up to 10 friends to each other at once; each call tells one friend about
 one other, and a request makes at most 9 calls. Only friends both ways can be introduced.
@@ -2371,7 +2390,8 @@ site to pass it on. Signed call from A, an approved friend of B. Body: `{ "origi
 | Otherwise | 200 `{"ok": true}` |
 
 If `origin` is a friend of B's owner both ways, B's site then introduces A to C (`POST /_p/introduce` to C, with
-`origin` A, B's name for A, and `asked: true`), and doesn't say whether that worked. The answer is the same whether or
+`origin` A, B's name for A, and `asked: true`), after answering, so the time the answer takes says nothing either, and
+doesn't say whether that worked. A's site asks C once more a few seconds later if refused. The answer is the same whether or
 not C is B's friend, so A can't find out who B's owner is friends with by asking: only A's request to C (8.3, with
 `via: { "introduction": true }`), which C's owner then sees, shows it. A site makes that request straight after a 200.
 
@@ -3795,7 +3815,7 @@ The checking site reads Cloudflare's API (`https://api.cloudflare.com/client/v4`
 | `…/script-settings` | no tail consumers, no Logpush, no log destinations |
 | `…/deployments` | one version serving 100% of traffic |
 | `GET <site>/_version` on the site itself (public, `{"id": <version id>}`) | equals the serving version's id, so the Worker read is the one answering at the address |
-| `…/versions/<serving id>` | `resources.script.etag` equals the signed `etag` for that version. Bindings are exactly `assets ASSETS`, `d1 DB`, `durable_object_namespace MEDIA MediaStore`, `durable_object_namespace OUTBOX Outbox`, `version_metadata VERSION`, plus, if present, the secrets `SETUP_CODE`, `UPDATE_TOKEN` and `OUTBOX_KEY` (the key every call to the site's own objects carries, so another Worker bound to them gets nothing). `script_runtime`'s compatibility date and flags are the manifest's. `script_runtime.assets` has `raw_run_worker_first: true` and `serve_directly` not true, so every request reaches the code (Cloudflare's etag doesn't cover this setting or the site files). |
+| `…/versions/<serving id>` | `resources.script.etag` equals the signed `etag` for that version. Bindings are exactly `assets ASSETS`, `d1 DB`, `durable_object_namespace MEDIA MediaStore`, `durable_object_namespace OUTBOX Outbox`, `version_metadata VERSION`, plus, if present, the secrets `SETUP_CODE`, `UPDATE_TOKEN` and `OUTBOX_KEY` (the key every call to the site's own objects carries, so another Worker bound to them gets nothing). Neither `MEDIA` nor `OUTBOX` names another Worker (`script_name`) or another class: the signed code wired to someone else's objects would otherwise pass (since 2.3.2). `script_runtime`'s compatibility date and flags are the manifest's. `script_runtime.assets` has `raw_run_worker_first: true` and `serve_directly` not true, so every request reaches the code (Cloudflare's etag doesn't cover this setting or the site files). |
 | up to 8 other Workers' deployments and serving versions | none is bound to the site's D1 database, or to its Durable Objects: a `durable_object_namespace` binding naming the site's Worker (`script_name`) or one of its namespaces (`namespace_id`). More than 8 other Workers is reported. |
 | `HEAD <site><path>` for the manifest's private site files (up to 25 in a check by link; up to 44, in a step of its own, in an automatic check), unsigned in, no redirects followed | none answers `200` |
 
@@ -3855,7 +3875,8 @@ For each friend picked:
 3. It reads every version uploaded, and every deployment made, since the start of the last complete check of that
    friend. It looks no further back than the first release signed with an etag. It reads at most 100 listed versions,
    and looks at no more than 30. Each must have an `etag` in the signed list, otherwise it is reported as an unknown
-   upload, and `script_runtime.assets` as in 11.2, otherwise it is reported as letting files past the code (`files: true`). Putting an old upload back live makes no new version, so deployments are looked at too.
+   upload, and `script_runtime.assets` as in 11.2, otherwise it is reported as letting files past the code (`files: true`), and its storage bindings as in 11.2,
+   otherwise it is reported as wired to another Worker (`wired: true`, since 2.3.2). Putting an old upload back live makes no new version, so deployments are looked at too.
 4. It checks the site files against the signed release's manifest. The manifest is downloaded again, must be at most
    2 MB, and its SHA-256 must be the signed one.
 5. It tells the friend's site the result: `POST /_p/checked` if all good, otherwise `POST /_p/check-failed` with

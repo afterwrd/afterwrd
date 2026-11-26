@@ -15,6 +15,7 @@
 // The token is used for those few calls and then dropped. Anyone can start this (and learn its PKCE secret, as it's in
 // the cookie they're given), which is why the proof has to be a change, not a read.
 import { createDeviceLink, DEVICE_LINK_SECONDS } from "./admin.js";
+import { sign, verify } from "./auth.js";
 import { releaseLock, takeLock } from "./auto.js";
 import { cloudflareReader } from "./checks.js";
 import { CODE_RE, donePage, exchangeCode, readCookie, relayLink, testingHere, withCookie } from "./cloudflare.js";
@@ -32,26 +33,28 @@ export async function handleRecover(request, env, url, body, signedIn) {
   const path = url.pathname.slice("/_auth/recover".length);
   if (request.method === "GET" && path === "") return signedIn ? Response.redirect(`${url.origin}/`, 302) : html(recoverPage());
   if (request.method === "GET" && path === "/done") return html(donePage("/_auth/recover/finish"));
-  if (request.method === "GET" && path === "/start") return start(request, url);
+  if (request.method === "GET" && path === "/start") return start(request, env, url);
   if (request.method === "POST" && path === "/finish") return finish(request, env, url, body);
   return null;
 }
 
 // A link, not a form: the site's pages may only send forms to the site itself (index.js, form-action), and this goes
 // on to afterwrd.app. Only from this site's own page (or typed in), as cloudflare.js's start.
-async function start(request, url) {
+async function start(request, env, url) {
   const from = request.headers.get("Sec-Fetch-Site");
   if (from && from !== "same-origin" && from !== "none") return html(recoverPage(), 403);
   const { verifier, state, relay } = await relayLink(`${url.origin}/_auth/recover/done`);
-  // Lax, so the cookie comes along when the relay page sends the browser back here.
+  // Lax, so the cookie comes along when the relay page sends the browser back here. Signed by this site, so finish
+  // knows it started it before writing anything or taking the update lock (security review 2026-11 L15).
+  const mac = await sign(env, `recover.${state}.${verifier}`);
   return withCookie(Response.redirect(relay.toString(), 302),
-    `${COOKIE}=${state}.${verifier}; Path=/; Max-Age=${COOKIE_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+    `${COOKIE}=${state}.${verifier}.${mac}; Path=/; Max-Age=${COOKIE_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
 }
 
 async function finish(request, env, url, body) {
-  const [state, verifier] = (readCookie(request, COOKIE) ?? "").split(".");
+  const [state, verifier, mac] = (readCookie(request, COOKIE) ?? "").split(".");
   const fail = (error, status = 400) => withCookie(json({ error }, status), CLEAR);
-  if (!state || !verifier) return fail("This has expired. Start again from the sign-in page.");
+  if (!state || !verifier || !mac || !(await verify(env, `recover.${state}.${verifier}`, mac))) return fail("This has expired. Start again from the sign-in page.");
   if (typeof body.state !== "string" || body.state !== state) return fail("That isn't the one this page started. Start again from the sign-in page.");
   if (typeof body.code !== "string" || !CODE_RE.test(body.code)) return fail("Cloudflare didn't send a code.");
   const owner = await env.DB.prepare("SELECT id FROM users LIMIT 1").first();

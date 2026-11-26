@@ -675,6 +675,15 @@ async function friendItemPost(ctx, params, connectionId, id) {
   return { item, ...shown };
 }
 
+/**
+ * Comments in a conversation just read that were deleted or removed: their words go from Notifications too, as they
+ * have from the conversation (security review 2026-11 L16).
+ */
+async function forgetGoneWords(db, comments) {
+  const gone = comments.filter((c) => c.state === "deleted" || c.state === "removed" || c.state === "gone").map((c) => c.fp).filter(Boolean);
+  if (gone.length) await db.prepare("UPDATE notices SET text = NULL WHERE fp IN (SELECT value FROM json_each(?)) AND text IS NOT NULL").bind(JSON.stringify(gone)).run();
+}
+
 /** The comments on a friend's signed post or photo (its own list, `id`), read from their site and checked. */
 async function friendComments(ctx, connection, id, owner) {
   const t = await friendThread(ctx.env, ctx.url.origin, connection, id);
@@ -688,6 +697,7 @@ async function friendComments(ctx, connection, id, owner) {
   const blocked = await blockedAmong(ctx.db, comments.map((c) => c.author));
   // How the owner here stands with each commenter: a friend's name leads to their page; anyone else can be asked to be
   // friends through this friend (connect.js passOnAsk; views/items.js commenterName).
+  await forgetGoneWords(ctx.db, comments);
   const ties = await friendshipsOf(ctx.db, comments.map((c) => c.author));
   for (const c of comments) { c.name = names.get(c.author) ?? "Someone"; Object.assign(c, tags.get(c.author)); c.blocked = blocked.has(c.author); if (c.removedBy) c.removedByName = names.get(c.removedBy) ?? null; c.tie = ties.get(c.author) ?? null; }
   const me = await ownHost(ctx.env);
@@ -829,7 +839,7 @@ async function home(ctx, params) {
     // The Facebook archive was too big to move into the site's own object (sitecopy.js): import it again.
     first(db, "SELECT 1 AS dropped FROM settings WHERE key = 'archive_dropped'").then((row) => Boolean(row)),
     // A change to the owner's identity waiting to take effect (keys.js): shown until it does, or is cancelled.
-    identitySummary(db),
+    identitySummary(ctx.env),
     // The owner has moved away (keys.js ownMove): this site only says where now.
     ownMove(db, ctx.url.origin),
     // Friends moving, or moved and not yet followed here (identities.js, calls.js).
@@ -928,6 +938,9 @@ async function fromFriend(ctx, id, load) {
   facebook.catch(() => {}); // waited for below, either way
   // A self-hosted friend's site can't be checked (hosting.js): their page says so.
   connection.selfHosted = !onCloudflare(connection.origin, ctx.env);
+  // Their identity seen in two versions (identities.js): said on their page (security review 2026-11 L7).
+  connection.frozen = Boolean(connection.identity
+    && (await first(ctx.db, "SELECT frozen_at FROM identities WHERE person = ? AND frozen_at IS NOT NULL", [String(connection.identity)])));
   try {
     const data = await load(connection);
     // Their signed name, if it's changed since the owner approved them (names.js): shown, with a way to use it.
@@ -952,7 +965,9 @@ async function fromFriend(ctx, id, load) {
 async function friendsIndex(ctx) {
   const { db } = ctx;
   const [connections, links, people, requests, invites, introductions] = await db.batch([
-    db.prepare("SELECT * FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL ORDER BY name COLLATE NOCASE"),
+    // (`frozen`: their identity seen in two versions, said on Friends: security review 2026-11 L7.)
+    db.prepare(`SELECT c.*, (SELECT 1 FROM identities i WHERE i.person = c.identity AND i.frozen_at IS NOT NULL) AS frozen FROM connections c
+      WHERE c.connected_at IS NOT NULL AND c.approved_at IS NOT NULL ORDER BY c.name COLLATE NOCASE`),
     db.prepare("SELECT * FROM friend_links"),
     db.prepare("SELECT id, name, friend_since FROM facebook_people WHERE is_me = 0 AND friend_since IS NOT NULL ORDER BY name COLLATE NOCASE"),
     db.prepare(`SELECT id, origin, name, identity, invited_as, via_kind, via_name, connected_at FROM connections
@@ -1334,6 +1349,7 @@ async function groupComments(ctx, g, id, owner, people = []) {
     if (c.removedBy) c.removedByName = c.removedBy === t.host ? "the group" : c.removedBy === t.owner ? `the group's owner, ${name(c.removedBy)}`
       : t.admins.has(c.removedBy) ? `${name(c.removedBy)}, an admin` : name(c.removedBy);
   }
+  await forgetGoneWords(ctx.db, comments);
   // As on a friend's post: a friend's name leads to their page, and any other member can be asked to be friends.
   const ties = await friendshipsOf(ctx.db, comments.map((c) => c.author));
   for (const c of comments) c.tie = c.author ? ties.get(c.author) ?? null : null;

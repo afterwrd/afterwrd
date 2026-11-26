@@ -18,6 +18,7 @@ import { contentOf, parseRecord } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { ownOrigin } from "./keys.js";
 import { json, now } from "./util.js";
+import { later } from "./later.js";
 import { admit } from "./allowances.js";
 
 const TIMEOUT_MS = 8000;
@@ -135,17 +136,21 @@ export async function takeMemberRecord(env, group, member, body, { maxMembers, t
   }
   if (record.kind === "remove" || record.kind === "leave") {
     // The removal as signed, and where the group took it, so their site needn't take the group's word for it.
+    // Out first, in the same breath as the list takes it: they lose access at once, and for good even if what follows
+    // (telling their site, which may be slow on purpose) is cut off (security review 2026-11 L11).
+    await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
     if (record.kind === "remove") {
-      const { n, fp, taken } = answer.entry;
-      await tell(target, { sent: body.sent, entry: { n, fp, taken, prev: await headAt(db, self.list, n - 1) }, receipt: answer.receipt });
       // Anything reported about what they wrote here is dealt with (reports.js); and a member (not someone only asking)
       // can't ask to join again until an admin lets them (docs/safety-plan.md 3.4).
       if (target.identity) await markMemberRemoved(db, String(target.identity), record.author);
       if (target.identity && target.approved_at) {
         await db.prepare("INSERT OR REPLACE INTO group_removed (person, name, removed_at) VALUES (?, ?, ?)").bind(String(target.identity), String(target.name ?? "Someone"), now()).run();
       }
+      const { n, fp, taken } = answer.entry;
+      const proof = { sent: body.sent, entry: { n, fp, taken, prev: await headAt(db, self.list, n - 1) }, receipt: answer.receipt };
+      const told = Promise.resolve().then(() => tell(target, proof)).catch(() => null);
+      if (!later(told)) await told;
     }
-    await db.prepare("DELETE FROM group_members WHERE id = ?").bind(target.id).run();
     // Only once they're out: anything more (clearing up what they wrote) mustn't leave them in if it goes wrong.
     if (record.kind === "remove" && target.identity && target.approved_at) {
       try { await onRemoved(target, body, record); } catch (error) { console.error("After removing a member:", error); }

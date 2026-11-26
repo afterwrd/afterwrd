@@ -88,7 +88,9 @@ const server = createServer(async (req, res) => {
   const version = new RegExp(`^${at}/versions/([0-9a-f-]+)$`).exec(api);
   if (version) {
     const v = cf.versions.find((x) => x.id === version[1]);
-    return send(200, { success: true, result: { id: version[1], resources: { bindings: BINDINGS,
+    // (`wired`: the signed code with its storage wired to another Worker's objects.)
+    const bindings = v?.wired ? BINDINGS.map((b) => (b.name === "OUTBOX" ? { ...b, script_name: "copy-everything" } : b)) : BINDINGS;
+    return send(200, { success: true, result: { id: version[1], resources: { bindings,
       script_runtime: { compatibility_date: "2026-10-01", compatibility_flags: ["nodejs_compat"],
         assets: { serve_directly: Boolean(v?.direct), raw_run_worker_first: v?.direct ? false : true, base_path: "/" } }, script: { etag: v?.etag ?? ETAG_GOOD } } } });
   }
@@ -251,6 +253,18 @@ check("an upload since the last check that let files past the code is found, tho
   found?.verdict === "needs a look" && result.versions?.unknown?.some((u) => u.number === 9 && u.files), JSON.stringify(result.versions));
 await sam.goto(`${B}/_admin/update`);
 check("…and said in words", (await text(sam, "#checking")).includes("without its code checking them first"), await text(sam, "#checking"));
+cf.versions.shift();
+sql(stateB, "UPDATE friend_checks SET seen_at = 1");
+
+// --- the release's own code, uploaded with its storage wired to another Worker (security review 2026-11 H4) ----------
+again();
+cf.versions.unshift({ ...versionItem("55555555-5555-4555-8555-555555555555", 10, 1200, ETAG_GOOD), wired: true });
+found = await samsRun();
+result = JSON.parse(found?.result ?? "{}");
+check("an upload since the last check whose storage is wired to another Worker is found, though its code was the release's",
+  found?.verdict === "needs a look" && result.versions?.unknown?.some((u) => u.number === 10 && u.wired), JSON.stringify(result.versions));
+await sam.goto(`${B}/_admin/update`);
+check("…and said in words", (await text(sam, "#checking")).includes("wired the site's storage to another Worker"), await text(sam, "#checking"));
 cf.versions.shift();
 sql(stateB, "UPDATE friend_checks SET seen_at = 1");
 

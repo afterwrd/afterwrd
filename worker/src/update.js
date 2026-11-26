@@ -308,17 +308,16 @@ async function latestRelease(env, origin) {
     // (On this computer, a test's stand-in for GitHub's releases.)
     const standIn = testingHere(env, origin) && env.RELEASES_URL;
     const base = standIn || `https://github.com/${REPO}/releases/download`;
-    const newest = (await manifestAt(standIn ? `${standIn}/latest/manifest.json` : `https://github.com/${REPO}/releases/latest/download/manifest.json`)).manifest;
-    let found = await signedRelease(list, newest.version, base);
-    let unsigned = null;
-    if (!found) {
-      // Not signed (yet): the newest that is.
-      const best = [...list.releases.keys()].reduce((a, b) => (!a || newer(b, a) ? b : a), null);
-      if (!best) throw new Error("no signed release yet");
-      found = await signedRelease(list, best, base);
-      if (!found) throw new Error("the newest signed release isn't on GitHub as signed");
-      if (TAG_RE.test(`v${newest.version}`) && newer(newest.version, best)) unsigned = newest.version;
-    }
+    // The newest release the signed list names, whatever GitHub calls its latest: GitHub alone can't hold a site back
+    // from a fix by pointing "latest" at an older release (security review 2026-11 L18). Its latest is asked for only to
+    // say that something newer is out and waiting for its signature.
+    const best = [...list.releases.keys()].reduce((a, b) => (!a || newer(b, a) ? b : a), null);
+    if (!best) throw new Error("no signed release yet");
+    const found = await signedRelease(list, best, base);
+    if (!found) throw new Error("the newest signed release isn't on GitHub as signed");
+    const newest = (await manifestAt(standIn ? `${standIn}/latest/manifest.json` : `https://github.com/${REPO}/releases/latest/download/manifest.json`)
+      .catch(() => null))?.manifest;
+    const unsigned = newest && TAG_RE.test(`v${newest.version}`) && newer(newest.version, best) && !list.releases.has(newest.version) ? newest.version : null;
     const { version, notes, security_fix: fix } = found;
     const tag = `v${version}`;
     latest = { tag, version, notes: typeof notes === "string" ? notes.slice(0, 3000) : "", page: `https://github.com/${REPO}/releases/tag/${tag}` };

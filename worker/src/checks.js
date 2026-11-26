@@ -492,6 +492,8 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
         problems.push(`The site at ${new URL(site).host} isn't the Worker that was checked: they're different uploads. Was the right Cloudflare account allowed?`);
       }
       if (extra.length) problems.push(`It's connected to things afterwrd doesn't use: ${extra.slice(0, 8).join(", ")}.`);
+      const wired = storageElsewhere(detail.resources?.bindings, script);
+      if (wired.length) problems.push(`Its storage is wired to another Worker, which would see and could change everything it keeps: ${wired.slice(0, 4).join(", ")}. afterwrd never does that.`);
       if (missing.length) problems.push(`It's missing parts afterwrd needs: ${missing.join(", ")}.`);
       // Any other Worker connected to this site's database could read and change everything in it, whatever it's
       // called (a name like a group's included), so each one's bindings are looked at too: a D1 binding to its
@@ -546,6 +548,19 @@ export async function checkSite(token, site, env, here, { latest = {}, signed = 
 
 /** Whether a version (its script_runtime, from Cloudflare) has every request go through its code, as afterwrd sets it. */
 export const filesThroughCode = (runtime) => runtime?.assets?.raw_run_worker_first === true && runtime.assets.serve_directly !== true;
+
+/**
+ * A version's storage (its objects, OUTBOX and MEDIA) wired to another Worker's (`script_name`), or to a class afterwrd
+ * doesn't use: the signed code byte for byte, with everything it keeps going through someone else's Worker, which
+ * Cloudflare's fingerprint of the code doesn't show (security review 2026-11 H4). Returns what's wrong, as words, or [].
+ * @param {any[] | undefined} bindings @param {string} script
+ */
+export function storageElsewhere(bindings, script) {
+  const want = { OUTBOX: "Outbox", MEDIA: "MediaStore" };
+  return (Array.isArray(bindings) ? bindings : []).filter((b) => b?.type === "durable_object_namespace")
+    .filter((b) => (b.script_name && b.script_name !== script) || (Object.hasOwn(want, b.name) && b.class_name !== want[b.name]))
+    .map((b) => `${text(b.name, 40)} → ${text(b.script_name || b.class_name, 60)}`);
+}
 
 /**
  * Its site files only through its code: asked for without signing in, each must get the code's sign-in redirect.

@@ -22,7 +22,7 @@ import { frozenUntil, itemFromList, namesFor, ownHost, shownMentions } from "./i
 import { mutedAmong } from "./mutes.js";
 import { friendsAmong, peopleShown } from "./names.js";
 import { eventShown, pollShown, pollTrouble } from "./itemkinds.js";
-import { ANSWERS, cleanEvent, hasDate } from "./calendar.js";
+import { ANSWERS, cleanEvent, finishedAt, hasDate } from "./calendar.js";
 import { safeNext } from "./auth.js";
 import { messagePage } from "./views/pages.js";
 import { html, now } from "./util.js";
@@ -33,6 +33,12 @@ const UNMOVED_SECONDS = 86400; // how often a friend's site that hasn't moved to
 // and Friends says so instead, with a way to remove them (views/friends.js). It's still asked, once an hour.
 export const QUIET_SECONDS = 86_400;
 const PAGES = 3;
+// What one friend's site can make this one keep (security review 2026-11 H3, M6): so many items from a page, so many
+// copies a day (pulls and new-post notes together), and their newest KEEP posts (with their events still to come, and
+// anything the owner here has acted on in the last 30 days), as for a group (groupcopies.js trim).
+const PAGE_ITEMS = 60;
+const COPIES_A_DAY = 600;
+export const KEEP = 200;
 const FOLLOW_SECONDS = 14 * 86400;
 const ID_RE = /^[A-Za-z0-9_-]{43}$/;
 
@@ -172,23 +178,70 @@ export async function pullItems(env, from, connection) {
       if (named) await keepNewerProfile(env.DB, person, data.profile, named.at);
     }
     const statements = [noteAnswer(env.DB, connection)];
-    for (const item of Array.isArray(data.items) ? data.items : []) {
+    const sent = Array.isArray(data.items) ? data.items : [];
+    const items = sent.slice(0, Math.min(PAGE_ITEMS, await copyAllowance(env.DB, connection.id)));
+    let taken = 0;
+    for (const item of items) {
       const kept = await keepItem(env, connection, person, item, data.delegations);
       if (!kept) continue;
       statements.push(kept.statement);
       count++;
+      taken++;
     }
-    for (const id of Array.isArray(data.gone) ? data.gone : []) {
-      if (ID_RE.test(id)) statements.push(env.DB.prepare("DELETE FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id));
+    // Cut short (a page past PAGE_ITEMS, or today's allowance used): asked again from where this stopped, so nothing it
+    // left out is skipped for good. (Oldest change first; the same second again, as kept copies are only updated.)
+    const cut = items.length < sent.length;
+    const last = Number(items.at(-1)?.changed_at);
+    if (taken) statements.push(countCopies(env.DB, connection.id, taken));
+    for (const id of Array.isArray(data.gone) ? data.gone.slice(0, 500) : []) {
+      if (ID_RE.test(id)) {
+        statements.push(env.DB.prepare("DELETE FROM copies WHERE id = ? AND connection_id = ?").bind(id, connection.id),
+          // What Notifications said about it goes with it (security review 2026-11 L16), as when their site says so (notes.js).
+          env.DB.prepare("UPDATE notices SET text = NULL WHERE item = ? AND connection_id = ? AND text IS NOT NULL").bind(id, connection.id));
+      }
     }
-    since = Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
+    since = cut ? (Number.isSafeInteger(last) ? Math.max(since, Math.min(last - 1, Number(data.until) || last)) : since)
+      : Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
     statements.push(env.DB.prepare("UPDATE connections SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(since, now(), connection.id));
     await env.DB.batch(statements);
-    if (!data.more) break;
+    if (!data.more || (cut && !items.length)) break;
   }
+  await trimFriend(env, connection);
   // Mention receipts its site couldn't be asked about before (receipts.js): it's answering now.
   await checkReceipts(env, from, connection).catch(() => null);
   return count;
+}
+
+const today = () => Math.floor(now() / 86400);
+/** How many more of this friend's posts this site may copy today (COPIES_A_DAY, pulls and notes together). */
+export async function copyAllowance(db, connectionId) {
+  const row = await db.prepare("SELECT n FROM copy_allowance WHERE connection_id = ? AND day = ?").bind(connectionId, today()).first();
+  return Math.max(0, COPIES_A_DAY - Number(row?.n ?? 0));
+}
+/** The statement counting `n` copies of this friend's against today's allowance (and clearing days gone). */
+export function countCopies(db, connectionId, n) {
+  return db.prepare(`INSERT INTO copy_allowance (connection_id, day, n) VALUES (?1, ?2, ?3)
+    ON CONFLICT(connection_id, day) DO UPDATE SET n = n + excluded.n`).bind(connectionId, today(), n);
+}
+
+/**
+ * Keeps a friend's newest KEEP posts here, with their events still to come and anything the owner here has acted on in
+ * the last 30 days (a friend's page shows their newest 100); older ones go.
+ */
+export async function trimFriend(env, connection) {
+  const db = env.DB;
+  const { results } = await db.prepare("SELECT id, content FROM copies WHERE connection_id = ? ORDER BY created_at DESC LIMIT -1 OFFSET ?")
+    .bind(connection.id, KEEP).all();
+  await db.prepare("DELETE FROM copy_allowance WHERE day < ?").bind(today() - 1).run();
+  if (!results.length) return;
+  const person = connection.identity ? String(connection.identity) : null;
+  const acted = new Set(person ? (await db.prepare("SELECT DISTINCT item FROM sent WHERE host = ? AND created_at > ?").bind(person, now() - 30 * 86400).all())
+    .results.map((r) => String(r.item).split("/")[0]) : []);
+  const old = results.filter((r) => {
+    const content = JSON.parse(String(r.content));
+    return !acted.has(String(r.id)) && !(content.event && !content.event.cancelled && finishedAt(content.event) > now());
+  }).map((r) => String(r.id));
+  if (old.length) await db.prepare("DELETE FROM copies WHERE connection_id = ? AND id IN (SELECT value FROM json_each(?))").bind(connection.id, JSON.stringify(old)).run();
 }
 
 /**

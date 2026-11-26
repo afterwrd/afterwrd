@@ -193,7 +193,10 @@ function capped(body, limit) {
  * plan's 50 for a post's 8 photos and their thumbnails.
  */
 export async function copyPhotos(env, photos) {
-  const files = [...new Map(photos.flatMap((p) => [[p.hash, [p.src, PHOTO_BYTES]], [p.thumb_hash, [p.thumbSrc, THUMB_BYTES]]])).entries()];
+  // A photo no bigger than the size its writer signed (what the group's room for photos counts: security review
+  // 2026-11 M7), and never bigger than PHOTO_BYTES.
+  const files = [...new Map(photos.flatMap((p) => [[p.hash, [p.src, Math.min(PHOTO_BYTES, Number.isSafeInteger(p.size) && p.size > 0 ? p.size : PHOTO_BYTES)]],
+    [p.thumb_hash, [p.thumbSrc, THUMB_BYTES]]])).entries()];
   for (const [hash, [link, limit]] of files) {
     let response;
     try {

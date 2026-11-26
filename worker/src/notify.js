@@ -15,6 +15,18 @@ export async function pushAllowed(db, sql, from, at, more = null) {
 }
 
 /**
+ * Whether an event's news (an invitation, a change, calling it off) just kept from a friend's site (`connection`) or a
+ * group's (`group`) may reach the owner's phones too: as many as mentions may from one place, five in ten minutes and
+ * twenty a day; past that it waits on Notifications (security review 2026-11 L5).
+ * @param {D1Database} db @param {{ connection?: number | null, group?: number | null }} from
+ */
+export function eventsMayBuzz(db, { connection = null, group = null }) {
+  const by = group === null ? "connection_id" : "group_id";
+  return pushAllowed(db, `SELECT COUNT(*) AS n FROM notices WHERE ${by} = ?1 AND kind IN ('invite', 'changed', 'cancelled') AND created_at > ?2`,
+    group ?? connection, Math.floor(Date.now() / 1000));
+}
+
+/**
  * Whether a mention by `author` that's just been kept may reach the owner's phones too: the first LIMITS.pushes a day
  * from one writer do, wherever they wrote (step 8), so one person can't keep a phone buzzing through several sites.
  * @param {D1Database} db @param {string} author

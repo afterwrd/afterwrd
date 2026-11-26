@@ -916,8 +916,10 @@ check("…and goes from Ann's copy", sql(stateA, `SELECT COUNT(*) AS n FROM copi
   const annName = sql(stateA, "SELECT name FROM users")[0].name;
   const published = await fetch(`${A}/.well-known/afterwrd`);
   const publishedText = await published.text();
-  check("Ann's identity is public, with no name in it", published.status === 200 && JSON.parse(publishedText).chain.length >= 1
-    && !publishedText.includes(annName) && !publishedText.includes("Ann"), publishedText.slice(0, 120));
+  // (Its documents decoded: the text around them is mostly base64, which can spell anything by chance.)
+  const documents = JSON.parse(publishedText).chain.map((d) => Buffer.from(d.bytes, "base64url").toString());
+  check("Ann's identity is public, with no name in it", published.status === 200 && documents.length >= 1
+    && documents.every((d) => !d.includes(annName) && !d.includes("Ann") && !("name" in JSON.parse(d))), documents[0]?.slice(0, 120));
   const kept = sql(stateA, "SELECT profile FROM own_identity")[0]?.profile;
   const said = kept && JSON.parse(Buffer.from(JSON.parse(kept).bytes, "base64url").toString());
   check("…and her profile, her name, was signed in the background by her browser", said?.name === annName && said.kind === "profile", kept);
@@ -996,6 +998,33 @@ check("…and goes from Ann's copy", sql(stateA, `SELECT COUNT(*) AS n FROM copi
   await bob.evaluate((id) => fetch(`/_admin/connections/${id}/disconnect`, { method: "POST" }), caraOnBob);
   check("(undone)", sql(stateA, `SELECT COUNT(*) AS n FROM connections WHERE origin = '${C}'`)[0].n === 0
     && sql(stateC, "SELECT COUNT(*) AS n FROM connections")[0].n === 0 && sql(stateB, "SELECT COUNT(*) AS n FROM connections")[0].n === 1);
+}
+
+// What one friend's site can make Ann's keep (security review 2026-11 H3): a friend's newest posts only, and so many
+// copies a day. 250 old copies of one of Bob's posts (as a friend's site sending thousands would leave); opening his
+// page pulls, and trims them to his newest 200, his real posts kept.
+{
+  const real = sql(stateA, `SELECT id FROM copies WHERE connection_id = ${bobId} ORDER BY created_at DESC`).map((r) => r.id);
+  const values = Array.from({ length: 250 }, (_, i) => `('old${String(i).padStart(40, "0")}', ${i + 1})`).join(",");
+  sql(stateA, `INSERT INTO copies (id, connection_id, group_id, author, record, content, earlier, edited_at, comments, created_at, changed_at)
+    SELECT v.column1, c.connection_id, NULL, c.author, c.record, c.content, c.earlier, NULL, 0, v.column2, v.column2
+    FROM (VALUES ${values}) v, copies c WHERE c.id = '${real[0]}'`);
+  const copiesOfBob = () => sql(stateA, `SELECT COUNT(*) AS n FROM copies WHERE connection_id = ${bobId}`)[0].n;
+  const before = copiesOfBob();
+  await ann.goto(`${A}/friend/${bobId}/posts`);
+  check("a friend's copies are trimmed to their newest 200, their real posts kept", before >= 250 && copiesOfBob() === 200
+    && real.every((id) => sql(stateA, `SELECT 1 FROM copies WHERE id = '${id}'`).length === 1), `${before} → ${copiesOfBob()}`);
+  sql(stateA, `DELETE FROM copies WHERE id LIKE 'old%'`);
+  // Today's allowance used up: Bob's new post isn't copied until it's tomorrow (here, until the count's cleared).
+  const day = Math.floor(Date.now() / 1000 / 86400);
+  sql(stateA, `INSERT OR REPLACE INTO copy_allowance (connection_id, day, n) VALUES (${bobId}, ${day}, 600)`);
+  await compose(bob, B, "Over the allowance");
+  await ann.goto(`${A}/friend/${bobId}/posts`);
+  const shown = async () => (await ann.$eval("main", (m) => m.textContent)).includes("Over the allowance");
+  check("…and past a day's allowance of copies from one friend, no more are kept that day", !(await shown()));
+  sql(stateA, `DELETE FROM copy_allowance`);
+  await ann.goto(`${A}/friend/${bobId}/posts`);
+  check("…and it comes once there's allowance again (the pull carries on from where it stopped)", await shown());
 }
 
 // Phone view of the Feed, then disconnect.

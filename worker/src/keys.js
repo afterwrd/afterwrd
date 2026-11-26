@@ -260,6 +260,15 @@ export function proofFrom(response, nonce, statements) {
     response: { authenticatorData: r.authenticatorData, clientDataJSON: r.clientDataJSON, signature: r.signature, ...(r.userHandle ? { userHandle: r.userHandle } : {}) } };
 }
 
+/**
+ * The hosting key a change made here should carry: this site's own, while the identity is at this site's address. So
+ * every change the owner makes puts it back if anything else is in effect (a passkey thief's swap: security review
+ * 2026-11 H2), and removing a stolen passkey also takes back the key it set. Elsewhere (moved away), as it is.
+ */
+async function hostingFor(env, url, own) {
+  return own.state.current.origin === url.origin ? (await hostingKey(env)).publicKey : own.state.current.hosting;
+}
+
 /** The next identity document after `own`'s last: `fields` over what's in effect now. */
 async function nextDocument(own, fields) {
   const { current } = own.state;
@@ -315,12 +324,12 @@ async function changeStart(env, url, owner, { change, credential, recovery, requ
       const mine = await sitePasskeys(env, url, owner);
       const added = mine.filter((p) => !current.passkeys.some((c) => c.id === p.id));
       if (!added.length) return json({ error: "Every passkey here already signs for you." }, 409);
-      doc = await nextDocument(own, { passkeys: [...current.passkeys, ...added] });
+      doc = await nextDocument(own, { passkeys: [...current.passkeys, ...added], hosting: await hostingFor(env, url, own) });
     } else if (change === "remove") {
       const left = current.passkeys.filter((p) => p.id !== credential);
       if (left.length === current.passkeys.length) return json({ error: "That passkey doesn't sign for you." }, 404);
       if (!left.length) return json({ error: "That's the only passkey that signs for you." }, 409);
-      doc = await nextDocument(own, { passkeys: left });
+      doc = await nextDocument(own, { passkeys: left, hosting: await hostingFor(env, url, own) });
     } else if (change === "move") {
       const asked = await moveRequest(env, url, own, request, proof);
       if (typeof asked === "string") return json({ error: asked }, 400);
@@ -329,12 +338,14 @@ async function changeStart(env, url, owner, { change, credential, recovery, requ
       doc = await nextDocument(own, { origin: asked.to, hosting: asked.hosting, passkeys: [asked.passkey] });
     } else if (change === "recovery") {
       if (!KEY_RE.test(recovery ?? "") || recovery === current.recovery) return json({ error: "That didn't work. Try again." }, 400);
-      doc = await nextDocument(own, { recovery });
+      doc = await nextDocument(own, { recovery, hosting: await hostingFor(env, url, own) });
     } else {
       return json({ error: "That didn't work. Try again." }, 400);
     }
   }
-  const nonce = randomToken();
+  // The nonce ends with the document's fingerprint, so finish takes only the document made here, never other bytes the
+  // passkey was got to sign (security review 2026-11 H2).
+  const nonce = randomToken() + (await fingerprintOf("identity", doc));
   return withChallenge(env, "change", nonce, json({ nonce, doc: b64url(doc), allow: current.passkeys.map((p) => p.id) }));
 }
 
@@ -344,7 +355,9 @@ async function changeFinish(request, env, { doc: docText, response }) {
   const own = await ownIdentity(env.DB);
   const bytes = typeof docText === "string" ? fromB64url(docText) : null;
   if (!own || !bytes || !parseIdentity(bytes)) return json({ error: "That didn't work. Try again." }, 400);
-  const proof = proofFrom(response, nonce, [await fingerprintOf("identity", bytes)]);
+  const fp = await fingerprintOf("identity", bytes);
+  if (nonce.length !== 86 || nonce.slice(43) !== fp) return json({ error: "That didn't work. Try again." }, 400);
+  const proof = proofFrom(response, nonce, [fp]);
   if (!(await spendChallenge(env, nonce))) return json({ error: "That didn't work. Try again." }, 400);
   const state = await appendDocument(env, own, { bytes, sig: { passkey: proof } });
   if (!state) return json({ error: "Your passkey's signature didn't check, or something changed meanwhile. Try again." }, 400);
@@ -364,7 +377,7 @@ async function recoverStart(env, url, owner, { change }) {
     const mine = await sitePasskeys(env, url, owner);
     const same = mine.length === own.state.current.passkeys.length && mine.every((p) => own.state.current.passkeys.some((c) => c.id === p.id));
     if (!mine.length || same) return json({ error: "The passkeys here already sign for you." }, 409);
-    doc = await nextDocument(own, { passkeys: mine });
+    doc = await nextDocument(own, { passkeys: mine, hosting: await hostingFor(env, url, own) });
   } else {
     return json({ error: "That didn't work. Try again." }, 400);
   }
@@ -478,10 +491,11 @@ async function signingNow(env, owner) {
  * The owner's identity for Your devices and Home: which passkeys sign for them, and any change waiting (what it does,
  * when it takes effect, and whether only the recovery code can cancel it). null before signing is set up.
  */
-export async function identitySummary(db) {
-  const own = await ownIdentity(db);
+export async function identitySummary(env) {
+  const own = await ownIdentity(env.DB);
   if (!own) return null;
   const { current, pending, effectiveAt, pendingByRecovery } = own.state;
+  const siteKey = (await hostingKey(env)).publicKey;
   const ids = (d) => d.passkeys.map((p) => p.id);
   return {
     signing: ids(current),
@@ -490,6 +504,8 @@ export async function identitySummary(db) {
       removed: ids(current).filter((id) => !ids(pending).includes(id)),
       recovery: pending.recovery !== current.recovery,
       moving: pending.origin !== current.origin ? pending.origin : null,
+      // A new hosting key: this site's own put back ("back"), or one that isn't this site's ("other": a stolen passkey).
+      hosting: pending.origin !== current.origin || pending.hosting === current.hosting ? null : pending.hosting === siteKey ? "back" : "other",
       byRecovery: pendingByRecovery,
       at: effectiveAt,
     },

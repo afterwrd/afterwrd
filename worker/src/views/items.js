@@ -116,7 +116,7 @@ function commenterName(c, name, list, back) {
     : html`<form method="post" action="/_admin/connections/ask" data-stay data-said="Asked ${name} to be friends.">
         <input type="hidden" name="origin" value="${t.origin}">${list.askVia.through
           ? html`<input type="hidden" name="through" value="${list.askVia.through}">` : html`<input type="hidden" name="group" value="${list.askVia.group}">`}
-        <input type="hidden" name="name" value="${name}"><input type="hidden" name="back" value="${back}">
+        <input type="hidden" name="name" value="${name}"><input type="hidden" name="person" value="${c.author}"><input type="hidden" name="back" value="${back}">
         <button>Ask ${name} to be friends</button></form>`;
   return html`<details class="more who"><summary title="${name}"><strong>${name}</strong></summary><div class="menu">${what}</div></details>`;
 }

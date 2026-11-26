@@ -113,7 +113,9 @@ const server = createServer(async (req, res) => {
   if (api === `/accounts/${ACCOUNT}/workers/scripts/localhost/versions/v-1` || api === `/accounts/${ACCOUNT}/workers/scripts/localhost/versions/v-2`) {
     const bindings = token === "tok-setup" ? [...BINDINGS, { type: "plain_text", name: "OAUTH_TOKEN_URL", text: "https://evil.example/token" }]
       : token === "tok-noversion" ? BINDINGS.filter((b) => b.type !== "version_metadata")
-      : token === "tok-nodb" ? BINDINGS.filter((b) => b.type !== "d1") : BINDINGS;
+      : token === "tok-nodb" ? BINDINGS.filter((b) => b.type !== "d1")
+      // The signed code, its storage wired to another Worker's objects (security review 2026-11 H4).
+      : token === "tok-wired" ? BINDINGS.map((b) => (b.name === "OUTBOX" ? { ...b, script_name: "copy-everything" } : b)) : BINDINGS;
     // Every request through its code first, as afterwrd sets it; "direct" has a file served without it.
     const assets = token === "tok-direct" ? { serve_directly: true, raw_run_worker_first: ["/*", "!/static/signed.js"], base_path: "/" }
       : { serve_directly: false, raw_run_worker_first: true, base_path: "/" };
@@ -296,6 +298,10 @@ check("a check by link is tied to the account at the site's address", otherAccou
 const served = await runCheck("direct");
 check("a site whose files Cloudflare sends without its code checking them is reported", served.after.includes("sends some of its files without its code checking them first"), served.after.slice(0, 600));
 
+const wired = await runCheck("wired");
+check("a site whose storage is wired to another Worker is reported, though its code is the signed release",
+  wired.after.includes("Its storage is wired to another Worker") && wired.after.includes("OUTBOX → copy-everything"), wired.after.slice(0, 600));
+
 for (const how of ["backdoordo", "backdoorns"]) {
   const reached = await runCheck(how);
   check(`another Worker connected to the site's objects is reported (${how === "backdoordo" ? "by naming its Worker" : "by their namespace"})`,
@@ -360,7 +366,7 @@ check("…and leaves the link usable", (await fetch(`${failed.link}/start`, { me
 await owner.goto(`${BASE}/friend`);
 const listed = await owner.$$eval(".checks > li", (l) => l.map((li) => li.textContent.replace(/\s+/g, " ")));
 const count = (word) => listed.filter((t) => t.includes(word)).length;
-check("Friends lists the checks with a verdict each", count("check again later") === 1 && count("all good") === 3 && count("needs a look") === 10 && count("couldn't check") === 1,
+check("Friends lists the checks with a verdict each", count("check again later") === 1 && count("all good") === 3 && count("needs a look") === 11 && count("couldn't check") === 1,
   `${listed.length}: ${listed.map((t) => t.slice(0, 60)).join(" | ")}`);
 check("…with no image injected from Cloudflare's answers", (await owner.$$(".checks img")).length === 0);
 

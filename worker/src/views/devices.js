@@ -18,6 +18,8 @@ export function identityChange(pending) {
     pending.removed.length && `${n(pending.removed.length, "passkey")} will stop signing for you`,
     pending.added.length && `${n(pending.added.length, "passkey")} will start signing for you`,
     pending.recovery && "your recovery code will change",
+    pending.hosting === "other" && "a key that isn't this site's will sign for your site",
+    pending.hosting === "back" && "your site's own key will sign for it again",
   ].filter(Boolean);
   return (parts.join(", and ") || "your identity will change") + (pending.byRecovery ? " (asked with your recovery code)" : "");
 }

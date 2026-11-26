@@ -179,7 +179,13 @@ check("the sign-in carried this browser's own signature of its delegation (it ho
   await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
 }
 const logout = await post("/_auth/logout", null, (await session(owner)).value);
-check("signing out asks the browser to clear cached photos", (logout.headers.get("clear-site-data") ?? "").includes('"cache"'));
+check("signing out asks the browser to clear cached photos, and anything kept for the site", (logout.headers.get("clear-site-data") ?? "").includes('"cache"')
+  && (logout.headers.get("clear-site-data") ?? "").includes('"storage"'));
+// A service worker the site didn't make (security review 2026-11 M13): its update check gets one that removes itself.
+const planted = await fetch(`${BASE}/static/planted-sw.js`, { headers: { "Service-Worker": "script" } });
+const own = await fetch(`${BASE}/static/app/push-sw.js`, { headers: { "Service-Worker": "script" } });
+check("a service worker the site didn't make is answered with one that removes itself; its own is served as it is",
+  planted.status === 200 && (await planted.text()).includes("registration.unregister()") && (await own.text()).includes("navigationPreload"));
 await owner.goto(`${BASE}/_auth/login`);
 await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
 let ownerCookie = (await session(owner)).value;

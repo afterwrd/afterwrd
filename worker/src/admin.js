@@ -48,7 +48,7 @@ export async function handleAdmin(request, env, url, owner) {
     return handleConnections(request, env, url, owner);
   }
   if (request.method === "GET" && url.pathname === "/_admin") {
-    return html(devicesPage(pageData(env, { ...(await devicesData(env.DB, owner)), pushKey: await pushKey(env), me: await headerMe(env.DB, owner) })));
+    return html(devicesPage(pageData(env, { ...(await devicesData(env, owner)), pushKey: await pushKey(env), me: await headerMe(env.DB, owner) })));
   }
   // Where a new site's setup ends, after its permissions (views/pages.js afterPasskey).
   if (request.method === "GET" && url.pathname === "/_admin/setup/done") return html(setupDonePage());
@@ -215,12 +215,13 @@ export async function createDeviceLink(env, url, userId, seconds = DEVICE_LINK_S
 }
 
 /** Your devices: the owner's passkeys, how many device links are still unused, and how many devices are signed in. */
-async function devicesData(db, owner) {
+async function devicesData(env, owner) {
+  const db = env.DB;
   const [{ results: passkeys }, links, sessions] = await db.batch([
     db.prepare("SELECT id, created_at, last_used_at FROM credentials WHERE user_id = ? ORDER BY created_at").bind(owner.id),
     db.prepare("SELECT COUNT(*) AS n FROM device_links WHERE user_id = ? AND used_at IS NULL AND expires_at > ?").bind(owner.id, now()),
     db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE user_id = ? AND expires_at > ?").bind(owner.id, now()),
   ]);
   return { owner: owner.name, passkeys, openLinks: links.results[0].n, sessions: sessions.results[0].n, notifying: await listDevices(db),
-    identity: await identitySummary(db), thisCredential: owner.session_credential ?? null };
+    identity: await identitySummary(env), thisCredential: owner.session_credential ?? null };
 }

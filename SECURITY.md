@@ -49,6 +49,25 @@ To hear about every release, *Watch* this repository on GitHub (*Watch* → *Cus
 [releases feed](https://github.com/afterwrd/afterwrd/releases.atom). Each release's notes are what its sites show on
 their Update page.
 
+## What else is trusted
+
+Besides the release key, two things are trusted, and anyone who controlled them could harm people:
+
+- **afterwrd.app and install.afterwrd.app**, which run in the project's own Cloudflare account (its domain, DNS and
+  the installer's Worker all live there). The installer puts afterwrd on new sites, and afterwrd.app's Connect page
+  passes Cloudflare's permission codes back to sites. Someone who controlled that account or the domain, even
+  briefly, could install something else on new sites, or collect the permission of anyone connecting meanwhile. The
+  project's Cloudflare account has a single login, with two-step sign-in, and holds the domain's registration.
+- **The page you press *Allow* on.** Only press *Allow* when you started from your own site, just now: afterwrd.app's
+  Connect page shows which site the permission is for, and a site with a look-alike address, from a link someone sent
+  you, would get your Cloudflare access.
+
+Releases are built on GitHub in a job that can only read the repository; the build record is signed and the release
+published by a separate job that runs none of the build's npm packages.
+
+GitHub is not trusted to say what a site runs: code reaches a site on Cloudflare only if it's in the signed list. A
+self-hosted site pulls its image from GitHub's registry, which is not yet tied to the signed list.
+
 ## What the Cloudflare permission covers
 
 Installing and updating ask Cloudflare for permission through its own sign-in for apps: you press *Allow*, and the

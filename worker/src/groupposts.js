@@ -57,6 +57,7 @@ const SINCE_PAGE = 50;
 const PEOPLE_AT_ONCE = 200; // people, and delegations, asked for in one POST /_p/people
 const BEFORE_PAGE = 20;
 const PHOTO_FIELDS = ["hash", "thumb_hash", "width", "height", "size"];
+const PHOTO_TRIES = 5; // posts a day a member's photos may fail to copy for (photo_tries)
 const KINDS = new Set(["comment", "edit", "delete", "vote", "answer", "end", "change", "remove", "calloff"]);
 
 /**
@@ -420,6 +421,11 @@ async function newPost(env, url, self, group, member, body) {
   }
   // A post is a record too (and each photo with it): within the member's records a day (hosted.js).
   if (await overDailyRecords(db, String(member.identity), "item", self.list)) return json({ error: DAILY_RECORDS_SAID }, 429);
+  // Posts whose photos couldn't be copied are taken back, with everything the limits above count, so those are counted
+  // too: a few a day (security review 2026-11 M8).
+  const day = Math.floor(at / 86400);
+  const tries = copies.length ? Number((await db.prepare("SELECT n FROM photo_tries WHERE identity = ? AND day = ?").bind(member.identity, day).first())?.n ?? 0) : 0;
+  if (tries >= PHOTO_TRIES) return json({ error: "Your photos couldn't be fetched from your site several times today. Try again tomorrow." }, 429);
   let release = async () => {};
   if (post.content.here === true) {
     const here = await takeHere(env, group, member);
@@ -436,6 +442,10 @@ async function newPost(env, url, self, group, member, body) {
   } catch (error) {
     await made.undo();
     await release();
+    await db.batch([
+      db.prepare(`INSERT INTO photo_tries (identity, day, n) VALUES (?, ?, 1) ON CONFLICT(identity, day) DO UPDATE SET n = n + 1`).bind(member.identity, day),
+      db.prepare("DELETE FROM photo_tries WHERE day < ?").bind(day - 1),
+    ]);
     return json({ error: error.message }, 400);
   }
   // Those it mentions are told; @here tells everyone.

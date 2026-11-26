@@ -49,6 +49,12 @@ export const HEADERS = {
   "Referrer-Policy": "same-origin",
   "X-Content-Type-Options": "nosniff",
   "X-Robots-Tag": "noindex, nofollow",
+  // Hardening (security review 2026-11 W6): no other site's window keeps a handle on this one's; not framed, for
+  // browsers that don't read the policy's frame-ancestors; and HTTPS only, which matters for a self-hosted site
+  // (workers.dev is HTTPS-only in browsers already).
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "X-Frame-Options": "DENY",
+  "Strict-Transport-Security": "max-age=31536000",
 };
 
 // What a self-hosted site doesn't have (hosting.js): automatic updates and Connect (/_auto, /_cloudflare), friends'
@@ -130,16 +136,30 @@ function beingUpdated(request) {
   return new Response(JSON.stringify({ error: message }), { status: 503, headers: { ...headers, "Content-Type": "application/json" } });
 }
 
+// A service worker this site didn't make (something that ran here for a moment registered its own, which would
+// otherwise keep answering this browser's pages after the site was put right): its update check, which browsers make
+// at least daily and straight to the site, gets one that removes itself and reloads the pages it had (security review
+// 2026-11 M13). The site's own is only ever /static/app/push-sw.js.
+const UNREGISTER_WORKER = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (event) => event.waitUntil((async () => {
+  await self.registration.unregister();
+  for (const client of await self.clients.matchAll({ type: "window" })) client.navigate(client.url);
+})()));`;
+
 async function route(request, env, work) {
-  await ensureSchema(env);
   const url = new URL(request.url);
+  if (request.headers.get("Service-Worker") === "script" && url.pathname !== "/static/app/push-sw.js") {
+    return new Response(UNREGISTER_WORKER, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" } });
+  }
+  await ensureSchema(env);
   // On a newer version's database, only which version this is, an update's own steps (they only use settings), and the
   // stylesheet and fonts for the page saying so.
   if (url.pathname !== "/_version" && !/^\/(_auto|static)\//.test(url.pathname) && await databaseIsNewer(env)) return beingUpdated(request);
   // Other sites' calls (friends', members', groups'): bodies of 64 KB at most, refused before anything is read or
   // checked (T31), but 1 MB for bringing things over from afterwrd 1, where an item's comments from before go together.
   // Read once here, so what follows can read it again.
-  if (request.method === "POST" && /^\/_(p|member|group)\//.test(url.pathname)) {
+  // Sign-in and checks too, which strangers reach: 64 KB is far more than either sends (security review 2026-11 L14).
+  if (request.method === "POST" && /^\/_(p|member|group|auth|check)\//.test(url.pathname)) {
     const bytes = await bodyBytes(request, url.pathname === "/_p/before" || url.pathname === "/_group/before" ? BRINGING_BYTES : undefined);
     if (!bytes) return json({ error: "That's too big." }, 413);
     request = new Request(request, { body: bytes });

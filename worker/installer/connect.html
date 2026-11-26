@@ -26,6 +26,7 @@
   p { margin: 8px 0; }
   a { color: var(--accent-strong); }
   .meta { color: var(--muted); font-size: 0.9rem; }
+  .warn { font-weight: 700; }
   #error:empty { display: none; }
   details.more summary { cursor: pointer; }
   ul.plain { padding-left: 1.1rem; }
@@ -221,6 +222,14 @@
             "/_auth/recover/done": ["recover-host", "ask-recover", "continue-recover"] }[site.pathname] ?? ["host", "ask", "continue"];
           status.textContent = "";
           document.getElementById(kind[0]).textContent = site.host;
+          // Anything but a friend's check comes from the person's own site, just now: never from a link someone sent
+          // (a site with a look-alike address would get their Cloudflare access: security review 2026-11 M10).
+          if (kind[0] !== "check-host") {
+            const warn = document.createElement("p");
+            warn.className = "warn";
+            warn.textContent = "Only continue if you pressed the button on your own afterwrd site just now. If you got here from a link someone sent you, close this page.";
+            document.getElementById(kind[0]).after(warn);
+          }
           document.getElementById(kind[1]).hidden = false;
           document.body.classList.remove("passing");
           document.getElementById(kind[2]).addEventListener("click", () => {

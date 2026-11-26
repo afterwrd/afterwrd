@@ -103,8 +103,11 @@ export async function learnIdentity(env, chain, { owner = null } = {}) {
   // A change of address (waiting or done) is kept beside it: friends' sites switch to the new address when it's in
   // effect here (calls.js), and Home says they're moving meanwhile.
   const move = moveOf(state);
+  // Its address is only its own claim until this site fetches it from there (fetchIdentity, origin_checked_at): a new
+  // address forgets the last check (security review 2026-11 H1).
   await db.prepare(`INSERT INTO identities (person, origin, chain, updated_at, moving_to, moving_at) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(person) DO UPDATE SET origin = excluded.origin, chain = excluded.chain, updated_at = excluded.updated_at,
+    ON CONFLICT(person) DO UPDATE SET origin_checked_at = CASE WHEN identities.origin = excluded.origin THEN identities.origin_checked_at END,
+      origin = excluded.origin, chain = excluded.chain, updated_at = excluded.updated_at,
       moving_to = excluded.moving_to, moving_at = excluded.moving_at`)
     .bind(state.id, state.current.origin, storedChain(found.chain), at, move?.to ?? null, move?.at ?? null).run();
   return { ...state, frozen: Boolean(row?.frozen_at) };
@@ -275,7 +278,7 @@ const REFETCH_SECONDS = 600;
 
 /** The hosting key `person` signs calls from `from` with: from what's known, or by fetching their identity from there. */
 export async function hostingKeyFor(env, person, from, { again = false } = {}) {
-  const row = await env.DB.prepare("SELECT chain, frozen_at, updated_at FROM identities WHERE person = ?").bind(person).first();
+  const row = await env.DB.prepare("SELECT chain, frozen_at, updated_at, origin, origin_checked_at FROM identities WHERE person = ?").bind(person).first();
   // Asked again (a signature that didn't check with the key known): fetched afresh, but not more than every 10 minutes
   // for anyone, so bad signatures can't make this site fetch from them over and over.
   if (again) {
@@ -290,13 +293,21 @@ export async function hostingKeyFor(env, person, from, { again = false } = {}) {
     const fetched = await refresh;
     return fetched?.id === person ? fetched.current.hosting : null;
   }
-  const known = row && !row.frozen_at ? await keyIfKnown(env.DB, row, from) : null;
+  // Known without asking only once this site has fetched the identity from that very address: an identity's address
+  // is otherwise just what it says of itself, and anyone can make one that names someone else's site (security review
+  // 2026-11 H1). Otherwise it's fetched from there, which is what the real site at that address says.
+  const confirmed = row && !row.frozen_at && row.origin_checked_at && row.origin === from;
+  const known = confirmed ? await keyIfKnown(env.DB, row, from) : null;
   if (known) return known;
   const fetched = await fetchIdentity(env, from);
   return fetched?.id === person ? fetched.current.hosting : null;
 }
 
-/** The hosting key `person` signs calls from `from` with, from what this site knows alone (it fetches nothing); or null. */
+/**
+ * The hosting key `person` signs calls from `from` with, from what this site knows alone (it fetches nothing); or null.
+ * The address may be only the identity's own claim: only for calls whose content is checked for itself (a mention
+ * receipt carries the writer's own signed comment), never to say who a caller is (hostingKeyFor).
+ */
 export async function knownHostingKey(env, person, from) {
   const row = await env.DB.prepare("SELECT chain, frozen_at FROM identities WHERE person = ?").bind(person).first();
   return row && !row.frozen_at ? keyIfKnown(env.DB, row, from) : null;
@@ -308,15 +319,19 @@ async function keyIfKnown(db, row, from) {
   return state && !state.problem && state.current.origin === from ? state.current.hosting : null;
 }
 
+// A signed profile dated further ahead than this isn't taken: its time is the signer's word, and one dated years ahead
+// would stay the newest for good, so nothing the person signs later would ever replace it (security review 2026-11 L6).
+const PROFILE_AHEAD = 600;
+
 /**
  * Whether a signed profile ({bytes, key, signature, delegation: {bytes, proof}}) is `state`'s person's, as signed by one
  * of their browser keys while it was allowed to. Returns the profile ({name, at}) or null.
  */
-export async function checkProfile(envelope, state) {
+export async function checkProfile(envelope, state, clock = now()) {
   const bytes = typeof envelope?.bytes === "string" ? fromB64url(envelope.bytes) : null;
   const profile = bytes && decode(bytes);
   if (!profile || profile.v !== 2 || profile.kind !== "profile" || profile.person !== state.id || typeof profile.name !== "string"
-    || !Number.isSafeInteger(profile.at)) return null;
+    || !Number.isSafeInteger(profile.at) || profile.at > clock + PROFILE_AHEAD) return null;
   const delegation = typeof envelope.delegation?.bytes === "string" ? fromB64url(envelope.delegation.bytes) : null;
   const key = delegation && (await checkDelegation(delegation, envelope.delegation.proof, state, profile.at));
   if (!key || key !== envelope.key || !(await checkAs("profile", key, bytes, envelope.signature))) return null;

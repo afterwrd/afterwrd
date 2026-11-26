@@ -325,6 +325,10 @@ function removeFriend(c, look) {
 
 /** Why a friend's site isn't being heard from, once it's gone quiet (feed.js), or null. */
 function friendSilence(c) {
+  if (c.frozen) {
+    return html`Two different versions of ${c.name}'s identity have been seen, so someone else may have one of their keys. Nothing signed
+      as them is trusted until that's sorted out: check with them some other way.`;
+  }
   if (c.said_no) return html`Their site says you're no longer connected, so ${c.name} may have removed you as a friend.`;
   if (c.unmoved_since) return html`Their site hasn't moved to afterwrd 2 yet. You'll see ${c.name}'s posts once it has.`;
   if (!gone(c)) return null;

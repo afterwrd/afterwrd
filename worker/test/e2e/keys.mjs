@@ -236,13 +236,14 @@ check("oversized or malformed documents aren't identities", (await readIdentity(
   const profile = (fields) => encode({ v: 2, kind: "profile", person: gFp, name: "Ann Example", at: NOW, ...fields });
   const envelope = async (bytes, key = browser) => ({ bytes: b64url(bytes), key: await publicKeyText(key.publicKey),
     signature: await signAs("profile", key.privateKey, bytes), delegation: { bytes: b64url(delegation), proof: setupProof } });
-  check("a profile signed by a browser key the person allowed says their name", (await checkProfile(await envelope(profile()), s0))?.name === "Ann Example");
-  check("…not if signed by any other key", (await checkProfile(await envelope(profile(), await newKeyPair()), s0)) === null);
-  check("…nor after that browser key ran out", (await checkProfile(await envelope(profile({ at: NOW + 31 * DAY })), s0)) === null);
-  check("…nor claiming to be someone else's", (await checkProfile(await envelope(profile({ person: "x".repeat(43) })), s0)) === null);
+  check("a profile signed by a browser key the person allowed says their name", (await checkProfile(await envelope(profile()), s0, NOW))?.name === "Ann Example");
+  check("…not if signed by any other key", (await checkProfile(await envelope(profile(), await newKeyPair()), s0, NOW)) === null);
+  check("…nor after that browser key ran out", (await checkProfile(await envelope(profile({ at: NOW + 31 * DAY })), s0, NOW + 31 * DAY)) === null);
+  check("…nor dated ahead of the reader's clock (security review 2026-11 L6)", (await checkProfile(await envelope(profile({ at: NOW + DAY })), s0, NOW)) === null);
+  check("…nor claiming to be someone else's", (await checkProfile(await envelope(profile({ person: "x".repeat(43) })), s0, NOW)) === null);
   const edited = await envelope(profile());
   edited.bytes = b64url(profile({ name: "Not Ann" }));
-  check("…nor with its name changed", (await checkProfile(edited, s0)) === null);
+  check("…nor with its name changed", (await checkProfile(edited, s0, NOW)) === null);
   check("chains are read only in the right shape", parseChain([{ bytes: b64url(g), sig: {} }])?.length === 1 && parseChain("x") === null
     && parseChain([{ bytes: "!!", sig: {} }]) === null && parseChain(Array.from({ length: 201 }, () => ({ bytes: b64url(g), sig: {} }))) === null);
 }
@@ -275,7 +276,9 @@ check("oversized or malformed documents aren't identities", (await readIdentity(
   const newKey = gdoc(1, g0Fp, { hosting: await publicKeyText((await newKeyPair()).publicKey) });
   const newKeyFp = await fingerprintOf("identity", newKey);
   const rekeyed = await readIdentity([first, { bytes: newKey, sig: { passkey: await phone.sign([newKeyFp]) } }], seen(new Map()), NOW, { owner: ann });
-  check("…and a new hosting key takes effect at once", rekeyed?.current.hosting !== groupHosting && !rekeyed.pending);
+  const rekeyedLater = await readIdentity([first, { bytes: newKey, sig: { passkey: await phone.sign([newKeyFp]) } }], seen(new Map([[newKeyFp, NOW]])), NOW + 8 * DAY, { owner: ann });
+  check("…and a new hosting key waits 7 days too (security review 2026-11 H2)", rekeyed?.current.hosting === groupHosting && rekeyed.pending?.hosting !== groupHosting
+    && rekeyedLater?.current.hosting !== groupHosting);
   const takeover = gdoc(1, g0Fp, { owner: await fingerprintOf("identity", bobG) });
   const takeoverFp = await fingerprintOf("identity", takeover);
   const taken = await readIdentity([first, { bytes: takeover, sig: { passkey: await phone.sign([takeoverFp]) } }], seen(new Map()), NOW, { owner: ann });

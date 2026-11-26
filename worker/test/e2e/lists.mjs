@@ -386,6 +386,8 @@ check("a comment slipped in after closing is spotted, though the host signed it"
   raw.exec("CREATE TABLE authored (fp TEXT PRIMARY KEY, author TEXT, list TEXT NOT NULL, n INTEGER NOT NULL, taken INTEGER NOT NULL)");
   // …and the part of `items` it reads: whether an item brought over from afterwrd 1 takes comments yet (step 10b).
   raw.exec("CREATE TABLE items (id TEXT PRIMARY KEY, author TEXT, before_until INTEGER, comments_off_at INTEGER)");
+  // …and the part of `notices` it clears when something's deleted (security review 2026-11 L16).
+  raw.exec("CREATE TABLE notices (id INTEGER PRIMARY KEY, fp TEXT, item TEXT, text TEXT)");
   const db = local(storage);
   const host = { person: ann.id, privateKey: ann.hosting.privateKey };
   const itemRecord = await makeRecord({ kind: "item", author: ann.id, host: ann.id }, { text: "Big thread" }, ann.browser);

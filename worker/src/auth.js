@@ -42,7 +42,15 @@ export async function handleAuth(request, env, url) {
     : {};
   try {
     if (route === "GET /_auth/login") {
-      return html(loginPage(safeNext(url.searchParams.get("next"), url), { recoverCommand: selfHosted(env) ? serverCommand("recover") : null }));
+      // Signed in already (a link to this page in someone's comment, say): straight on, as the page would after signing
+      // in. Its script clears what this browser keeps for a signed-out visitor (its key, unsent words), which mustn't
+      // happen to someone who is signed in (security review 2026-11 L1).
+      // Never on to starting a Connect or a lasting permission: those only start from the site's own pages, by a press,
+      // and a link through here would get past that (security review 2026-11 L3).
+      const asked = safeNext(url.searchParams.get("next"), url);
+      const next = asked.startsWith("/_cloudflare/") ? "/" : asked;
+      if (await currentUser(request, env)) return Response.redirect(new URL(next, url.origin).toString(), 302);
+      return html(loginPage(next, { recoverCommand: selfHosted(env) ? serverCommand("recover") : null }));
     }
     // Signing out is a form post, so another site can't sign people out by linking here.
     if (route === "GET /_auth/logout") return html(signOutPage());
@@ -247,7 +255,9 @@ async function logout(request, env) {
   // Nor should an hour's Cloudflare connection (cloudflare.js), for browsers that don't clear cookies below.
   response.headers.append("Set-Cookie", "cf_token=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict");
   // Photos are cached for a long time; on a shared computer they shouldn't outlive the session.
-  response.headers.set("Clear-Site-Data", '"cache", "cookies"');
+  // And "storage": anything kept in this browser for the site, a service worker it didn't make included (security
+  // review 2026-11 M13). The site's own comes back on the next page; this device's notifications are off already.
+  response.headers.set("Clear-Site-Data", '"cache", "cookies", "storage"');
   return response;
 }
 
@@ -294,11 +304,12 @@ async function key(env) {
   return signingKey;
 }
 
-async function sign(env, text) {
+/** An HMAC of `text` with this site's challenge key, for a cookie only it could have set (recover.js). */
+export async function sign(env, text) {
   return toBase64Url(new Uint8Array(await crypto.subtle.sign("HMAC", await key(env), new TextEncoder().encode(text))));
 }
 
-async function verify(env, text, mac) {
+export async function verify(env, text, mac) {
   try {
     return await crypto.subtle.verify("HMAC", await key(env), fromBase64Url(mac), new TextEncoder().encode(text));
   } catch {

@@ -30,7 +30,7 @@ import { objectNamed } from "./sqlite.js";
 import pkg from "../package.json";
 import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
-import { checkSite, filesThroughCode, cloudflareReader, siteFiles, siteIn } from "./checks.js";
+import { checkSite, filesThroughCode, cloudflareReader, siteFiles, siteIn, storageElsewhere } from "./checks.js";
 import { callFriend } from "./calls.js";
 import { signedList } from "./signing.js";
 import { onCloudflare } from "./hosting.js";
@@ -244,6 +244,10 @@ async function checkAccess(env, origin) {
   }
   // The new refresh token first: the old one may not work again.
   if (typeof data.refresh_token === "string" && CODE_RE.test(data.refresh_token)) await box.keepSecret("check_refresh", data.refresh_token);
+  // Only read access is ever handed to a friend's site: a refreshed token whose stated scope is any wider isn't
+  // (security review 2026-11 L19), as when the grant was first kept.
+  const granted = typeof data.scope === "string" ? data.scope.split(/\s+/).filter(Boolean) : null;
+  if (granted && granted.some((scope) => !CHECK_SCOPES.split(" ").includes(scope))) return null;
   const access = { token: data.access_token, until: now() + (Number(data.expires_in) > 0 ? Math.min(Number(data.expires_in), 3600) : 3600) };
   await box.keepSecret("check_access", JSON.stringify(access));
   return access;
@@ -469,10 +473,12 @@ export function findings(r) {
   else if (r.problem === "unreadable") words.push("Cloudflare wouldn't hand over the site's code.");
   else if (r.code === "different") words.push(`The site's code isn't the published afterwrd ${r.version}.`);
   else if (r.code && r.code !== "matches") words.push("The site's code couldn't be compared with a release.");
-  const unknown = (r.versions?.unknown ?? []).filter((u) => !u.files);
+  const unknown = (r.versions?.unknown ?? []).filter((u) => !u.files && !u.wired);
   const exposed = (r.versions?.unknown ?? []).filter((u) => u.files);
+  const wired = (r.versions?.unknown ?? []).filter((u) => u.wired);
   if (unknown.length) words.push(`${unknown.length === 1 ? "An upload" : `${unknown.length} uploads`} to the site's code since the last check ${unknown.length === 1 ? "wasn't" : "weren't"} a signed afterwrd release.`);
   if (exposed.length) words.push(`${exposed.length === 1 ? "An upload" : `${exposed.length} uploads`} since the last check let Cloudflare send the site's files without its code checking them first. afterwrd never sets it up that way.`);
+  if (wired.length) words.push(`${wired.length === 1 ? "An upload" : `${wired.length} uploads`} since the last check wired the site's storage to another Worker, which would see everything it keeps. afterwrd never does that.`);
   if (r.versions?.more) words.push("There were too many uploads since the last check to look at them all.");
   words.push(...(r.problems ?? []));
   return words.slice(0, 5);
@@ -595,6 +601,7 @@ async function uploadsSince(token, env, origin, list, account, script, since) {
     // the code doesn't cover the site's files, or whether they're sent without the code checking them.
     if (!known.has(resources?.script?.etag)) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live });
     else if (!filesThroughCode(resources?.script_runtime)) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live, files: true });
+    else if (storageElsewhere(resources?.bindings, script).length) unknown.push({ number: Number(v.number) || null, at: v.at, live: v.live, wired: true });
   }
   return { checked: Math.min(look.size, VERSIONS_MAX), unknown, more, from };
 }

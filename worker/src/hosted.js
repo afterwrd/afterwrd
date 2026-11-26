@@ -144,7 +144,11 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
         db.prepare(`DELETE FROM checkpoints WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
         db.prepare(`DELETE FROM authored WHERE list = ? AND ${moved("")}`).bind(list, list, list, head),
       ]);
-      if (won.meta.changes === 1) return { entry: { n, fp: got.fp, taken, head }, deleted: true, removed: got.record.kind === "remove" };
+      if (won.meta.changes === 1) {
+        // Its words, and any comments' on it, out of Notifications too (security review 2026-11 L16).
+        await db.prepare("UPDATE notices SET text = NULL WHERE item = ? AND text IS NOT NULL").bind(list).run();
+        return { entry: { n, fp: got.fp, taken, head }, deleted: true, removed: got.record.kind === "remove" };
+      }
       continue;
     }
     // A delete or removal: the record it names keeps only its fingerprint, from now on, everywhere this site sends it.
@@ -164,6 +168,8 @@ async function take(db, got, { sent, host, taken, list, group, dateOwner }) {
           .bind(JSON.stringify(emptied), list, targetPage, list, list, head));
         // Nothing kept says whose it was (decision 7): only where it was, for its writer's check.
         statements.push(db.prepare(`UPDATE authored SET author = NULL WHERE fp = ? AND ${moved("")}`).bind(target.fp, list, list, head));
+        // …and its words go from Notifications too, as from the conversation (security review 2026-11 L16).
+        statements.push(db.prepare("UPDATE notices SET text = NULL WHERE fp = ? AND text IS NOT NULL").bind(target.fp));
       }
     }
     // Indexed by fingerprint and writer (sentchecks.js): not the owner's own records on their own site.

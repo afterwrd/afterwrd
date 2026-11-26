@@ -12,23 +12,26 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write # create the release and upload its files
-  id-token: write # sign the build record (Sigstore issues a short-lived certificate for this workflow run)
-  attestations: write # store the build record with the repository
-  artifact-metadata: write
+# Nothing by default: each job says what it needs. The build, where the npm packages run, can only read the
+# repository; signing the build record and publishing happen in a job of their own that runs none of them, so a
+# tampered package can't mint a build record or publish anything (security review 2026-11 L20).
+permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: worker
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       # Actions pinned to exact commits, so a moved tag can't change what runs here.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          persist-credentials: false # don't leave a write token on disk while dependencies install
+          persist-credentials: false # don't leave a token on disk while dependencies install
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -37,13 +40,14 @@ jobs:
           cache-dependency-path: worker/package-lock.json
 
       - name: Check the tag matches package.json
+        id: version
         run: |
           version=$(node -p "require('./package.json').version")
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME doesn't match package.json version $version" >&2
             exit 1
           fi
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       # Install scripts are the usual way a rogue npm package attacks a build, and none are needed: esbuild and
       # wrangler find their programs without them, and the build comes out the same either way.
@@ -52,18 +56,40 @@ jobs:
       - name: Build the release
         run: npm run release -- --base "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
 
-      # A signed record that these exact files were built here, by this workflow, from the tagged commit. It's
-      # kept in Sigstore's public log, so it can't be quietly changed later. To check a release's files:
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: worker/release/${{ steps.version.outputs.version }}/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload its files
+      id-token: write # sign the build record (Sigstore issues a short-lived certificate for this workflow run)
+      attestations: write # store the build record with the repository
+      artifact-metadata: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: release
+
+      # A signed record that these exact files were built by this workflow from the tagged commit. It's kept in
+      # Sigstore's public log, so it can't be quietly changed later. To check a release's files:
       #   gh attestation verify manifest.json --repo afterwrd/afterwrd
       - name: Sign the build record
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: worker/release/${{ env.VERSION }}/*
+          subject-path: release/*
 
       - name: Publish it
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/"$VERSION"/* \
+          gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" \
             --title "afterwrd $VERSION" \
-            --notes "To install, use the [install page](https://$(node -p "require('./package.json').afterwrd.site")/). To run it on your own server instead, see [worker/selfhost](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME/worker/selfhost)."
+            --notes "To install, use the [install page](https://afterwrd.app/). To run it on your own server instead, see [worker/selfhost](https://github.com/$GITHUB_REPOSITORY/tree/$GITHUB_REF_NAME/worker/selfhost)."

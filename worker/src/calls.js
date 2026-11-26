@@ -7,7 +7,7 @@ import { checkCall, signCall } from "./signedcalls.js";
 import { fetchIdentity, hostingKeyFor, identityState, knownHostingKey } from "./identities.js";
 import { ownMove } from "./keys.js";
 import { ownHost } from "./items.js";
-import { host, ownerName, readLimited } from "./sites.js";
+import { host, ownerName, readBytesLimited, readLimited } from "./sites.js";
 import { admit } from "./allowances.js";
 
 const TIMEOUT_MS = 8000;
@@ -172,8 +172,9 @@ export const busyUntil = (error) => (error?.status === 429 && Number.isSafeInteg
 /** A call's body as bytes, read once; null if it's bigger than `limit`. */
 export async function bodyBytes(request, limit = 64 * 1024) {
   if (Number(request.headers.get("Content-Length") ?? 0) > limit) return null;
-  const bytes = new Uint8Array(await request.arrayBuffer().catch(() => new ArrayBuffer(0)));
-  return bytes.length > limit ? null : bytes;
+  // Read only as far as the limit, whether or not the request said how long it is (security review 2026-11 L14).
+  const bytes = await readBytesLimited(request, limit).catch((error) => (error?.tooBig ? null : new Uint8Array()));
+  return bytes && bytes.length <= limit ? bytes : null;
 }
 
 /** JSON from a call's body (bytes); {} if it isn't an object. */

@@ -23,14 +23,14 @@ import { friendCalling } from "./calls.js";
 import { signedGroup } from "./groupjoin.js";
 import { receiveGroupNote } from "./groupcopies.js";
 import { delegationsFor, itemForFriend, keyOf, peopleFor } from "./friendhost.js";
-import { keepItem } from "./friendcopies.js";
+import { copyAllowance, countCopies, keepItem, trimFriend } from "./friendcopies.js";
 import { listEntries } from "./hosted.js";
-import { identityState, learnIdentity, parseChain, checkProfile } from "./identities.js";
+import { identityState, learnPeopleIn } from "./identities.js";
 import { TAKEN_SQL } from "./sentchecks.js";
 import { ID_RE, ownHost } from "./items.js";
 import { checkHead, headOf, signHead } from "./lists.js";
 import { daySecondsNow, LIMITS, rateWindow } from "./limits.js";
-import { pushAllowed, writerMayBuzz } from "./notify.js";
+import { eventsMayBuzz, pushAllowed, writerMayBuzz } from "./notify.js";
 import { outbox } from "./outbox.js";
 import { notifyLater } from "./push.js";
 import { checkRecord } from "./records.js";
@@ -209,15 +209,20 @@ export async function receiveNotes(request, env, url, work) {
 }
 
 async function receiveItem(env, url, work, { connection, person }, me, note) {
+  // Within today's allowance of copies from this friend (friendcopies.js: security review 2026-11 H3, M6): past it, the
+  // post comes at the next pull of their site instead.
+  if (!(await copyAllowance(env.DB, connection.id))) return json({ ok: true }, 202);
   const kept = await keepItem(env, connection, person, note.item, note.delegations);
   if (!kept) return json({ error: "That isn't a post of theirs." }, 400);
-  await kept.statement.run();
+  await env.DB.batch([kept.statement, countCopies(env.DB, connection.id, 1)]);
+  await trimFriend(env, connection);
   const id = String(note.item.id);
   const name = String(connection.name);
   // An invitation to their event: on Notifications and the owner's phones, as before.
   if (kept.content.event) {
     const words = eventWords(kept.content.event);
-    if (await keepNotice(env.DB, { kind: "invite", fp: id, connection: connection.id, item: id, target: id, actor: name, text: words })) {
+    if (await keepNotice(env.DB, { kind: "invite", fp: id, connection: connection.id, item: id, target: id, actor: name, text: words })
+      && await eventsMayBuzz(env.DB, { connection: connection.id })) {
       notifyLater(env, url.origin, work, { title: name, text: `Invited you: ${words}`, hidden: "Invited you to an event",
         url: `/friend/${connection.id}/posts/${id}`, tag: `event-${connection.id}-${id}` });
     }
@@ -244,16 +249,14 @@ async function receiveComment(env, url, work, { connection, person }, me, note) 
   const head = await headOf({ host: person, list: item, prev: entry.prev, n: entry.n, fp: entry.fp, taken: entry.taken });
   const took = await checkHead(receipt, { hostingKey: hostState.current.hosting, host: person, list: item });
   if (!took || took.n !== entry.n || took.head !== head) return json({ error: "That receipt doesn't check." }, 400);
-  // Its writer, whose identity (and signed name) the note carries: theirs alone is learnt, and only their own name used.
+  // Its writer, whose identity (and signed name) the note carries: theirs alone is learnt, and only their own name used;
+  // someone new only once their comment checks against it, within the daily allowance for this friend's site
+  // (learnPeopleIn: security review 2026-11 H1, M5).
   const writer = typeof entry.sent?.record === "string" ? parseRecord(fromB64url(entry.sent.record))?.author : null;
-  let name = null;
   const info = writer && ID_RE.test(writer) ? note.people?.[writer] : null;
-  const chain = info && parseChain(info.chain);
-  const state = chain && (await learnIdentity(env, chain));
-  if (state && state.id === writer) {
-    const profile = info.profile && (await checkProfile(info.profile, state));
-    if (profile) name = profile.name;
-  }
+  const names = info ? await learnPeopleIn(env, { [writer]: info }, new Map([[writer, [{ sent: entry.sent, at: entry.taken }]]]),
+    { delegations: note.delegations, from: String(connection.origin) }) : new Map();
+  const name = names.get(writer) ?? null;
   const got = await checkRecord(entry.sent, { identityOf: (p) => identityState(env, p), delegationOf: async (key) => note.delegations?.[key] ?? null, at: entry.taken });
   if (!got || got.fp !== entry.fp || got.record.kind !== note.kind || got.record.host !== person || got.record.item !== item) {
     return json({ error: "That comment doesn't check." }, 400);
@@ -323,7 +326,8 @@ async function receiveChange(env, url, work, { connection, person }, me, got, en
   if ((moved || cancelled) && mine !== "no") {
     const kind = cancelled ? "cancelled" : "changed";
     const words = eventWords(now_.event);
-    if (await keepNotice(env.DB, { kind, fp: entry.fp, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })) {
+    if (await keepNotice(env.DB, { kind, fp: entry.fp, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })
+      && await eventsMayBuzz(env.DB, { connection: connection.id })) {
       notifyLater(env, url.origin, work, { title: String(connection.name), text: `${cancelled ? "Called off" : "Changed"}: ${words}`,
         hidden: cancelled ? "Called off an event you were invited to" : "Changed an event you're invited to",
         url: `/friend/${connection.id}/posts/${id}`, tag: `event-${connection.id}-${id}` });
@@ -349,7 +353,8 @@ async function receiveGone(env, url, work, { connection }, me, note) {
   const mine = copy && JSON.parse(String(copy.tally ?? "{}"))?.answers?.[me.person]?.answer;
   if (note.cancelled === true && was?.event && !was.event.cancelled && mine !== "no") {
     const words = eventWords(was.event);
-    if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })) {
+    if (await keepNotice(env.DB, { kind: "cancelled", fp: `gone-${id}`, connection: connection.id, item: id, target: id, actor: String(connection.name), text: words })
+      && await eventsMayBuzz(env.DB, { connection: connection.id })) {
       notifyLater(env, url.origin, work, { title: String(connection.name), text: `Called off: ${words}`, hidden: "Called off an event you were invited to",
         url: `/friend/${connection.id}/posts`, tag: `event-${connection.id}-${id}` });
     }

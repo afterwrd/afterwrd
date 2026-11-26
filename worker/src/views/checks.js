@@ -29,8 +29,9 @@ export function resultHtml(r, whose = "theirs", by = null) {
     if (v && !v.none) {
       const since = v.from ? ` since ${escape(when(v.from))}` : "";
       const which = (list) => list.map((u) => `version ${escape(String(u.number ?? "?"))}, ${escape(when(u.at))}`).join("; ");
-      const code = (v.unknown ?? []).filter((u) => !u.files);
+      const code = (v.unknown ?? []).filter((u) => !u.files && !u.wired);
       const files = (v.unknown ?? []).filter((u) => u.files);
+      const wired = (v.unknown ?? []).filter((u) => u.wired);
       if (code.length) {
         say(false, `${code.length === 1 ? "One version" : `${code.length} versions`} of ${your} site's code uploaded or made live${since} ${code.length === 1 ? "wasn't" : "weren't"}
           a signed afterwrd release (${which(code)}). Something other than afterwrd changed ${your} site's code, even if only for a while.`);
@@ -40,7 +41,12 @@ export function resultHtml(r, whose = "theirs", by = null) {
           ${your} site's files without its code checking them first (${which(files)}). afterwrd never sets it up that way: something
           other than afterwrd changed it, even if only for a while.`);
       }
-      if (code.length || files.length) { /* said */ } else if (v.more) say(false, `There were more uploads to ${your} site's code${since} than one check looks at.`);
+      if (wired.length) {
+        say(false, `${wired.length === 1 ? "One version" : `${wired.length} versions`} of ${your} site uploaded or made live${since} wired the
+          site's storage to another Worker, which would see everything it keeps (${which(wired)}). afterwrd never does that: something
+          other than afterwrd changed it, even if only for a while.`);
+      }
+      if (code.length || files.length || wired.length) { /* said */ } else if (v.more) say(false, `There were more uploads to ${your} site's code${since} than one check looks at.`);
       else say(true, `Every version of ${your} site's code uploaded or made live${since} was a signed afterwrd release (${v.checked} ${v.checked === 1 ? "version" : "versions"}).`);
     }
     if (r.newer) lines.push(`<p class="meta">afterwrd ${escape(r.newer)} is out: worth updating.</p>`);
