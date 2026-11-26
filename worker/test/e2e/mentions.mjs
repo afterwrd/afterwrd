@@ -81,7 +81,7 @@ const pushService = createServer((req, res) => {
 const toPhone = (who) => pushes.filter((p) => p === `/push/${who}`).length;
 /** Turns on notifications for `page`'s owner, at /push/<who>, as their phone would. */
 async function phone(page, site, who) {
-  await page.goto(`${site}/events`);
+  await page.goto(`${site}/_admin`);
   const keys = createECDH("prime256v1");
   keys.generateKeys();
   return post(page, "/_push/devices", { endpoint: `${PUSH}/push/${who}`, name: `Phone (${who})`, preview: true,

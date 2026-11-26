@@ -3,7 +3,7 @@
 import { nonce } from "../nonce.js";
 
 import { dateKey, datesOf, dayName, eventDay, eventDays, eventTime, eventWhen, finishedAt, monthAround, monthWeeks, repeatChoices, repeatWords, today, weekAround } from "../calendar.js";
-import { asset, integrity, icon } from "./nav.js";
+import { icon } from "./nav.js";
 import { html, raw } from "./html.js";
 import { groupBase, groupHead } from "./groups.js";
 import { groupItemCard } from "./items.js";
@@ -369,7 +369,7 @@ function invitationCard(ctx, e) {
 }
 
 /** Events: invitations to answer, the owner's calendar, and making an event. */
-export function eventsPage(ctx, { view, month, day, week, items, invitations, friends, pushKey }) {
+export function eventsPage(ctx, { view, month, day, week, items, invitations, friends }) {
   return page(ctx, "Events", html`
 <h1>Events</h1>
 <details class="add-event" id="make">
@@ -390,35 +390,10 @@ ${view === "month" ? html`${calendarGrid(ctx, items, { month, day, base: "/event
     : view === "week" ? html`<section class="calendar" aria-labelledby="cal-week">${weekHead(ctx, week, "/events")}
       ${weekDays(ctx, items, week, (list) => eventRows(ctx, list))}</section>`
     : html`<section class="cal-upcoming" aria-label="Coming up">${upcomingByMonth(items, (list) => eventRows(ctx, list))}</section>`}
-${notificationsSwitch(pushKey)}
 <script nonce="${nonce()}">
   // A link to #make (from elsewhere) opens the form.
   if (location.hash === "#make") document.getElementById("make").open = true;
 </script>`);
-}
-
-/**
- * Notifications on this device (push.js; public/static/notifications.js does the asking): only for invitations, and
- * for changes to events the owner hasn't said no to. Without scripts it only says it's checking.
- */
-function notificationsSwitch(pushKey) {
-  return html`<section class="card notify" id="notify" data-key="${pushKey}">
-  <h2>Notifications on this device</h2>
-  <p class="meta">Only when a friend invites you to an event, an event you haven't said no to changes or is called off,
-  or someone mentions you (or writes @here in a group you're in): never for other posts, comments or anything else.</p>
-  <p id="notify-status">Checking this device…</p>
-  <div class="row">
-    <button class="chip primary" data-do="on" hidden>Turn on notifications</button>
-    <button class="chip" data-do="off" hidden>Turn them off</button>
-  </div>
-  <label id="notify-preview" hidden><input type="checkbox"> Show what it's about on the lock screen (otherwise just who it's from)</label>
-  <label id="notify-mentions" hidden><input type="checkbox"> Mentions too (otherwise only events)</label>
-  <p class="meta" id="notify-android" hidden>If they only turn up when you unlock your phone, Android is saving battery: set
-  Chrome's battery use to <strong>Unrestricted</strong> (Settings → Apps → Chrome → Battery). afterwrd's notifications
-  come through Chrome.</p>
-  <p class="error" id="notify-error" role="alert"></p>
-</section>
-<script src="${asset("/static/notifications.js")}" integrity="${integrity("/static/notifications.js")}" type="module"></script>`;
 }
 
 /**

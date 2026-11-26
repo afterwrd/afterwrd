@@ -10,7 +10,7 @@ import { handleKeys, identitySummary } from "./keys.js";
 import { handleItems } from "./items.js";
 import { handleBefore } from "./before.js";
 import { relayRecord } from "./friendcopies.js";
-import { forgetDeviceById, listDevices, pushDevicesSeen } from "./push.js";
+import { forgetDeviceById, listDevices, pushDevicesSeen, pushKey } from "./push.js";
 import { handleCheckAdmin } from "./checks.js";
 import { handleConnections } from "./connect.js";
 import { handleExport } from "./export.js";
@@ -48,7 +48,7 @@ export async function handleAdmin(request, env, url, owner) {
     return handleConnections(request, env, url, owner);
   }
   if (request.method === "GET" && url.pathname === "/_admin") {
-    return html(devicesPage(pageData(env, { ...(await devicesData(env.DB, owner)), me: await headerMe(env.DB, owner) })));
+    return html(devicesPage(pageData(env, { ...(await devicesData(env.DB, owner)), pushKey: await pushKey(env), me: await headerMe(env.DB, owner) })));
   }
   // Where a new site's setup ends, after its permissions (views/pages.js afterPasskey).
   if (request.method === "GET" && url.pathname === "/_admin/setup/done") return html(setupDonePage());
@@ -67,6 +67,13 @@ export async function handleAdmin(request, env, url, owner) {
         .bind(fp).run();
     }
     return Response.redirect(`${url.origin}/`, 303);
+  }
+  // "Friends can see" on Memories: which of the Facebook download's Posts and Photos friends' sites are shown (share.js).
+  if (request.method === "POST" && url.pathname === "/_admin/friends-see") {
+    const form = await request.formData().catch(() => new FormData());
+    const chosen = ["posts", "photos"].filter((s) => form.getAll("friends").includes(s));
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('friends_see', ?)").bind(JSON.stringify(chosen)).run();
+    return Response.redirect(`${url.origin}/memories`, 303);
   }
   // What the owner sent elsewhere (sentchecks.js): stop sending a delete again; clear "signed as you".
   if (url.pathname === "/_admin/sent/stop" || url.pathname === "/_admin/notices/dismiss") return handleSentAdmin(request, env, url);

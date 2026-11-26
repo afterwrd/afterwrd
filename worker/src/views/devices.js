@@ -1,4 +1,5 @@
-// Your devices (admin.js): the owner's passkeys, adding a device with a one-hour link, and signing out everywhere.
+// Your devices (admin.js): the owner's passkeys, adding a device with a one-hour link, signing out everywhere, and
+// notifications: turning them on for this device, and the devices that have them.
 import { nonce } from "../nonce.js";
 import { escape } from "../util.js";
 import { asset, favicon, integrity, ownerHeader } from "./nav.js";
@@ -21,7 +22,29 @@ export function identityChange(pending) {
   return (parts.join(", and ") || "your identity will change") + (pending.byRecovery ? " (asked with your recovery code)" : "");
 }
 
-export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = [], me = null, identity = null, thisCredential = null }) {
+/**
+ * Notifications on this device (push.js; public/static/notifications.js does the asking): only for invitations,
+ * changes to events the owner hasn't said no to, and mentions. Without scripts it only says it's checking.
+ */
+function notificationsSwitch(pushKey) {
+  return `<section class="card notify" id="notify" data-key="${escape(pushKey ?? "")}">
+  <h3>This device</h3>
+  <p id="notify-status">Checking this device…</p>
+  <div class="row">
+    <button class="chip primary" data-do="on" hidden>Turn on notifications</button>
+    <button class="chip" data-do="off" hidden>Turn them off</button>
+  </div>
+  <label id="notify-preview" hidden><input type="checkbox"> Show what it's about on the lock screen (otherwise just who it's from)</label>
+  <label id="notify-mentions" hidden><input type="checkbox"> Mentions too (otherwise only events)</label>
+  <p class="meta" id="notify-android" hidden>If they only turn up when you unlock your phone, Android is saving battery: set
+  Chrome's battery use to <strong>Unrestricted</strong> (Settings → Apps → Chrome → Battery). afterwrd's notifications
+  come through Chrome.</p>
+  <p class="error" id="notify-error" role="alert"></p>
+</section>
+<script src="${asset("/static/notifications.js")}" integrity="${integrity("/static/notifications.js")}" type="module"></script>`;
+}
+
+export function devicesPage({ owner, passkeys, openLinks, sessions, notifying = [], me = null, identity = null, thisCredential = null, pushKey = null }) {
   const signs = (id) => Boolean(identity?.signing.includes(id));
   const thisSigns = signs(thisCredential);
   const pending = identity?.pending ?? null;
@@ -105,11 +128,13 @@ ${pending ? `<section class="card" id="identity-change"><strong>Waiting until ${
     <input type="text" id="recovery-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX" aria-label="Recovery code">
     <button class="chip" data-recovery="${pending ? "cancel" : "devices"}">${pending ? "Cancel the change" : "Use my recovery code"}</button></form>
 </details>`}
-<h2>Notifications about events and mentions</h2>
-<p class="meta">The phones and computers that tell you when a friend invites you to an event, one you haven't said no
-to changes, or someone mentions you (unless that device has mentions turned off). Turn one on in
-<a href="/events#notify">Events</a>, on that device. Removing the passkey it was signed in
-with, or signing out there, turns it off too.</p>
+<h2 id="notifications">Notifications</h2>
+<p class="meta">Only when a friend invites you to an event, an event you haven't said no to changes or is called off,
+or someone mentions you (or writes @here in a group you're in): never for other posts, comments or anything else.
+Each phone or computer is turned on by itself, here, on that device.</p>
+${notificationsSwitch(pushKey)}
+<h3>Devices they're on for</h3>
+<p class="meta">Removing the passkey a device was signed in with, or signing out there, turns them off too.</p>
 ${notifying.length ? `<ul class="devices" id="notifying">
   ${notifying.map((d) => `<li class="card"><span><strong>${escape(d.name)}</strong><span class="meta"> · on since ${day(d.created_at)}${d.preview ? ", showing events on the lock screen" : ", showing only who they're from"}${d.last_ok_at ? `, last sent ${day(d.last_ok_at)}` : ""}</span></span>
     <form method="post" action="/_admin/notifications/${Number(d.id)}/forget" data-confirm="Turn off notifications on this device?" data-confirm-ok="Turn off"><button class="chip danger">Turn off</button></form></li>`).join("")}

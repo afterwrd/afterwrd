@@ -285,7 +285,7 @@ export function friendItemPhotoPage(ctx, { item, index, back, thread, list, prob
   <section class="stage">
     <img src="${m.src}" style="background-image: url('${m.thumbSrc}')" alt=""${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
     <a class="close" id="close" href="${back}" title="Back (Esc)" aria-label="Back to the post">✕</a>
-    <span class="counter">${index} / ${item.photos.length}</span>
+    ${item.photos.length > 1 && html`<span class="counter">${index} / ${item.photos.length}</span>`}
     ${index > 1 && html`<a class="nav prev" id="prev" href="${base}/${index - 1}${stay}" title="Previous (←)" aria-label="Previous"></a>`}
     ${index < item.photos.length && html`<a class="nav next" id="next" href="${base}/${index + 1}${stay}" title="Next (→)" aria-label="Next"></a>`}
   </section>
@@ -447,7 +447,7 @@ export function signedGroupPhoto(ctx, { membership: g, group: info, item, index,
   <section class="stage">
     <img src="${m.src}" style="background-image: url('${m.thumbSrc}')" alt=""${m.width && html` width="${Number(m.width)}" height="${Number(m.height)}"`}>
     <a class="close" id="close" href="${back}" title="Back (Esc)" aria-label="Back to the post">✕</a>
-    <span class="counter">${index} / ${item.photos.length}</span>
+    ${item.photos.length > 1 && html`<span class="counter">${index} / ${item.photos.length}</span>`}
     ${index > 1 && html`<a class="nav prev" id="prev" href="${base}/${index - 1}${stay}" title="Previous (←)" aria-label="Previous"></a>`}
     ${index < item.photos.length && html`<a class="nav next" id="next" href="${base}/${index + 1}${stay}" title="Next (→)" aria-label="Next"></a>`}
   </section>

@@ -220,7 +220,7 @@ if (stage === "before") {
 
   // A signed group now, for everyone in it.
   await bob.goto(`${B}/groups/${saved[B].group}`);
-  check("Bob's page for it is a signed group's, not one from before", !(await bob.$eval("main", (m) => m.textContent)).includes("from before signing")
+  check("Bob's page for it is a signed group's, not one from before", !(await bob.$eval("main", (m) => m.textContent)).includes("not on afterwrd 2 yet")
     && Boolean(await bob.$("#composer")));
   await bob.type("#composer textarea", "Back in Book club");
   await Promise.all([bob.waitForNavigation({ timeout: 60_000 }), bob.click("#composer button.post")]);

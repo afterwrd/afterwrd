@@ -70,6 +70,7 @@ import m0055 from "../migrations/0055_mutes.sql";
 import m0056 from "../migrations/0056_reports.sql";
 import m0057 from "../migrations/0057_group_safety.sql";
 import m0058 from "../migrations/0058_asking_through.sql";
+import m0059 from "../migrations/0059_friends_see.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -132,6 +133,7 @@ const MIGRATIONS = [
   ["0056_reports.sql", m0056],
   ["0057_group_safety.sql", m0057],
   ["0058_asking_through.sql", m0058],
+  ["0059_friends_see.sql", m0059],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

@@ -166,7 +166,8 @@ check("the group publishes its identity, with Ann's beside it", published.chain?
   && JSON.stringify(published.owner) === sql(stateA, "SELECT chain FROM own_identity")[0].chain);
 check("…once: it can't be signed again", (await signGroup(ann, annGroup)).status === 409);
 await ann.goto(`${A}/groups/${annGroup}/members`);
-check("the group's page names it and its site", (await ann.$eval("h1", (h) => h.textContent)) === "Book club" && (await text(ann)).includes("Your group, at localhost:8790"));
+check("the group's page names it, and whose it is, without its site's address", (await ann.$eval("h1", (h) => h.textContent)) === "Book club"
+  && (await text(ann)).includes("Your group") && !(await ann.$eval("main", (m) => m.textContent)).includes("localhost:8790"));
 await ann.click("#make");
 await ann.waitForSelector("#link:not([hidden])");
 const link = await ann.$eval("#link-url", (i) => i.value);

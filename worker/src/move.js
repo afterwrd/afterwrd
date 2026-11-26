@@ -49,7 +49,7 @@ const CHECK_ONLY = ["identities"];
 const tablesOf = (about) => (about?.person ? [...MOVED, ...SIGNED, ...CHECK_ONLY] : MOVED);
 const ALL = [...MOVED, ...SIGNED, ...CHECK_ONLY];
 // Only the owner's choices move from settings; the rest of it is the site's own keys, which the download hasn't got.
-const SETTINGS = ["sections", "profile_hash", "cover_hash"];
+const SETTINGS = ["sections", "friends_see", "profile_hash", "cover_hash"];
 // A site that has anything in these isn't new: moving would mix two sites together, and its rows would be replaced.
 const IN_USE = [...MOVED.filter((t) => t !== "settings"), "connections", "groups", "items", "lists", "sent"];
 // Checked again in the same transaction as the move itself, so nothing made in the meantime (in another tab) is lost.
@@ -256,6 +256,7 @@ const RULES = {
 /** The settings that moved must hold what afterwrd would put there. */
 function settingOk({ key, value }) {
   if (key === "sections") return Array.isArray(parsed(value)) && parsed(value).every((s) => SECTIONS.includes(s));
+  if (key === "friends_see") return Array.isArray(parsed(value)) && parsed(value).every((s) => s === "posts" || s === "photos");
   return HASH_RE.test(value);
 }
 
@@ -269,7 +270,7 @@ async function finish(env, url, about) {
   // Every photo, video and thumbnail the rows name must be here first, or posts would show holes.
   const { results: files } = await db.prepare(`SELECT hash FROM media_move WHERE hash IS NOT NULL
     UNION SELECT thumb_hash FROM media_move WHERE thumb_hash IS NOT NULL`).all();
-  const wanted = [...new Set([...files.map((f) => f.hash), ...settings.filter((s) => s.key !== "sections").map((s) => s.value)])];
+  const wanted = [...new Set([...files.map((f) => f.hash), ...settings.filter((s) => s.key.endsWith("_hash")).map((s) => s.value)])];
   const stored = new Set((await Promise.all([..."0123456789abcdef"].map((shard) => {
     const mine = wanted.filter((h) => h[0] === shard);
     return mine.length ? mediaStore(env, shard).has(mine) : [];
@@ -313,6 +314,9 @@ async function finish(env, url, about) {
       db.prepare("UPDATE comments SET mentions = replace(mentions, json_quote(?1), json_quote(?2)) WHERE instr(mentions, json_quote(?1)) > 0")
         .bind(from, url.origin),
       db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('moved_from', ?)").bind(from),
+      // A download from before friends' choice was its own (migrations/0059): friends see what was published, as there.
+      db.prepare(`INSERT OR IGNORE INTO settings (key, value) SELECT 'friends_see', (SELECT json_group_array(j.value) FROM settings s,
+        json_each(s.value) j WHERE s.key = 'sections' AND j.value IN ('posts', 'photos')) WHERE EXISTS (SELECT 1 FROM settings WHERE key = 'sections')`),
     ]);
   } catch (error) {
     await ready(env, url, about); // something was made here meanwhile: say so

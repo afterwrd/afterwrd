@@ -104,10 +104,21 @@ export async function ownerActor(env, site, name) {
   return { type: "Person", id: actorId(site), name, icon: await pick(pictures.profile), image: await pick(pictures.cover) };
 }
 
-async function chosen(db) {
-  const row = await db.prepare("SELECT value FROM settings WHERE key = 'sections'").first();
-  return row ? JSON.parse(row.value) : [];
+/**
+ * What friends may see of the Facebook download: "posts", "photos", both or neither, as the owner chose (on Memories, or
+ * when importing; migrations/0059), and only of what's published here at all.
+ * @param {D1Database} db @returns {Promise<string[]>}
+ */
+export async function friendsSee(db) {
+  const [published, chosen] = await db.batch([
+    db.prepare("SELECT value FROM settings WHERE key = 'sections'"),
+    db.prepare("SELECT value FROM settings WHERE key = 'friends_see'"),
+  ]);
+  const list = (rows) => { try { const v = JSON.parse(String(rows.results[0]?.value ?? "[]")); return Array.isArray(v) ? v : []; } catch { return []; } };
+  const here = list(published);
+  return list(chosen).filter((s) => (s === "posts" || s === "photos") && here.includes(s));
 }
+const chosen = friendsSee;
 
 /** A photo or video for a friend's site (`friend`: their connection's id), or with a `long` link for any of them. */
 async function media(env, site, m, { long = false, friend = null } = {}) {
@@ -171,7 +182,7 @@ export async function sharePost(env, site, key, name, peer) {
   return { ...(await notes(env, site, [post], peer))[0], attributedTo: await ownerActor(env, site, name) };
 }
 
-/** The albums the friend may see: all of them if Photos is published, otherwise just those made on afterwrd. */
+/** The albums the friend may see: all of them if friends may see Photos, otherwise just those made on afterwrd. */
 async function setKeys(db) {
   const imported = (await chosen(db)).includes("photos");
   const { results } = await db.prepare(`SELECT id FROM albums ${imported ? "" : "WHERE source = 'afterwrd'"}`).all();

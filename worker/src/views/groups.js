@@ -19,11 +19,14 @@ export const groupBase = (g) => `/groups/${g.id}`;
 const runs = (g) => g.role === "owner" || g.role === "admin";
 const ROLE_NAMES = { owner: "Owner", admin: "Admin" };
 
-/** Where a group lives and who runs it, in a few words; and whether it's closed, or from before signing. */
+/**
+ * Whose group it is, in a few words; and whether it's closed, or not on afterwrd 2 yet. Not its site's address: Help
+ * says each group is a site of its own, and joining one shows where it is.
+ */
 function groupWhere(g) {
   const shut = closedGroup(g);
-  const where = g.role === "owner" ? html`Your group, at ${host(g.origin)}` : html`${g.host_name}'s group, at ${host(g.origin)}`;
-  return html`${where}${!g.identity ? " · from before signing" : shut ? ` · closed${shut.goes > Date.now() / 1000 ? `, goes ${fmtDate(shut.goes)}` : ""}` : ""}`;
+  const where = g.role === "owner" ? "Your group" : html`${g.host_name}'s group`;
+  return html`${where}${!g.identity ? " · not on afterwrd 2 yet" : shut ? ` · closed${shut.goes > Date.now() / 1000 ? `, goes ${fmtDate(shut.goes)}` : ""}` : ""}`;
 }
 
 /** The owner's groups, starting one, and joining one with an invite link. */
@@ -50,10 +53,6 @@ export function groupsIndexPage(ctx, { groups, unfinished = [], connected = fals
     });
   }
 </script>
-<p class="meta">Each group is its own small site, kept by whoever started it alongside their own. Its members read it
-from their own sites, and post and comment there. You're told about comments on posts you wrote or commented on; for
-anything else, open the group. What's coming up in your groups is on <a href="/events">Events</a>, with your friends'
-events and your own.</p>
 ${groups.length ? html`<ul class="group-list">
   ${groups.map((g) => html`<li><a class="card" href="${groupBase(g)}">
     <span class="icon-tile" aria-hidden="true">${raw(icon("groups"))}</span>

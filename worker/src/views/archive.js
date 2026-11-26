@@ -259,7 +259,7 @@ export function photoPage(ctx, { m, setKey, setTitle, prev, next, index, total, 
            style="background-image: url('${thumbUrl(m)}')">`}
 
     <a class="close" id="close" href="${back}" title="Back to ${setTitle} (Esc)" aria-label="Back to ${from ? "the post" : "album"}">✕</a>
-    <span class="counter">${index} / ${total}</span>
+    ${total > 1 && html`<span class="counter">${index} / ${total}</span>`}
     ${prev && html`<a class="nav prev" id="prev" href="/photos/${prev.id}${stay}" title="Previous (←)" aria-label="Previous"></a>`}
     ${next && html`<a class="nav next" id="next" href="/photos/${next.id}${stay}" title="Next (→)" aria-label="Next"></a>`}
   </section>

@@ -16,6 +16,10 @@ import { handleMove } from "./move.js";
 import { HASH_RE, mediaStore } from "./media.js";
 import { html, json, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
+import { friendsSee } from "./share.js";
+
+// Of the Facebook download, what friends' sites can be shown (share.js), if the owner says so.
+const FRIENDS_CAN_SEE = ["posts", "photos"];
 
 // D1 limits statements to 100 KB of UTF-8; a JavaScript character is at most 3 bytes of it.
 const STATEMENT_CHARS = 30_000;
@@ -25,7 +29,9 @@ const SHARDS = [..."0123456789abcdef"];
 export async function handleImport(request, env, url, owner) {
   const path = url.pathname.slice("/_admin/import".length);
   if (path === "/move" || path.startsWith("/move/")) return handleMove(request, env, url, owner);
-  if (request.method === "GET" && path === "") return html(importPage(pageData(env, { owner: owner.name, me: await headerMe(env.DB, owner) })));
+  if (request.method === "GET" && path === "") {
+    return html(importPage(pageData(env, { owner: owner.name, friendsSee: await friendsSee(env.DB), me: await headerMe(env.DB, owner) })));
+  }
 
   const file = /^\/files\/([0-9a-f]{64})$/.exec(path);
   if (request.method === "PUT" && file) return storeFile(request, env, file[1]);
@@ -135,10 +141,12 @@ async function storeFile(request, env, hash) {
   }));
 }
 
-async function finish(env, { sections }) {
+async function finish(env, { sections, friends = [] }) {
   if (!Array.isArray(sections) || !sections.length || !sections.every((s) => SECTIONS.includes(s))) {
     throw new Error("Bad sections.");
   }
+  // What friends may see (share.js friendsSee): of Posts and Photos, only what's published.
+  const friendsSee = Array.isArray(friends) ? FRIENDS_CAN_SEE.filter((s) => friends.includes(s) && sections.includes(s)) : [];
   const db = env.DB;
   // How far each merged table's uploaded ids move: above every id it has used, so a Facebook row never takes an
   // afterwrd row's id, or one a deleted row had.
@@ -177,6 +185,7 @@ async function finish(env, { sections }) {
     ...statements.map((s) => db.prepare(s)),
     ...unlinked.map((s) => db.prepare(s)),
     db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', ?)").bind(JSON.stringify(sections)),
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('friends_see', ?)").bind(JSON.stringify(friendsSee)),
     // Imported again: Home stops asking for it (sitecopy.js, when the archive was too big to move).
     db.prepare("DELETE FROM settings WHERE key = 'archive_dropped'"),
   ]);

@@ -65,7 +65,7 @@ function friendsStatus(unreachable, unmoved, away) {
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting = 0, onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "" }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting = 0, onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "", pushKey = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -165,6 +165,14 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting
         <a class="chip primary" href="/app" data-install-how>Show me how</a>
         <button class="chip" data-install-later>Not now</button></span>
     </div>
+    ${pushKey && html`<div class="notice notify-offer" id="notify" data-key="${pushKey}" data-offer hidden>
+      <span><strong>Get a notification when a friend invites you to an event, or someone mentions you?</strong> Nothing
+        else: never for other posts or comments.</span>
+      <span class="row actions-row"><button class="chip primary" data-do="on">Turn on</button>
+        <button class="chip" data-do="later">Not now</button></span>
+      <span class="notify-said" role="status"></span>
+    </div>
+    <script src="${asset("/static/notifications.js")}" integrity="${integrity("/static/notifications.js")}" type="module"></script>`}
     ${checkRequests.map((r) => html`<div class="notice check-request" data-region="">
       <span><strong>${r.name}</strong> asks you to check their afterwrd site. Make a link, and send it to them by message.</span>
       <span class="row actions-row"><button class="chip primary" data-check-request="${r.id}">Make a check link</button>
@@ -245,14 +253,23 @@ ${helpBody({ version: pkg.version })}
 </div>`);
 }
 
-export function memoriesPage(ctx, { onThisDay }) {
+export function memoriesPage(ctx, { onThisDay, friendsSee = [] }) {
   const available = MEMORIES.filter(([s]) => ctx.chosen.includes(s));
+  // Of what's published, what friends' sites may be shown (share.js friendsSee): Posts and Photos, each on or off.
+  const shareable = [["posts", "Your Facebook posts"], ["photos", "Your Facebook photos and albums"]].filter(([s]) => ctx.chosen.includes(s));
   return page(ctx, "Memories", html`
 <h1>Memories</h1>
 <p class="meta">From your Facebook download.</p>
 ${available.length ? html`<ul class="memory-tiles">
   ${available.map(([s, label, about]) => html`<li><a href="/${s}">${raw(icon(s))}<strong>${label}</strong><span class="meta">${about}</span></a></li>`)}
 </ul>` : html`<p class="empty">Nothing from Facebook has been published here.</p>`}
+${shareable.length > 0 && html`<form class="card friends-see" id="friends-see" method="post" action="/_admin/friends-see" data-stay data-said="Saved.">
+  <h2>Friends can see</h2>
+  ${shareable.map(([s, label]) => html`<label><input type="checkbox" name="friends" value="${s}"${friendsSee.includes(s) && raw(" checked")}> ${label}</label>`)}
+  <p class="meta">All of them, from their own sites. Facebook's privacy settings didn't come across, so a post you kept to
+  yourself there would show too. Your comments, likes and friends list are never shown to friends.</p>
+  <p><button class="chip primary">Save</button></p>
+</form>`}
 ${onThisDayCard(ctx, onThisDay)}`);
 }
 
@@ -266,7 +283,7 @@ export function appPage(ctx) {
 <h1>Add afterwrd to your home screen</h1>
 <p>Then it opens like an app: full screen, in one tap, and you don't need to remember your site's address. It can
 also tell you when a friend invites you to an event, or one you're going to changes: turn that on in
-<a href="/events#notify">Events</a>.</p>
+<a href="/_admin#notifications">Your devices</a>.</p>
 <p><button class="chip primary" data-install hidden>Install afterwrd</button></p>
 <section class="card" data-device="iphone-elsewhere" hidden>
   <h2>iPhone or iPad: open this page in Safari first</h2>

@@ -3,6 +3,7 @@
 // events. Of the Facebook download, only the sections chosen when importing are served.
 import { blockedAmong, blockedList } from "../blocks.js";
 import { friendshipsOf } from "../connect.js";
+import { friendsSee } from "../share.js";
 import { isMuted, mutedList } from "../mutes.js";
 import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
 import { dateOver, namesFor, ownHost } from "../items.js";
@@ -865,14 +866,17 @@ async function home(ctx, params) {
   ctx.work?.waitUntil?.(checkSentReports(ctx.env, ctx.url.origin).catch(() => {}));
   // Comments friends have raised about the owner's posts, waiting to be looked at: one quiet line (reports.js).
   const reportsWaiting = await openCount(db);
+  // For Home's one offer of notifications, in the home-screen app (public/static/notifications.js).
+  const notifyKey = await pushKey(ctx.env).catch(() => null);
   // Self-hosted (hosting.js), there are no checks either way, nor automatic updates: nothing about them on Home.
   if (selfHosted(ctx.env)) {
     return { own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows, reportsWaiting,
-      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver, statusAway };
+      newDevices: newDevicesFound, newNotifying, securityFix, recovered, asking, introductions, archiveDropped, identityChange, moved, friendsMoving, sent, bringOver, statusAway, pushKey: notifyKey };
   }
   return {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows, reportsWaiting,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver, statusAway,
+    pushKey: notifyKey,
     // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
     checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or
@@ -886,7 +890,7 @@ async function home(ctx, params) {
 }
 
 async function memories(ctx) {
-  return { onThisDay: await onThisDay(ctx, 6) };
+  return { onThisDay: await onThisDay(ctx, 6), friendsSee: await friendsSee(ctx.db) };
 }
 
 /** Posts from this day of the year (in London) in earlier years, newest first, with their photos. */
@@ -1181,7 +1185,6 @@ async function eventsIndex(ctx, params) {
     friends: await all(db, `SELECT id, name FROM connections WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL AND identity IS NOT NULL
       ORDER BY name COLLATE NOCASE`),
     // The site's public signing key for notifications, which a device is given when it turns them on (push.js).
-    pushKey: await pushKey(ctx.env),
   };
 }
 

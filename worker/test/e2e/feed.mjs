@@ -47,10 +47,11 @@ async function owner(site, name) {
   await setUpSigning(page);
   return page;
 }
-async function importZip(page, site, zip = zipPath, sections = ["posts", "photos"]) {
+async function importZip(page, site, zip = zipPath, sections = ["posts", "photos"], friends = sections) {
   await page.goto(`${site}/_admin/import`);
   await (await page.$("#zips")).uploadFile(zip);
   await page.$$eval("input[name=section]", (boxes, want) => boxes.forEach((b) => { b.checked = want.includes(b.value); }), sections);
+  await page.$$eval("input[name=friends]", (boxes, want) => boxes.forEach((b) => { b.checked = want.includes(b.value); }), friends);
   await page.click("#go");
   await page.waitForFunction(() => /Done\./.test(document.getElementById("status").textContent)
     || document.getElementById("error").textContent, { timeout: 180_000, polling: 500 });
@@ -594,14 +595,21 @@ check("…so an old link still leads to its post", new URL(bob.url()).pathname =
 // Back as it was, for what follows.
 sql(stateB, `UPDATE own_identity SET created_at = ${bobSetUp}`);
 sql(stateB, `UPDATE settings SET value = '${bobCrossover}' WHERE key = 'crossover_at'`);
-// With his Facebook photos not shared, a photo from them can't be seen, even by fingerprint.
-const sharedBefore = sql(stateB, "SELECT value FROM settings WHERE key = 'sections'")[0]?.value ?? "[]";
-sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '[]')`);
+// "Friends can see" on Memories: with his Facebook posts and photos switched off, Ann's site gets none of them, not even a
+// photo by its fingerprint; switched on again, it does.
+await bob.goto(`${B}/memories`);
+const friendsSee = () => bob.$$eval("#friends-see input[name=friends]", (l) => l.filter((i) => i.checked).map((i) => i.value).join());
+check("Memories says what friends can see: his Facebook posts and photos, as he ticked when importing", await friendsSee() === "posts,photos", await friendsSee());
 const unshared = sql(stateB, `SELECT hash FROM media WHERE hash IS NOT NULL AND source = 'facebook'
   AND hash NOT IN (SELECT hash FROM media WHERE source = 'afterwrd' AND hash IS NOT NULL) LIMIT 1`)[0]?.hash;
-check("a photo Bob hasn't shared can't be fetched by its fingerprint", Boolean(unshared) && (await fromAnn(`/_p/photos/${unshared}`)).status === 404, unshared);
-sql(stateB, `INSERT OR REPLACE INTO settings (key, value) VALUES ('sections', '${sharedBefore.replace(/'/g, "''")}')`);
-check("…but can once his photos are shared", (await fromAnn(`/_p/photos/${unshared}`)).status === 200);
+await bob.$$eval("#friends-see input[name=friends]", (l) => l.forEach((i) => { i.checked = false; }));
+await Promise.all([bob.waitForNavigation(), bob.click("#friends-see button")]);
+const facebookNotes = async () => (await (await fromAnn("/_p/posts")).json()).totalItems ?? -1;
+check("switched off, a Facebook photo can't be fetched by its fingerprint", Boolean(unshared) && (await fromAnn(`/_p/photos/${unshared}`)).status === 404, unshared);
+check("…nor his Facebook posts", await facebookNotes() === 0 && (await friendsSee()) === "" && (await bob.$eval("main", (m) => m.textContent)).includes("Saved."));
+await bob.$$eval("#friends-see input[name=friends]", (l) => l.forEach((i) => { i.checked = true; }));
+await Promise.all([bob.waitForNavigation(), bob.click("#friends-see button")]);
+check("…and switched on again, they can", (await fromAnn(`/_p/photos/${unshared}`)).status === 200 && await facebookNotes() > 0);
 check("a used Connect link is refused", (await (await browser.createBrowserContext()).newPage().then(async (p) => (await p.goto(link)).status())) === 404);
 
 // Bob, connected to Ann, can't pass himself off as Ann to a third site.
@@ -620,6 +628,10 @@ check("…nor can anyone ask without signing", unsigned.status === 400 && sql(st
 
 // Ann reads Bob's posts and photos without leaving her own site.
 const bobId = sql(stateA, "SELECT id FROM connections")[0].id;
+await ann.goto(`${A}/friend/${bobId}/posts`);
+check("a friend's page keeps their site's address in the menu by their name, not under it",
+  (await ann.$eval(".feed-head details.more .menu-info", (m) => m.textContent).catch(() => "")).includes("Their site: localhost:8788")
+  && !(await ann.$eval("main", (m) => m.textContent)).includes("a friend you're connected with"));
 
 // Ann asks Bob to check her site: his Home shows it, and one tap makes the link to send her (checks.js).
 const annIdOnB = sql(stateB, `SELECT id FROM connections WHERE origin = '${A}'`)[0].id;

@@ -155,12 +155,29 @@ function signedBySite(push, siteKey) {
 const toPhone = () => pushes.filter((p) => p.path === "/push/phone");
 
 await ann.goto(`${A}/events`);
+check("Events doesn't have the notifications switch any more", !(await ann.$("#notify")));
+await ann.goto(`${A}/_admin`);
 const siteKey = await ann.$eval("#notify", (s) => s.dataset.key);
-check("Events has a section for notifications on this device", /^[\w-]{87}$/.test(siteKey) && (await mainText(ann)).includes("Notifications on this device"));
+check("Your devices has it, for this device", /^[\w-]{87}$/.test(siteKey) && (await ann.$eval("#notify h3", (h) => h.textContent)) === "This device");
 check("…which says they're only about events and mentions", (await mainText(ann)).includes("never for other posts, comments or anything else")
   && (await mainText(ann)).includes("someone mentions you"));
 check("…and it checks this device", await waitFor(async () => /off for this device|can't show/.test(await ann.$eval("#notify-status", (p) => p.textContent))),
   await ann.$eval("#notify-status", (p) => p.textContent));
+// Home's one offer, in the home-screen app only (notifications.js offerOnce): not in the browser; in the app, until
+// "Not now" on that device.
+await ann.goto(`${A}/`);
+await sleep(1500);
+check("in the browser, Home doesn't offer notifications", await ann.$eval("#notify", (b) => b.hidden).catch(() => true));
+const inApp = await ann.browserContext().newPage();
+await inApp.evaluateOnNewDocument(() => Object.defineProperty(navigator, "standalone", { value: true }));
+await inApp.goto(`${A}/`);
+const offered = await waitFor(() => inApp.$eval("#notify[data-offer]", (b) => !b.hidden).catch(() => false));
+check("opened from the home screen, Home offers them once", offered && (await inApp.$eval("#notify", (b) => b.textContent)).includes("invites you to an event"));
+await inApp.click('#notify [data-do="later"]');
+await inApp.reload();
+await sleep(1500);
+check("…and \"Not now\" puts it away on that device for good", await inApp.$eval("#notify", (b) => b.hidden).catch(() => true));
+await inApp.close();
 const device = { endpoint: `${PUSH}/push/phone`, keys: { p256dh: phone.getPublicKey().toString("base64url"), auth: phoneAuth.toString("base64url") } };
 let r = await call(ann, "/_push/devices", { ...device, endpoint: "https://evil.example/push", name: "Phone" });
 check("a device at something that isn't a push service is refused", r.status === 400, r.text);
@@ -175,7 +192,7 @@ check("…but another site can't add one", crossPush.status === 403, String(cros
 check("…nor can a friend's site", (await fromSam("/_push/devices", { ...device, endpoint: `${PUSH}/push/evil` })).status === 401);
 await ann.goto(`${A}/_admin`);
 check("Your devices lists it, without its address", (await ann.$eval("#notifying", (l) => l.textContent)).includes("Android (home screen)")
-  && (await mainText(ann)).includes("Notifications about events and mentions") && !(await ann.content()).includes(device.endpoint));
+  && (await mainText(ann)).includes("Devices they're on for") && !(await ann.content()).includes(device.endpoint));
 await ann.goto(`${A}/`);
 check("Home says a new device has notifications on", (await mainText(ann)).includes("Notifications about events and mentions were turned on for a new device (Android (home screen))"));
 await Promise.all([settled(ann), ann.$eval('form[action="/_admin/notifications/seen"] button', (b) => b.click())]);
@@ -325,7 +342,7 @@ await sam.reload();
 check("\"Not now\" puts it away for good on this device", await sam.$eval("#install-note", (n) => n.hidden));
 await sam.goto(`${B}/app`);
 check("the Add to home screen page says how, for Android and iPhone", /Install app/.test(await mainText(sam)) && /Add to Home Screen/.test(await mainText(sam)));
-check("…and points to Events for notifications", (await sam.$('main a[href="/events#notify"]')) !== null && !(await mainText(sam)).includes("message"));
+check("…and points to Your devices for notifications", (await sam.$('main a[href="/_admin#notifications"]')) !== null && !(await mainText(sam)).includes("message"));
 // What shows depends on the device: only its own steps, with the rest a tap away.
 const visible = (page) => page.$eval("main", (m) => m.innerText);
 let steps = await visible(sam);

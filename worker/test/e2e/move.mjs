@@ -47,6 +47,7 @@ async function importZip(page, site) {
   await page.goto(`${site}/_admin/import`);
   await (await page.$("#zips")).uploadFile(zipPath);
   await page.$$eval("input[name=section]", (boxes) => boxes.forEach((b) => { b.checked = ["posts", "photos"].includes(b.value); }));
+  await page.$$eval("input[name=friends]", (boxes) => boxes.forEach((b) => { b.checked = true; }));
   await page.click("#go");
   await page.waitForFunction(() => /Done\./.test(document.getElementById("status").textContent)
     || document.getElementById("error").textContent, { timeout: 180_000, polling: 500 });

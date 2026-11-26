@@ -108,7 +108,7 @@ check("a self-hosted site and one on Cloudflare can be friends", n(stateA, "conn
 const annOnBob = await bob.evaluate(() => fetch("/friend").then((r) => r.text()));
 const annId = Number(/href="\/friend\/(\d+)\/posts"/.exec(annOnBob)?.[1]);
 await bob.goto(`${B}/friend/${annId}/posts`);
-check("Bob's site says Ann's is self-hosted and can't be checked", (await bob.$eval(".meta", (m) => m.textContent).catch(() => "")).includes("self-hosted, can't be checked"));
+check("Bob's site says Ann's is self-hosted and can't be checked, in the menu by her name", (await bob.$eval(".feed-head details.more .menu-info", (m) => m.textContent).catch(() => "")).includes("self-hosted, can't be checked"));
 await bob.goto(`${B}/_admin/update`);
 check("Bob's Update page doesn't offer to ask Ann for a check", !(await bob.$(`button[data-ask="${annId}"]`)));
 const asked = await post(bob, "/_admin/checks/ask", { connection: annId });

@@ -19,7 +19,7 @@ export const POST_COLUMNS = "id, key, source, created_at, kind, title, text, tar
 
 export const TABLES = {
   // The rest of settings are the site's own keys.
-  settings: { columns: "key, value", where: "key IN ('sections', 'profile_hash', 'cover_hash')" },
+  settings: { columns: "key, value", where: "key IN ('sections', 'friends_see', 'profile_hash', 'cover_hash')" },
   // Posts, photos and albums, made on afterwrd and from the Facebook download (`source` says which).
   albums: { columns: "*" },
   // Not changed_at: when friends' sites were last told about a change (migrations/0025), which means nothing elsewhere.

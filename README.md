@@ -16,7 +16,7 @@ gives you; it never signs in to Facebook or fetches anything from it.
 do when something isn't working (it's on <https://afterwrd.app/help/> too).
 
 **The app, and events on your phone.** Add afterwrd to your phone's home screen and it opens like an app. Turn on
-notifications on the *Events* page and it can tell you, even with the phone locked, when a friend invites you to an
+notifications in *Your devices* (behind your picture) and it can tell you, even with the phone locked, when a friend invites you to an
 event, or one you haven't said no to changes or is called off, when someone mentions you (each phone can turn
 mentions off), and when someone thinks something on your post, or in a group you help run, might be illegal (a few a
 day at most). Nothing else: never posts, comments or likes. (There are no messages between friends: WhatsApp, Signal and the like do that better.) The
@@ -225,7 +225,9 @@ Once it's installed, nothing needs the terminal:
   without leaving your own site: press their name. Comments you make are stored on your friend's site, with a
   copy kept on yours. Their photos and videos load straight from their site through links it makes for your site alone,
   which last a day or two and stop working if either of you removes the other. Friends see what you've
-  written on afterwrd, plus any parts of your Facebook download you chose to publish when importing. Either of you can press *Remove friend* on the other's page,
+  written on afterwrd, and your Facebook posts and photos only if you've said so (*Friends can see*, when importing or
+  on *Memories*: off for a new import, as Facebook's own privacy settings don't come across; comments, likes and the
+  friends list are never shown). Either of you can press *Remove friend* on the other's page,
   which ends it all at once. If a friend's site stops answering for a day, Home stops mentioning it and *Friends*
   says so instead, so you can remove them. Two sites in the same Cloudflare account can connect too.
 - **Groups.** Each group is its own small site: *Groups → Start a group* makes it a Worker of its own, with its own

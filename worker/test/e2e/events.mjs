@@ -372,7 +372,7 @@ await ann.goto(`${A}/events?month=${picnicMonth}&day=${picnicDay}`);
 check("choosing a day lists that day's events", (await text(ann, ".cal-list")).includes("Picnic") && !(await text(ann, ".cal-list")).includes("Hill walk")
   && Boolean(await ann.$(".cal-day.chosen")));
 await ann.goto(`${A}/groups`);
-check("Groups points to Events instead of its own Coming up", !(await ann.$(".coming-up")) && Boolean(await ann.$('main a[href="/events"]')));
+check("Groups has no Coming up of its own (Events has it, in the menu)", !(await ann.$(".coming-up")) && Boolean(await ann.$('header.site nav.main a[href="/events"]')));
 // Week and list views.
 await ann.goto(`${A}/events?view=week&week=${picnicDay}`);
 check("the Week view shows that week, day by day", (await text(ann, ".cal-week")).includes("Picnic")

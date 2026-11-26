@@ -167,7 +167,7 @@ if (mode === "behind") {
   const unstarted = await post("/_cloudflare/finish", { code: "the-code", state: "x" });
   check("a code arriving without a connection started here is refused", /expired\. Start again/.test(unstarted.error ?? ""), unstarted.error);
   const settings = await page.evaluate(() => fetch("/_admin/export/rows?table=settings").then((r) => r.json()));
-  check("Download everything only takes the published sections from settings", settings.rows.every((r) => r.key === "sections"),
+  check("Download everything only takes the published sections from settings", settings.rows.every((r) => ["sections", "friends_see"].includes(r.key)),
     settings.rows.map((r) => r.key).join());
 }
 await page.screenshot({ path: `${OUT}/update-${mode}.png`, fullPage: true });

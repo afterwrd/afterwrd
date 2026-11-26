@@ -338,11 +338,12 @@ ${c.cover && html`<section class="profile"><div class="cover"><img src="${c.cove
 <div class="feed-head">
   <h1 class="friend-name">${c.avatar && html`<img class="avatar-small" src="${c.avatar.thumbSrc}" alt="">`}${c.name}</h1>
   <span class="head-tools">${c.facebook && has(ctx, "friends") && html`<a class="chip" href="/people/${c.facebook.id}">${raw(icon("friends"))}<span>Your Facebook history together</span></a>`}
-  ${moreMenu([c.identity && muteButton({ person: c.identity, name: c.name, back: ctx.url.pathname, muted: c.muted }), removeFriend(c, "delete")], "More")}</span>
+  ${moreMenu([
+    // Where their site is, out of the way (it was a line under their name): first in the menu, not something to press.
+    html`<p class="menu-info">Their site: ${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}</p>`,
+    c.identity && muteButton({ person: c.identity, name: c.name, back: ctx.url.pathname, muted: c.muted }), removeFriend(c, "delete")], "More")}</span>
 </div>
 ${c.muted && html`<p class="notice muted">You've muted ${c.name}: their posts don't show on Home, only here. They haven't been told.</p>`}
-<div class="meta">${host(c.origin)}${c.selfHosted && html` <span class="self-hosted" title="It runs on their own server, so friends' sites can't check it">(self-hosted, can't be checked)</span>`}
-  · a friend you're connected with. Only you see this here.</div>
 ${c.renamed && html`<form class="notice" method="post" action="/_admin/connections/${c.id}/rename">
   <input type="hidden" name="name" value="${c.renamed}">
   ${c.name} now calls themselves ${c.renamed}. You'll go on seeing ${c.name} everywhere until you choose otherwise.
@@ -410,7 +411,7 @@ export function friendPhotoPage(ctx, { friend: c, photo: m }) {
   <section class="stage">
     ${remoteMedia(m, { full: true })}
     <a class="close" id="close" href="${set.back}" title="Back (Esc)" aria-label="${m.inPost ? "Back to the post" : "Back to album"}">✕</a>
-    ${set.total && html`<span class="counter">${set.index} / ${set.total}</span>`}
+    ${set.total > 1 && html`<span class="counter">${set.index} / ${set.total}</span>`}
     ${set.prev && html`<a class="nav prev" id="prev" href="${friendBase(c)}/photos/${set.prev}${set.stay}" title="Previous (←)" aria-label="Previous"></a>`}
     ${set.next && html`<a class="nav next" id="next" href="${friendBase(c)}/photos/${set.next}${set.stay}" title="Next (→)" aria-label="Next"></a>`}
   </section>

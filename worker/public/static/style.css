@@ -967,3 +967,13 @@ html[data-onward] main { visibility: hidden; }
 .comment .bubble details.more.who summary:hover, .comment .bubble details.more.who[open] summary { background: none; text-decoration: underline; }
 .comment .bubble details.more.who .menu { left: 0; right: auto; min-width: 13rem; }
 .comment .bubble details.more.who .menu p { margin: 0; padding: 0.5rem 0.75rem; }
+/* A line of information at the top of a small menu (a friend's site, on their page): not something to press. */
+details.more .menu .menu-info { margin: 0 0 0.2rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--muted);
+  font-size: 0.85rem; overflow-wrap: anywhere; }
+/* "Friends can see" on Memories: what of the Facebook download friends' sites are shown. */
+.friends-see h2 { margin: 0 0 0.4rem; font-size: 1rem; }
+.friends-see label { display: flex; gap: 0.5rem; align-items: center; padding: 0.3rem 0; cursor: pointer; }
+.friends-see p { margin: 0.4rem 0 0; }
+/* Home's one offer of notifications, in the home-screen app (public/static/notifications.js). */
+.notify-offer .notify-said:empty { display: none; }
+.notify-offer .notify-said { display: block; margin-top: 0.4rem; }

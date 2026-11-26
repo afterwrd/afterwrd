@@ -14,7 +14,7 @@ const SECTION_CHOICES = [
 ];
 const DEFAULT_ON = new Set(["posts", "photos"]);
 
-export function importPage({ owner, me = null }) {
+export function importPage({ owner, me = null, friendsSee = [] }) {
   return `<!doctype html>
 <html lang="en-GB">
 <head>
@@ -72,6 +72,17 @@ what you imported before (never what you've posted on afterwrd); the old version
     ${label}<span>${about}</span></label>`).join("")}
   <p class="meta">Comments, likes and friends are mostly about other people, so they're off by default. Whatever
   you leave unticked stays on this computer.</p>
+</fieldset>
+
+<fieldset>
+  <legend>Friends can see</legend>
+  <label><input type="checkbox" name="friends" value="posts" ${friendsSee.includes("posts") ? "checked" : ""}>
+    Your Facebook posts<span>From their own sites, all of them, if you publish Posts.</span></label>
+  <label><input type="checkbox" name="friends" value="photos" ${friendsSee.includes("photos") ? "checked" : ""}>
+    Your Facebook photos and albums<span>If you publish Photos &amp; videos.</span></label>
+  <p class="meta">Facebook's privacy settings don't come across: a post you kept to yourself on Facebook would show to
+  every friend here too. Leave these unticked to keep it all to yourself; you can change them any time on Memories.
+  Your comments, likes and friends list are never shown to friends.</p>
 </fieldset>
 
 <fieldset>

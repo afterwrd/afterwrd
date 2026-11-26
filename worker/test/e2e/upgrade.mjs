@@ -113,6 +113,8 @@ if (stage === "before") {
   // when it was first written. Their own old rows go. Then (10c) the comments on them, all the owner's own here: signed
   // by this browser too, dated as first written, and in their posts' lists in the order they were written.
   const sql = (q) => siteSql(STATE, q);
+  check("friends still see what was published from Facebook, now a choice of its own (migration 0059)",
+    sql("SELECT value FROM settings WHERE key = 'friends_see'")[0]?.value === '["posts","photos"]', JSON.stringify(sql("SELECT value FROM settings WHERE key = 'friends_see'")));
   const written = Object.fromEntries(sql("SELECT key, created_at FROM posts WHERE source = 'afterwrd'").map((r) => [r.key, r.created_at]));
   const oldKey = was.address.split("/").pop();
   await page.goto(`${BASE}/`);

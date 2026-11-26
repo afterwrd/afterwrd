@@ -128,7 +128,9 @@ async function run() {
   }
 
   step("Publishing");
-  const { removed } = await api("/finish", { sections });
+  // What friends can see (Posts, Photos), as ticked: nothing unless the owner says so.
+  const friends = [.../** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll("input[name=friends]:checked"))].map((i) => i.value);
+  const { removed } = await api("/finish", { sections, friends });
   if (removed) note(`Deleted ${removed.toLocaleString("en-GB")} files the archive no longer uses.`);
   document.querySelector("#steps li:last-child").classList.add("done");
   progress(1, 1, "");

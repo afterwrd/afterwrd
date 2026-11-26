@@ -129,6 +129,7 @@ await say(owner, ".info", "Great photo");
 // the post, and the post isn't shown again underneath.
 check("a comment from a one-photo post's photo shows there, as the newest", (await bubbles(owner, ".info")).at(-1)?.text === "Great photo");
 check("…with no copy of the post underneath", !(await owner.$(".info article.card")) && !(await owner.$(".info .from-post")));
+check("…and no \"1 / 1\" on the photo", !(await owner.$(".stage .counter")));
 await owner.goto(BASE + postHref);
 check("…and it's on the post, where everyone reads", (await bubbles(owner, "article.card")).some((c) => c.text === "Great photo"));
 // A photo posted here is an item of its own (afterwrd 2): its comments are its, not its file's, so the imported copy

@@ -160,7 +160,9 @@ async function bringGroupComments(key, c) {
         if (brought) location.reload();
         else if (waiting) say(waiting === 1 ? "An event from before afterwrd 2 comes over once everyone it's for has moved to afterwrd 2 too."
           : `${waiting} events from before afterwrd 2 come over once everyone they're for has moved to afterwrd 2 too.`);
-        else if (line) line.hidden = true; // nothing for this browser now (a friend's site that hasn't moved yet is asked again later)
+        // Nothing for this browser now (a friend's site that hasn't moved yet is asked again later): the whole notice
+        // goes, not just its words, or an empty box is left.
+        else if (line) /** @type {HTMLElement} */ (line.closest(".notice") ?? line).hidden = true;
         return;
       }
       say(`Bringing your posts from before afterwrd 2 over, signed on this device: ${left} to go…`);
