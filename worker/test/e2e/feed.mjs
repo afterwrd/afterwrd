@@ -728,6 +728,67 @@ check("a friend's photo link runs to the end of the next day", linkExp % 86400 =
 check("…in the shape every site accepts", /\?exp=\d{1,12}&sig=[\w-]{43}$/.test(signed), signed);
 check("…and one stretched past that is refused", (await fetch(signed.replace(/exp=\d+/, `exp=${linkExp + 86400}`))).status === 403);
 check("files without a link still need signing in", (await fetch(signed.split("?")[0], { redirect: "manual" })).status === 302);
+// Bob's site sends a post again only when it changes, so a copy's photo links run out: a post about to be seen (Home,
+// his page, the post) whose links have run out or soon will is asked for again, with new ones (friendcopies.js
+// refreshLinks). Not on every page if his site doesn't give them, and never moving back where Ann's site is up to.
+const copyOf = (id) => JSON.parse(String(sql(stateA, `SELECT content FROM copies WHERE id = '${id}'`)[0]?.content ?? "{}"));
+const linksOf = (id) => (copyOf(id).photos ?? []).flatMap((p) => [p.src, p.thumbSrc]);
+const firstExp = (id) => Math.min(...linksOf(id).map((l) => Number(/exp=(\d+)/.exec(l)?.[1])));
+const runOut = (id, exp = secondsNow - 60) => {
+  const content = copyOf(id);
+  for (const p of content.photos) for (const k of ["src", "thumbSrc"]) p[k] = p[k].replace(/exp=\d+/, `exp=${exp}`);
+  sql(stateA, `UPDATE copies SET content = '${JSON.stringify(content).replaceAll("'", "''")}' WHERE id = '${id}'`);
+};
+const freshLinks = (id) => firstExp(id) - secondsNow > 86400 - 60;
+const homeImages = async () => { await ann.goto(`${A}/`); return ann.$$eval("main img", (l) => l.map((i) => i.getAttribute("src") ?? "")); };
+const upToBefore = Number(sql(stateA, `SELECT items_since FROM connections WHERE id = ${bobId}`)[0]?.items_since);
+check("Bob's photo post is kept on Ann's site with its photo links", linksOf(bobPostId).length >= 2 && freshLinks(bobPostId));
+runOut(bobPostId);
+let shown = await homeImages();
+check("its links run out: Home asks Bob's site for it again, with new ones", freshLinks(bobPostId), String(firstExp(bobPostId)));
+check("…and shows those, none run out", shown.includes(copyOf(bobPostId).photos[0].thumbSrc) && !shown.some((s) => s.includes(`exp=${secondsNow - 60}`)));
+check("…without moving back where Ann's site is up to with his posts",
+  Number(sql(stateA, `SELECT items_since FROM connections WHERE id = ${bobId}`)[0]?.items_since) >= upToBefore);
+runOut(bobPostId, secondsNow + 3600);
+await homeImages();
+check("links running out within the hour, asked again a few minutes later: not yet", firstExp(bobPostId) === secondsNow + 3600);
+sql(stateA, "UPDATE connections SET links_asked_at = NULL");
+await homeImages();
+check("…and once a while has gone by, asked again before they run out", freshLinks(bobPostId));
+runOut(bobPostId);
+sql(stateA, "UPDATE connections SET links_asked_at = NULL");
+await ann.goto(`${A}/friend/${bobId}/posts`);
+check("Bob's page asks for posts with run-out links again too", freshLinks(bobPostId));
+runOut(bobPostId);
+sql(stateA, "UPDATE connections SET links_asked_at = NULL");
+await ann.goto(`${A}/friend/${bobId}/posts/${bobPostId}`);
+check("…and so does the post itself", freshLinks(bobPostId)
+  && (await ann.$$eval("main img", (l) => l.map((i) => i.getAttribute("src") ?? ""))).every((s) => !s.includes(`exp=${secondsNow - 60}`)));
+// His profile picture: its link lasts about a week and came with his page, so Home asks his site for it on its own,
+// in the background, once it has less than a day left or there's none (friendcopies.js renewPictures).
+sql(stateB, "INSERT OR REPLACE INTO settings (key, value) SELECT 'profile_hash', hash FROM media WHERE hash IS NOT NULL ORDER BY id LIMIT 1");
+const bobPicture = () => sql(stateA, `SELECT avatar_url, avatar_exp FROM connections WHERE id = ${bobId}`)[0] ?? {};
+const pictureFresh = () => Number(bobPicture().avatar_exp) - Math.floor(Date.now() / 1000) > 5 * 86400;
+sql(stateA, `UPDATE connections SET avatar_url = NULL, avatar_exp = NULL, avatar_asked_at = NULL WHERE id = ${bobId}`);
+await ann.goto(`${A}/`);
+check("Home asks Bob's site for his profile picture, in the background", await waitFor(async () => pictureFresh()), JSON.stringify(bobPicture()));
+shown = await homeImages();
+check("…and shows it beside his posts", Boolean(bobPicture().avatar_url) && shown.includes(String(bobPicture().avatar_url)));
+// A link from days ago, an hour from running out (as signed: its address and expiry agree).
+const soon = Math.floor(Date.now() / 1000) + 3600;
+sql(stateA, `UPDATE connections SET avatar_url = '${String(bobPicture().avatar_url).replace(/exp=\d+/, `exp=${soon}`)}', avatar_exp = ${soon} WHERE id = ${bobId}`);
+await ann.goto(`${A}/`);
+await new Promise((r) => setTimeout(r, 2000));
+check("…not asked again the same day, even with an hour left", Number(bobPicture().avatar_exp) === soon);
+sql(stateA, `UPDATE connections SET avatar_asked_at = NULL WHERE id = ${bobId}`);
+await ann.goto(`${A}/`);
+check("…and a day on, asked again before it runs out", await waitFor(async () => pictureFresh()), JSON.stringify(bobPicture()));
+// One that has run out (his site not asked yet today): his initial instead, not a broken picture.
+const ranOut = String(bobPicture().avatar_url);
+sql(stateA, `UPDATE connections SET avatar_exp = ${Math.floor(Date.now() / 1000) - 60}, avatar_asked_at = ${Math.floor(Date.now() / 1000)} WHERE id = ${bobId}`);
+shown = await homeImages();
+check("a friend's profile picture whose link has run out isn't shown", Boolean(ranOut) && !shown.includes(ranOut));
+sql(stateA, `UPDATE connections SET avatar_asked_at = NULL WHERE id = ${bobId}`);
 check("only Ann (the owner) can open friend pages", (await (await fetch(`${A}/friend/${bobId}/posts`, { redirect: "manual" })).status) === 302);
 
 // One Friends list: friends on afterwrd, linked (when Ann says so) to who they are in her Facebook download.

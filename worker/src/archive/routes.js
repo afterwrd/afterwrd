@@ -5,7 +5,7 @@ import { blockedAmong, blockedList } from "../blocks.js";
 import { friendshipsOf } from "../connect.js";
 import { friendsSee } from "../share.js";
 import { isMuted, mutedList } from "../mutes.js";
-import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, rememberPicture } from "../friendcopies.js";
+import { connectionById, friendEvents, friendItem, friendItems, friendThread, noteAnswer, pullFriends, pullItems, pullNew, refreshLinks, rememberPicture, renewPictures } from "../friendcopies.js";
 import { dateOver, namesFor, ownHost } from "../items.js";
 import { callFriend } from "../calls.js";
 import { broughtUntil, commentsToBring, leftToBring, windowOf } from "../before.js";
@@ -646,6 +646,8 @@ async function friendItemPost(ctx, params, connectionId, id) {
   let item = await friendItem(ctx.db, connection.id, id);
   if (!item) { await pullItems(ctx.env, ctx.url.origin, connection); item = await friendItem(ctx.db, connection.id, id); }
   if (!item) return null;
+  // Its photo links run out or soon will (friendcopies.js refreshLinks): asked for again, with new ones.
+  if (await refreshLinks(ctx.env, ctx.url.origin, [item], { work: ctx.work })) item = (await friendItem(ctx.db, connection.id, id)) ?? item;
   // Waiting for its comments from before afterwrd 2, as last heard (before.js): asked again, since they may be in now.
   if (item.list?.frozenUntil) {
     await pullItems(ctx.env, ctx.url.origin, connection).catch(() => null);
@@ -812,7 +814,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
-  const [own, friendOwn, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
+  const [own, friendKept, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
     friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows, sent, busy] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
@@ -850,6 +852,8 @@ async function home(ctx, params) {
     // The Cloudflare account busy (this site and its groups) on 3 days this week: said calmly (allowances.js).
     busyAccount(ctx.env).catch(() => null),
   ]);
+  // Friends' posts whose photo links run out or soon will, asked for again first (friendcopies.js refreshLinks).
+  const friendOwn = (await refreshLinks(ctx.env, ctx.url.origin, friendKept, { work: ctx.work })) ? await friendItems(db) : friendKept;
   const identityChange = identity?.pending ?? null;
   const moved = gone?.done ? gone : null;
   // Home's line about friends' sites (views/home.js friendsStatus), if the owner put it away as it is now.
@@ -865,6 +869,8 @@ async function home(ctx, params) {
     waiting: Number(r.moving_at) > now() }));
   // Friends' signed posts, asked for again after the page has gone (once an hour at most for each: friendcopies.js).
   ctx.work?.waitUntil?.(pullFriends(ctx.env, ctx.url.origin).catch(() => {}));
+  // …and their profile pictures, whose links run out in a week (friendcopies.js renewPictures).
+  ctx.work?.waitUntil?.(renewPictures(ctx.env, ctx.url.origin).catch(() => {}));
   // …and signed groups' (step 6c: groupcopies.js), likewise.
   ctx.work?.waitUntil?.(groups_.pullGroups(ctx.env, ctx.url.origin).catch(() => {}));
   // …and posts brought over from afterwrd 1 whose 30 days are up: their comments from before go in (before.js), then
@@ -1070,7 +1076,9 @@ async function friendPosts(ctx, params, id) {
     if (avatar) await rememberPicture(ctx.db, c, avatar)?.run();
     // Their signed posts, kept here (friendcopies.js), on the first page, asked for afresh first.
     if (pageNumber(params) === 1) await pullItems(ctx.env, ctx.url.origin, c).catch(() => null);
-    const items = pageNumber(params) === 1 ? await friendItems(ctx.db, { connection: c.id }) : [];
+    let items = pageNumber(params) === 1 ? await friendItems(ctx.db, { connection: c.id }) : [];
+    // Those whose photo links run out or soon will, asked for again (friendcopies.js refreshLinks).
+    if (await refreshLinks(ctx.env, ctx.url.origin, items, { work: ctx.work })) items = await friendItems(ctx.db, { connection: c.id });
     return { posts, paging, items };
   });
 }
@@ -1279,6 +1287,8 @@ async function groupItemPost(ctx, params, id, itemId, photo = null) {
     const info = await groups_.pullGroup(ctx.env, ctx.url.origin, g);
     let item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? (await groups_.fetchGroupItem(ctx.env, ctx.url.origin, g, itemId, info?.people));
     if (!item) throw new Error("That post isn't there any more.");
+    // Its photo links run out or soon will (groupcopies.js refreshGroupLinks): asked for again, with new ones.
+    if (await groups_.refreshGroupLinks(ctx.env, ctx.url.origin, g, [item])) item = (await groups_.groupCopy(ctx.env, g, itemId, info?.people)) ?? item;
     if (photo !== null) {
       const at = Number(photo);
       if (!(at >= 1 && at <= item.photos.length) || !item.photos[at - 1]?.item) throw new Error("That photo isn't there any more.");

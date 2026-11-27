@@ -75,6 +75,7 @@ import m0060 from "../migrations/0060_copy_allowance.sql";
 import m0061 from "../migrations/0061_photo_tries.sql";
 import m0062 from "../migrations/0062_lists_deleted.sql";
 import m0063 from "../migrations/0063_introduce_log.sql";
+import m0064 from "../migrations/0064_links_asked.sql";
 import pkg from "../package.json";
 
 // Every file in migrations/, in order. A new migration needs adding here too.
@@ -142,6 +143,7 @@ const MIGRATIONS = [
   ["0061_photo_tries.sql", m0061],
   ["0062_lists_deleted.sql", m0062],
   ["0063_introduce_log.sql", m0063],
+  ["0064_links_asked.sql", m0064],
 ];
 const VERSION = pkg.version;
 /** The database this code makes: its newest migration. Two sites have the same tables exactly when this matches. */

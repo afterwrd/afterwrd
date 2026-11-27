@@ -18,7 +18,7 @@ import { mutedAmong } from "./mutes.js";
 import { busyUntil, callFriend } from "./calls.js";
 import { ANSWERS, cleanEvent, eventChanged, eventWhen, finishedAt, hasDate, onDate } from "./calendar.js";
 import { dateTally } from "./itemkinds.js";
-import { cleanTally, commentCount, copyFromRow, keepCopy, lookupsWith } from "./friendcopies.js";
+import { cleanTally, commentCount, copyFromRow, keepCopy, LINKS_AGAIN, linksRunningOut, lookupsWith } from "./friendcopies.js";
 import { identityState, learnPeopleIn, signersIn } from "./identities.js";
 import { frozenUntil, ID_RE, keepKnown, namesFor, ownHost } from "./items.js";
 import { checkHead, checkList, dateList, headOf } from "./lists.js";
@@ -68,9 +68,11 @@ const ask = async (env, from, group, path, body = null) => callFriend(env, from,
  * checked: on the group's site, signed by whoever wrote it). Returns the group as the member sees it (its name, members
  * and their role: membership.js parseGroup), or throws as callFriend does.
  */
-export async function pullGroup(env, from, group) {
+export async function pullGroup(env, from, group, { since: again = null } = {}) {
   const db = env.DB;
-  let since = Number(group.items_since ?? 0);
+  // `since`: asked again from here (refreshGroupLinks), as friendcopies.js pullItems is; where this site is up to never moves back.
+  const upTo = Number(group.items_since ?? 0);
+  let since = again ?? upTo;
   let info = null;
   for (let page = 0; page < PAGES; page++) {
     let data;
@@ -87,7 +89,7 @@ export async function pullGroup(env, from, group) {
     // A group the owner here started: how busy its site has been, for Home's busy-account warning (allowances.js).
     if (page === 0 && data.usage) await keepGroupUsage(db, Number(group.id), data.usage).catch(() => null);
     // Anything signed as the owner here that this site never sent (sentchecks.js).
-    if (page === 0) await compareMine(env, { group }, data.mine).catch(() => null);
+    if (page === 0 && again === null) await compareMine(env, { group }, data.mine).catch(() => null);
     const sentKeys = await fillGaps(env, from, group, data);
     await learnPeople(env, data.people, data, group);
     await keepSentKeys(env, sentKeys);
@@ -104,11 +106,11 @@ export async function pullGroup(env, from, group) {
       }
     }
     since = Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
-    statements.push(db.prepare("UPDATE groups SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(since, now(), group.id));
+    statements.push(db.prepare("UPDATE groups SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(Math.max(since, upTo), now(), group.id));
     await db.batch(statements);
     if (!data.more) break;
   }
-  group.items_since = since;
+  group.items_since = Math.max(since, upTo);
   await trim(env, group);
   // Mention receipts the group's site couldn't be asked about before (receipts.js): it's answering now.
   await checkGroupReceipts(env, from, group).catch(() => null);
@@ -270,10 +272,15 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
   let error = null;
   if (!before) {
     try { info = await pullGroup(env, from, group); } catch (e) { error = e; }
-    const { results } = await db.prepare("SELECT * FROM copies WHERE group_id = ? ORDER BY created_at DESC LIMIT ?").bind(group.id, PAGE_SIZE + 1).all();
-    const rows = results.slice(0, PAGE_SIZE);
-    const posts = await groupCopiesShown(env, group, rows, info?.people);
-    return { info, posts, error, next: results.length > PAGE_SIZE ? Number(rows.at(-1).created_at) : null };
+    const read = async () => {
+      const { results } = await db.prepare("SELECT * FROM copies WHERE group_id = ? ORDER BY created_at DESC LIMIT ?").bind(group.id, PAGE_SIZE + 1).all();
+      const rows = results.slice(0, PAGE_SIZE);
+      return { posts: await groupCopiesShown(env, group, rows, info?.people), next: results.length > PAGE_SIZE ? Number(rows.at(-1).created_at) : null };
+    };
+    let shown = await read();
+    // Posts whose photo links run out or soon will, asked for again (refreshGroupLinks).
+    if (!error && await refreshGroupLinks(env, from, group, shown.posts)) shown = await read();
+    return { info, posts: shown.posts, error, next: shown.next };
   }
   let data;
   try { data = await ask(env, from, group, `/_p/items?before=${Number(before)}`); } catch (e) { return { info: null, posts: [], error: e, next: null }; }
@@ -293,6 +300,25 @@ export async function groupPosts(env, from, group, { before = null } = {}) {
   }
   const posts = await groupCopiesShown(env, group, rows, info?.people);
   return { info, posts, error: null, next: data.more === true && rows.length ? Number(rows.at(-1).created_at) : null };
+}
+
+/**
+ * A group's site sends a post again only when it changes, and the photo links in it last until the end of the next day
+ * (UTC), as a friend's do (friendcopies.js refreshLinks): posts about to be shown (`copies`) whose links have run out or
+ * soon will are asked for again, from just before the oldest change among them, with new links. Not again for
+ * LINKS_AGAIN if that didn't work. Returns whether the group's site answered.
+ */
+export async function refreshGroupLinks(env, from, group, copies) {
+  const at = now();
+  const stale = copies.filter((c) => linksRunningOut(c, at));
+  if (!stale.length) return false;
+  const marked = await env.DB.prepare("UPDATE groups SET links_asked_at = ?1 WHERE id = ?2 AND COALESCE(links_asked_at, 0) <= ?1 - ?3 RETURNING id")
+    .bind(at, group.id, LINKS_AGAIN).first();
+  if (!marked) return false;
+  try {
+    await pullGroup(env, from, group, { since: Math.max(0, Math.min(...stale.map((c) => c.changed_at)) - 1) });
+    return true;
+  } catch { return false; }
 }
 
 /** One of a group's posts kept here, as pages show it; null if it isn't. */

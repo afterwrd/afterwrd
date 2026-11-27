@@ -15,7 +15,7 @@ import { checkReceipts, queueReceipts } from "./receipts.js";
 import { compareMine, compareThread, keepSent, TAKEN_SQL, willRetry } from "./sentchecks.js";
 import { checkRecord } from "./records.js";
 import { checkHead, checkList } from "./lists.js";
-import { signedLink } from "./friends.js";
+import { friendPicture, signedLink } from "./friends.js";
 import { DATE_RE, parseRecord, writtenAt } from "../public/static/records.js";
 import { fromB64url } from "../public/static/signed.js";
 import { frozenUntil, itemFromList, namesFor, ownHost, shownMentions } from "./items.js";
@@ -108,7 +108,12 @@ export function noteAnswer(db, connection, error = null, at = now()) {
  */
 const AGAIN_SECONDS = 600; // a friend's first refusal, asked again this soon
 
-export async function pullItems(env, from, connection) {
+/**
+ * @param {any} env @param {string} from @param {Row<"connections">} connection
+ * @param {{ since?: number }} [options] `since`: asked again from here (refreshLinks), not from where this site is up
+ *   to; where it's up to stays as it was, or moves on, never back.
+ */
+export async function pullItems(env, from, connection, { since: again = null } = {}) {
   const failed = async (error) => {
     // Moved here in the last fortnight: a friend's site that doesn't know this address yet hasn't followed yet (it
     // waits its own 7 days from when it heard: calls.js). That's "not yet", not having been removed.
@@ -150,7 +155,8 @@ export async function pullItems(env, from, connection) {
   // A friend who has moved (their identity says so, in effect here): asked at their new address from now on.
   const known = await env.DB.prepare("SELECT json_array_length(chain) AS n, moving_to, moving_at FROM identities WHERE person = ?").bind(person).first();
   if (known?.moving_to && known.moving_to !== connection.origin && Number(known.moving_at) <= now()) await followMove(env, connection, person);
-  let since = Number(connection.items_since ?? 0);
+  const upTo = Number(connection.items_since ?? 0);
+  let since = again ?? upTo;
   let count = 0;
   for (let page = 0; page < PAGES; page++) {
     let data;
@@ -170,7 +176,8 @@ export async function pullItems(env, from, connection) {
       await fetchIdentity(env, String(connection.origin)).catch(() => null);
     }
     // Anything signed as the owner here that this site never sent (sentchecks.js).
-    if (page === 0) await compareMine(env, { connection }, data.mine).catch(() => null);
+    // (Not when asked again for photo links: what was compared before would be compared again.)
+    if (page === 0 && again === null) await compareMine(env, { connection }, data.mine).catch(() => null);
     // Their signed name now (a rename shows on Friends: names.js).
     if (page === 0 && data.profile) {
       const state = await identityState(env, person);
@@ -202,7 +209,7 @@ export async function pullItems(env, from, connection) {
     }
     since = cut ? (Number.isSafeInteger(last) ? Math.max(since, Math.min(last - 1, Number(data.until) || last)) : since)
       : Number.isSafeInteger(data.until) ? Math.max(since, data.until) : since;
-    statements.push(env.DB.prepare("UPDATE connections SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(since, now(), connection.id));
+    statements.push(env.DB.prepare("UPDATE connections SET items_since = ?, items_checked_at = ? WHERE id = ?").bind(Math.max(since, upTo), now(), connection.id));
     await env.DB.batch(statements);
     if (!data.more || (cut && !items.length)) break;
   }
@@ -402,26 +409,93 @@ export async function pullNew(env, from, ms = 4000) {
   await Promise.race([Promise.all(results.map((c) => pullItems(env, from, c).catch(() => null))), new Promise((r) => setTimeout(r, ms))]);
 }
 
+// A friend's photo links last until the end of the next day (UTC: share.js signedFile), and their site only sends a
+// post again when it changes. So a post about to be seen (refreshLinks) whose links run out within LINKS_MARGIN is asked
+// for again, with any changed after it, and comes with new links. Only posts about to be seen: the cost follows what the
+// owner looks at, not how much friends have posted. A friend's site that couldn't be asked isn't again for LINKS_AGAIN.
+const LINKS_MARGIN = 6 * 3600;
+export const LINKS_AGAIN = 15 * 60;
+
+/** When the first of a copy's photo links stops working (their own `exp`: friends.js signedLink), or null. */
+export function linksUntil(photos) {
+  const exps = (Array.isArray(photos) ? photos : []).flatMap((p) => [p?.src, p?.thumbSrc])
+    .map((link) => Number(/[?&]exp=(\d+)/.exec(typeof link === "string" ? link : "")?.[1])).filter((exp) => Number.isSafeInteger(exp) && exp > 0);
+  return exps.length ? Math.min(...exps) : null;
+}
+
+/** Whether a copy about to be shown (as copyFromRow makes it) has photo links that have run out or soon will. */
+export function linksRunningOut(copy, at = now()) {
+  const until = linksUntil(copy?.photos);
+  return until !== null && until <= at + LINKS_MARGIN && Number.isSafeInteger(copy.changed_at);
+}
+
+/**
+ * Asks friends' sites again for these copies (as copyFromRow makes them: about to be shown) whose photo links have run
+ * out or soon will, each from just before the oldest change among them. Waits at most `ms` (the rest carry on in the
+ * background, through `work`). Returns whether any friend's site answered, so the page reads its copies again.
+ * @param {any} env @param {string} from
+ * @param {{ connection: { id: number }, photos: any[], changed_at: number }[]} copies
+ * @param {{ ms?: number, work?: { waitUntil?: (p: Promise<any>) => void } | null }} [options]
+ */
+export async function refreshLinks(env, from, copies, { ms = 3000, work = null } = {}) {
+  const at = now();
+  const oldest = new Map();
+  for (const c of copies) {
+    if (!c.connection || !linksRunningOut(c, at)) continue;
+    oldest.set(c.connection.id, Math.min(oldest.get(c.connection.id) ?? Infinity, c.changed_at));
+  }
+  if (!oldest.size || (await ownMove(env.DB, from))?.done) return false;
+  // Marked as asked first, in one statement, so pages opened meanwhile don't ask too.
+  const { results } = await env.DB.prepare(`UPDATE connections SET links_asked_at = ?1 WHERE id IN (SELECT value FROM json_each(?2))
+    AND approved_at IS NOT NULL AND connected_at IS NOT NULL AND COALESCE(links_asked_at, 0) <= ?1 - ?3 RETURNING *`)
+    .bind(at, JSON.stringify([...oldest.keys()]), LINKS_AGAIN).all();
+  if (!results.length) return false;
+  const asked = Promise.all(results.map((c) => pullItems(env, from, c, { since: Math.max(0, oldest.get(Number(c.id)) - 1) })
+    .then((n) => n !== null, () => false))).then((answers) => answers.some(Boolean));
+  work?.waitUntil?.(asked);
+  return Promise.race([asked, new Promise((r) => setTimeout(() => r(false), ms))]);
+}
+
+// A friend's profile picture link lasts six to seven days (share.js signedFile `long`) and came only with their page.
+// So Home asks for it on its own (friendPicture) once it has less than PICTURE_AHEAD left, or there's none yet: a few
+// friends at a time, in the background, each not again for PICTURE_AGAIN (a friend with no picture, once a day).
+const PICTURE_AHEAD = 86400;
+const PICTURE_AGAIN = 86400;
+const PICTURES_AT_ONCE = 5;
+
+/** Asks a few friends' sites for their profile picture, with a new link, if theirs here runs out within a day. */
+export async function renewPictures(env, from) {
+  if ((await ownMove(env.DB, from))?.done) return;
+  const at = now();
+  const { results } = await env.DB.prepare(`UPDATE connections SET avatar_asked_at = ?1 WHERE id IN (SELECT id FROM connections
+    WHERE approved_at IS NOT NULL AND connected_at IS NOT NULL AND COALESCE(avatar_exp, 0) < ?1 + ?2 AND COALESCE(avatar_asked_at, 0) <= ?1 - ?3
+    ORDER BY COALESCE(avatar_asked_at, 0) LIMIT ?4) RETURNING *`).bind(at, PICTURE_AHEAD, PICTURE_AGAIN, PICTURES_AT_ONCE).all();
+  await Promise.all(results.map(async (c) => {
+    const { avatar } = await friendPicture(env, from, c).catch(() => ({ avatar: null }));
+    if (avatar) await rememberPicture(env.DB, c, avatar)?.run();
+  }));
+}
+
 /** Friends' posts kept here, newest first, with who they're from. */
 export async function friendItems(db, { limit = 100, connection = null } = {}) {
   // All friends' (Home): not those the owner's muted (mutes.js). One friend's (their page): everything.
-  const { results } = await db.prepare(`SELECT c.*, k.name, k.origin, k.avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
+  const { results } = await db.prepare(`SELECT c.*, k.name, k.origin, CASE WHEN k.avatar_exp > ? THEN k.avatar_url END AS avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
     WHERE k.approved_at IS NOT NULL ${connection ? "AND c.connection_id = ?" : "AND c.author NOT IN (SELECT person FROM mutes)"}
     ORDER BY c.created_at DESC LIMIT ?`)
-    .bind(...(connection ? [connection, limit] : [limit])).all();
+    .bind(now(), ...(connection ? [connection, limit] : [limit])).all();
   return copiesShown(db, results);
 }
 
 /** Friends' events kept here (copies), as pages show them: for the calendar and invitations (Events). */
 export async function friendEvents(db) {
-  const { results } = await db.prepare(`SELECT c.*, k.name, k.origin, k.avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
-    WHERE k.approved_at IS NOT NULL AND json_extract(c.content, '$.type') = 'event' ORDER BY c.created_at DESC LIMIT 500`).all();
+  const { results } = await db.prepare(`SELECT c.*, k.name, k.origin, CASE WHEN k.avatar_exp > ? THEN k.avatar_url END AS avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
+    WHERE k.approved_at IS NOT NULL AND json_extract(c.content, '$.type') = 'event' ORDER BY c.created_at DESC LIMIT 500`).bind(now()).all();
   return copiesShown(db, results);
 }
 
 export async function friendItem(db, connection, id) {
-  const row = await db.prepare(`SELECT c.*, k.name, k.origin, k.avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
-    WHERE c.id = ? AND c.connection_id = ?`).bind(id, connection).first();
+  const row = await db.prepare(`SELECT c.*, k.name, k.origin, CASE WHEN k.avatar_exp > ? THEN k.avatar_url END AS avatar_url FROM copies c JOIN connections k ON k.id = c.connection_id
+    WHERE c.id = ? AND c.connection_id = ?`).bind(now(), id, connection).first();
   return row ? (await copiesShown(db, [row]))[0] : null;
 }
 
@@ -453,7 +527,7 @@ export function copyFromRow(r, { names = new Map(), me = null, known = null } = 
     event: content.event ? eventShown(content, tally, { viewer: me, names, me, version: content.version ?? null, invited: tally?.invited ?? null, known }) : null,
     author: String(r.author), text: content.text ?? "", photos: content.photos ?? [], mentions: Array.isArray(content.mentions) ? content.mentions : [],
     here: content.here === true, earlier: r.earlier ? JSON.parse(String(r.earlier)) : [],
-    edited_at: r.edited_at ? Number(r.edited_at) : null, comments: Number(r.comments), created_at: Number(r.created_at),
+    edited_at: r.edited_at ? Number(r.edited_at) : null, comments: Number(r.comments), created_at: Number(r.created_at), changed_at: Number(r.changed_at),
     checked: r.checked_n ? { n: Number(r.checked_n), head: String(r.checked_head) } : null };
 }
 

@@ -296,6 +296,26 @@ check("…and stays with the post going back a photo", (await bob.$eval(".counte
   && (await bob.$eval("#close", (a) => a.getAttribute("href"))) === groupInPost.close);
 await bob.goto(`${B}${groupInPost.prev.replace(/back=[^&]*/, `back=${encodeURIComponent("//evil.example/")}`)}`);
 check("…but never back to another site", (await bob.$eval("#close", (a) => a.getAttribute("href"))) === "/");
+// A group's site sends a post again only when it changes, and its photo links run out (the end of the next day, as a
+// friend's): the group's page, and a post opened, ask again for posts about to be shown whose links have run out or
+// soon will (groupcopies.js refreshGroupLinks).
+const groupCopyOf = (id) => JSON.parse(String(sql(stateB, `SELECT content FROM copies WHERE id = '${id}' AND group_id = ${bobGroup}`)[0]?.content ?? "{}"));
+const groupLinksExp = (id) => Math.min(...(groupCopyOf(id).photos ?? []).flatMap((p) => [p.src, p.thumbSrc]).map((l) => Number(/exp=(\d+)/.exec(l)?.[1])));
+const groupFresh = (id) => groupLinksExp(id) - Math.floor(Date.now() / 1000) > 86400 - 120;
+const groupRunOut = (id) => {
+  const content = groupCopyOf(id);
+  const past = Math.floor(Date.now() / 1000) - 60;
+  for (const p of content.photos) for (const k of ["src", "thumbSrc"]) p[k] = p[k].replace(/exp=\d+/, `exp=${past}`);
+  sql(stateB, `UPDATE copies SET content = '${JSON.stringify(content).replaceAll("'", "''")}' WHERE id = '${bobPost}' AND group_id = ${bobGroup}`);
+  sql(stateB, "UPDATE groups SET links_asked_at = NULL");
+};
+check("Bob's copy of his group post has its photo links", (groupCopyOf(bobPost).photos ?? []).length === 2 && groupFresh(bobPost), String(groupLinksExp(bobPost)));
+groupRunOut(bobPost);
+await bob.goto(`${B}/groups/${bobGroup}`);
+check("its links run out: the group's page asks the group's site again, with new ones", groupFresh(bobPost), String(groupLinksExp(bobPost)));
+groupRunOut(bobPost);
+await bob.goto(`${B}/groups/${bobGroup}/posts/${bobPost}`);
+check("…and so does the post opened", groupFresh(bobPost), String(groupLinksExp(bobPost)));
 
 // Changing words: only the writer, for 15 minutes, and until someone else comments (lists.js), each change signed.
 // `item` is the post or comment; `v` where its V is: "> header" for a post, ".under" for a comment.

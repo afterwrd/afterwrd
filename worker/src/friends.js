@@ -78,6 +78,15 @@ export async function friendPosts(env, from, connection, page) {
   };
 }
 
+/**
+ * Their profile picture (and cover) alone, with new links: the page of their Facebook posts their site gives last, past
+ * any download's end (friendcalls.js takes up to 10,000), so no posts come with it. Every afterwrd site answers it.
+ */
+export async function friendPicture(env, from, connection) {
+  const { avatar, cover } = parseActor((await call(env, from, connection, "/_p/posts?page=10000"))?.attributedTo, connection.origin);
+  return { avatar, cover };
+}
+
 /** One of their Facebook posts; null if their site says it isn't there (or isn't shown to this one). */
 export async function friendPost(env, from, connection, key) {
   let data;
