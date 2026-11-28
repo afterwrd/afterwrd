@@ -1,5 +1,4 @@
 // Home, Memories and Add to home screen. Views only draw: they read nothing and change nothing.
-import { nonce } from "../nonce.js";
 import { friendItemCard, itemCard } from "./items.js";
 import { identityChange as identityChangeWords } from "./devices.js";
 import { fmtDate, summary, thumbUrl } from "./format.js";
@@ -65,7 +64,7 @@ function friendsStatus(unreachable, unmoved, away) {
  * @param {any} ctx
  * @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data
  */
-export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting = 0, onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], checkRequests = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "", pushKey = null }) {
+export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting = 0, onThisDay, friends: all = [], newDevices = { devices: [], canConfirm: false }, newNotifying = [], securityFix = null, asking = [], introductions = [], auto = { on: false }, checkFailure = null, friendChecks = [], checkGrant = {}, recovered = null, lookAfter = null, archiveDropped = false, identityChange = null, moved = null, friendsMoving = [], sent = { waiting: [], forged: [] }, busy = null, bringOver = null, statusAway = "", pushKey = null }) {
   const stream = [
     ...own.map((item) => ({ at: item.created_at, card: itemCard(ctx, item) })),
     ...ownOld.map((p) => ({ at: p.created_at, card: postCard(ctx, p) })),
@@ -173,52 +172,10 @@ export function homePage(ctx, { own, friendOwn = [], ownOld = [], reportsWaiting
       <span class="notify-said" role="status"></span>
     </div>
     <script src="${asset("/static/notifications.js")}" integrity="${integrity("/static/notifications.js")}" type="module"></script>`}
-    ${checkRequests.map((r) => html`<div class="notice check-request" data-region="">
-      <span><strong>${r.name}</strong> asks you to check their afterwrd site. Make a link, and send it to them by message.</span>
-      <span class="row actions-row"><button class="chip primary" data-check-request="${r.id}">Make a check link</button>
-        <form method="post" action="/_admin/checks/requests/${r.id}/dismiss" class="inline" data-inplace="remove"><button class="chip">Not now</button></form></span>
-      <span class="check-share row actions-row" hidden><button class="chip primary" data-share>Send it to ${r.name}…</button>
-        <button class="chip" data-copy>Copy the link</button></span>
-      <span class="error" role="alert"></span>
-    </div>`)}
-    ${checkRequests.length > 0 && html`<script nonce="${nonce()}">
-      // A friend asked for a check: make the link here, then hand it to the phone's share sheet (or copy it).
-      document.addEventListener("click", async (e) => {
-        const card = e.target.closest(".check-request");
-        if (!card) return;
-        const make = e.target.closest("button[data-check-request]");
-        const error = card.querySelector(".error");
-        const send = () => navigator.share({ text: card.dataset.message }).catch(() => {});
-        if (make) {
-          make.disabled = true;
-          error.textContent = "";
-          try {
-            const res = await fetch("/_admin/checks/new", { method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ connection: Number(make.dataset.checkRequest) }) });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || "Something went wrong.");
-            card.dataset.message = data.message;
-            make.parentElement.hidden = true;
-            card.querySelector(".check-share").hidden = false;
-            card.querySelector("[data-share]").hidden = !navigator.share;
-            if (navigator.share) send();
-          } catch (err) {
-            error.textContent = err.message;
-            make.disabled = false;
-          }
-        }
-        if (e.target.closest("[data-share]")) send();
-        const copy = e.target.closest("[data-copy]");
-        if (copy) {
-          await navigator.clipboard.writeText(card.dataset.message);
-          copy.textContent = "Copied: paste it into a message";
-        }
-      });
-    </script>`}
     ${composer()}
     ${friendsStatus(unreachable, unmoved, statusAway)}
     ${waiting.map((c) => html`<p class="notice">Waiting for ${c.name} to approve you as a friend.</p>`)}
-    ${(bringOver?.posts > 0 || bringOver?.comments > 0 || bringOver?.groups > 0) && html`<p class="notice"><span id="bring-over">${bringOver.posts > 0
+    ${(bringOver?.posts > 0 || bringOver?.comments > 0 || bringOver?.groups > 0) && html`<p class="notice" hidden><span id="bring-over">${bringOver.posts > 0
       ? `Bringing your ${bringOver.posts === 1 ? "post" : `${bringOver.posts} posts`} from before afterwrd 2 over, signed on this device…`
       : bringOver.comments > 0 ? "Bringing the comments you wrote before afterwrd 2 over, signed on this device…"
       : "Bringing your groups from before afterwrd 2 over…"}</span>${(bringOver.posts > 0 || bringOver.comments > 0) && bringOver.until

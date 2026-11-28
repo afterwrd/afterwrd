@@ -3,8 +3,8 @@
 // change its code), so proving that gives nothing away that wasn't already theirs. Reading isn't enough: a friend's
 // check is given read access (checks.js), and a code someone was talked into allowing for that must never open this.
 //   GET  /_auth/recover            what happens, and a button
-//   GET  /_auth/recover/start      a fresh PKCE secret and state in a short cookie, then off to afterwrd.app's relay
-//                                  page, which asks Cloudflare for an hour's access to change Workers
+//   GET  /_auth/recover/start      a fresh PKCE secret and state in a short cookie, and the page before Cloudflare's,
+//                                  which asks for an hour's access to change Workers (cloudflare.js allowLink)
 //   GET  /_auth/recover/done#code=…&state=…  back from the relay: a tiny page posts the code to…
 //   POST /_auth/recover/finish {code, state}  swaps the code for the token; finds this site's own Worker in the
 //                                  account whose workers.dev name is this address's, serving the version answering
@@ -18,7 +18,7 @@ import { createDeviceLink, DEVICE_LINK_SECONDS } from "./admin.js";
 import { sign, verify } from "./auth.js";
 import { releaseLock, takeLock } from "./auto.js";
 import { cloudflareReader } from "./checks.js";
-import { CODE_RE, donePage, exchangeCode, readCookie, relayLink, testingHere, withCookie } from "./cloudflare.js";
+import { allowLink, allowPage, CODE_RE, donePage, exchangeCode, readCookie, testingHere, withCookie } from "./cloudflare.js";
 import { switchTo, useApiBase } from "./deploy.js";
 import { html, json, now, sha256 } from "./util.js";
 import { recoverPage } from "./views/pages.js";
@@ -38,16 +38,20 @@ export async function handleRecover(request, env, url, body, signedIn) {
   return null;
 }
 
+// What recovery asks Cloudflare for: an hour's access to change Workers, never read-only, as anyone can start it and the
+// proof has to be a change (above).
+const RECOVER_SCOPES = "workers-scripts.edit";
+
 // A link, not a form: the site's pages may only send forms to the site itself (index.js, form-action), and this goes
-// on to afterwrd.app. Only from this site's own page (or typed in), as cloudflare.js's start.
+// on to Cloudflare. Only from this site's own page (or typed in), as cloudflare.js's start.
 async function start(request, env, url) {
   const from = request.headers.get("Sec-Fetch-Site");
   if (from && from !== "same-origin" && from !== "none") return html(recoverPage(), 403);
-  const { verifier, state, relay } = await relayLink(`${url.origin}/_auth/recover/done`);
+  const { verifier, state, link } = await allowLink(`${url.origin}/_auth/recover/done`, RECOVER_SCOPES);
   // Lax, so the cookie comes along when the relay page sends the browser back here. Signed by this site, so finish
   // knows it started it before writing anything or taking the update lock (security review 2026-11 L15).
   const mac = await sign(env, `recover.${state}.${verifier}`);
-  return withCookie(Response.redirect(relay.toString(), 302),
+  return withCookie(html(allowPage("recover", link, url.host)),
     `${COOKIE}=${state}.${verifier}.${mac}; Path=/; Max-Age=${COOKIE_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
 }
 

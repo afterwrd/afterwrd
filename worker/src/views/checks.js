@@ -1,6 +1,6 @@
 // How a friend's check of a site is shown (checks.js does the checking): the result, everything from Cloudflare
 // escaped, and when the site was last checked.
-import { HOUR, recent, when } from "../checks.js";
+import { when } from "../checks.js";
 import { escape } from "../util.js";
 
 /** What a check found, as HTML (everything from Cloudflare escaped). `whose`: "yours" for the person checked, else "theirs". */
@@ -50,49 +50,9 @@ export function resultHtml(r, whose = "theirs", by = null) {
       else say(true, `Every version of ${your} site's code uploaded or made live${since} was a signed afterwrd release (${v.checked} ${v.checked === 1 ? "version" : "versions"}).`);
     }
     if (r.newer) lines.push(`<p class="meta">afterwrd ${escape(r.newer)} is out: worth updating.</p>`);
-    if (recent(r) && !r.automatic) {
-      lines.push(`<p class="check-bad">⏳ ${Your} site was installed or updated less than an hour before this check. Access given to an
-        installer or an update lasts an hour and can't be cut short, so ask for another check after <b>${escape(when(r.modified + HOUR))}</b>.</p>`);
-    }
-    const a = r.audit;
-    if (a) {
-      const odd = a.unexpected ?? [];
-      if (a.error) say(false, `Couldn't read all of ${your} account's audit log: ${escape(a.error)}`);
-      else if (!a.complete) say(false, a.stopped ? `${Your} account's audit log was too long to read all of, so it isn't checked.` : `Still reading ${your} account's audit log…`);
-      if (!odd.length && a.complete) say(true, `Since it was installed, apps and API tokens did only what installing, updating and groups do (${a.count} ${a.count === 1 ? "change" : "changes"}).`);
-      if (odd.length) {
-        say(false, `${odd.length === 1 ? "One change" : `${odd.length} changes`} to ${your} site or ${your} Cloudflare account, made through an app or API token, isn't something afterwrd does. Check ${whose === "yours" ? "you" : "they"} recognise ${odd.length === 1 ? "it" : "them"}:`);
-        lines.push(changeList(odd, r));
-        lines.push(`<p class="meta">“App” is something given access through Cloudflare's sign-in, such as wrangler; “API token” is a token
-          made in the Cloudflare profile.${odd.some((e) => r.database && e.resource === r.database) ? ` Changes to the site's database
-          matter even when the code is genuine: they could, say, add someone else's passkey.` : ""}</p>`);
-      }
-      const other = a.other ?? [];
-      if (other.length) {
-        lines.push(`<details class="check-other"><summary class="meta">${other.length === 1 ? "One change" : `${other.length} changes`} to other things in ${your}
-          account (not ${your} site, so they don't count against it)</summary>${changeList(other, r)}</details>`);
-      }
-    }
   }
-  lines.push(r.automatic
-    ? `<p class="meta">Checked by itself ${escape(when(r.checkedAt))}, read-only, with a one-hour pass ${your} site handed over. Its
-      account's log of changes isn't read by these checks.</p>`
-    : `<p class="meta">Checked ${escape(when(r.checkedAt))}, read-only. The access Cloudflare gave was used for this check and not kept.</p>`);
+  lines.push(`<p class="meta">Checked by itself ${escape(when(r.checkedAt))}, read-only, with a one-hour pass ${your} site handed over.</p>`);
   return lines.join("\n");
-}
-
-/** Changes, the same ones together ("Upload Version · afterwrd-install × 6"), newest first. */
-function changeList(changes, r) {
-  const groups = new Map();
-  for (const e of changes) {
-    const key = `${e.description || `${e.type} ${e.what}`}|${e.resource}|${e.context}`;
-    const group = groups.get(key);
-    if (group) { group.n++; if (e.time < group.first) group.first = e.time; } else groups.set(key, { ...e, n: 1, first: e.time });
-  }
-  const day = (t) => escape(t.replace("T", " ").slice(0, 16));
-  return `<ul class="check-files">${[...groups.values()].map((g) => `<li>${g.n > 1 ? `${day(g.first)} to ${day(g.time)}` : day(g.time)} · `
-    + `${escape(g.description || `${g.type} ${g.what}`)}${g.resource ? ` · ${escape(g.resource)}${g.resource === r.database ? " (its database)" : ""}` : ""}`
-    + ` (${g.context === "api" ? "API token" : "app"})${g.n > 1 ? ` × ${g.n}` : ""}</li>`).join("")}</ul>`;
 }
 
 /** "Last checked by Sam Taylor's site on 9 Nov 2026 (afterwrd 0.34.0)." or "You last checked it yourself on …". */

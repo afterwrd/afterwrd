@@ -1,16 +1,17 @@
 // Automatic updates (src/auto.js, src/signing.js), end to end on one local site with stand-ins on 8799 for
 // Cloudflare's token endpoint and API, GitHub's release downloads, the signatures in the repository and the new
 // version's health. run.sh starts the site with --test-scheduled, so the daily run is started by asking for
-// /__scheduled, and with ALLOW_LOCAL_SITES=1 and the stand-ins' addresses. The relay page is stood in for as in
-// checks.mjs. The signing key here is a throwaway made for this test; the site is told its public key
-// (TEST_RELEASE_KEY), which only counts on this computer.
+// /__scheduled, and with ALLOW_LOCAL_SITES=1 and the stand-ins' addresses. Cloudflare's Allow page is stood in for
+// (helpers.mjs): the test reads what the site asked it for, and comes back the way the relay would. The signing key
+// here is a throwaway made for this test; the site is told its public key (TEST_RELEASE_KEY), which only counts on
+// this computer.
 import { execFileSync } from "node:child_process";
 import { createHash, createPrivateKey, randomUUID, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { settled, sql, setUpSigning } from "./helpers.mjs";
+import { allowAsks, backThroughRelay, continueToCloudflare, isAllowPage, settled, sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BASE = "http://localhost:8787";
@@ -192,22 +193,30 @@ const link = execFileSync("node", ["scripts/owner.mjs", "Ann Example", "--local"
 await owner.goto(link);
 await Promise.all([owner.waitForNavigation(), owner.click("#go")]);
 await setUpSigning(owner);
-let relay = null;
+// Cloudflare's Allow page, stood in for: where the site sent the browser is kept. (Nothing goes to afterwrd.app now.)
+let allow = null;
 await owner.setRequestInterception(true);
 owner.on("request", (req) => {
   const at = new URL(req.url());
-  if (at.hostname !== "afterwrd.app") return req.continue();
-  if (at.pathname === "/connect/") relay = at;
-  req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+  if (at.hostname !== "afterwrd.app" && at.hostname !== "dash.cloudflare.com") return req.continue();
+  if (isAllowPage(at)) allow = at;
+  else if (at.pathname !== "/favicon.ico") errors.push(`went to ${at.href}`);
+  req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
 });
 const text = async (sel = "main") => (await owner.$eval(sel, (m) => m.textContent)).replace(/\s+/g, " ");
 
-// Connect for background access, coming back the way the relay would, with Cloudflare's code.
+// Connect for background access: the site's own page, then Cloudflare's, coming back the way the relay would, with
+// Cloudflare's code.
+let before = "";
 async function turnOn(code) {
-  relay = null;
+  allow = null;
   await owner.goto(`${BASE}/_admin/update`);
-  await Promise.all([owner.waitForFunction(() => document.title === "relay stand-in"), owner.click("#auto a.button")]);
-  await owner.goto(`${relay.searchParams.get("to")}#${new URLSearchParams({ code, state: relay.searchParams.get("state") })}`);
+  await continueToCloudflare(owner, async () => {
+    await owner.click("#auto a.button");
+    await owner.waitForFunction(() => document.title === "Connecting to Cloudflare · afterwrd", { timeout: 15000 });
+    before = await text();
+  });
+  await owner.goto(backThroughRelay(allow, code));
   await owner.waitForFunction(() => !location.pathname.startsWith("/_cloudflare/") || document.querySelector("#error")?.textContent, { timeout: 15000 });
   return owner.url().includes("/_admin/update") ? null : await text("#error");
 }
@@ -235,11 +244,16 @@ check("health answers: migrations done, typical reads work", await fetch(`${BASE
 // --- turning it on -----------------------------------------------------------------------------------------------
 const refusedNoBackground = await turnOn("noback.code-1");
 check("an Allow without Background Access is refused, and stays off", /Background Access/.test(refusedNoBackground ?? "") && !state().on, refusedNoBackground);
-check("the relay is asked for background access to the site's own auto-done", relay?.searchParams.get("to") === `${BASE}/_cloudflare/auto-done`);
+check("the site's own page says what's asked for before Cloudflare's", before.includes("Let your site keep itself up to date?")
+  && before.includes("Background Access") && before.includes("localhost:8787"), before);
+const askedFor = allowAsks(allow, { scope: "offline_access workers-scripts.edit", to: `${BASE}/_cloudflare/auto-done` });
+check("Cloudflare is asked for background access to change Workers, and nothing else, coming back to the site's own auto-done", askedFor === "", askedFor);
 const turnedOn = await turnOn("good.code-2");
 check("Connect with Background Access turns automatic updates on", turnedOn === null && state().on === true, turnedOn);
 const exchange = token.exchanges.at(-1);
-check("…swapping the code with the PKCE secret and the relay as the redirect", exchange?.code_verifier?.length >= 43 && exchange.redirect_uri === "https://afterwrd.app/connect/");
+check("…swapping the code with the PKCE secret that matches the challenge, and the relay as the redirect", exchange?.code_verifier?.length >= 43
+  && createHash("sha256").update(exchange.code_verifier).digest("base64url") === allow?.searchParams.get("code_challenge")
+  && exchange.redirect_uri === "https://afterwrd.app/connect/");
 check("…and setting a daily schedule at a random time", /^\d{1,2} \d{1,2} \* \* \*$/.test(cf.schedules.at(-1)?.body?.[0]?.cron ?? ""), JSON.stringify(cf.schedules.at(-1)));
 check("the Update page says they're on", (await text("#auto")).includes("Automatic updates are on"));
 const exported = await owner.evaluate(async () => (await fetch("/_admin/update")).text());

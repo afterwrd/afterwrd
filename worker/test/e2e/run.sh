@@ -2,7 +2,7 @@
 # afterwrd's end-to-end tests: real local copies of the site (wrangler dev) driven by Chrome, with a virtual
 # passkey authenticator. See README.md.
 #   npm run test:e2e                     everything except upgrade
-#   npm run test:e2e -- <suite>…         some: core fresh albums update feed move groups selfhosted checks recover central forged
+#   npm run test:e2e -- <suite>…         some: core fresh albums update feed move groups selfhosted recover central forged
 #   npm run test:e2e -- upgrade v0.17.0  an older release's site (0.17.0 or later), upgraded in place to this code
 #   npm run test:e2e -- crossover v0.58.2  three sites and a group on afterwrd 1, all brought over to this code
 set -uo pipefail
@@ -159,11 +159,6 @@ run_central() { # the installer at install.afterwrd.app, on 8791, with stand-ins
   suite relay.mjs # afterwrd.app's Connect page, served by the installer's Worker, everything around it stood in for
   pkill -f "wrangler dev -c central" 2>/dev/null; sleep 1
 }
-run_checks() { # one site, with stand-ins for Cloudflare and GitHub on 8799 (checks.mjs runs them)
-  fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
-    --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var RELEASES_URL:http://127.0.0.1:8799/releases --var TEST_SUBDOMAIN:ann
-  suite checks.mjs; stop
-}
 run_recover() { # getting back in without a passkey (recover.js): one site, a stand-in for Cloudflare on 8799 (recover.mjs runs it)
   fresh --var ALLOW_LOCAL_SITES:1 --var OAUTH_TOKEN_URL:http://127.0.0.1:8799/token \
     --var CLOUDFLARE_API_URL:http://127.0.0.1:8799/client/v4 --var TEST_SUBDOMAIN:ann \
@@ -207,6 +202,7 @@ run_forged() {
   (cd "$HERE" && node forged.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node keys.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
   (cd "$HERE" && node lists.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1
+  (cd "$HERE" && node sitecheck.mjs) | grep -v '^PASS'; [ "${PIPESTATUS[0]}" = 0 ] || FAILED=1 # checks.js checkSite
 }
 # Groups from afterwrd 1 carried over (step 10d): three people's sites and a group's own Worker on an older release, then
 # all four on this code, with the same databases.
@@ -246,10 +242,10 @@ run_upgrade() { # $1: an older release tag
   git -C "$WORKER" worktree remove --force "$OUT/old"
 }
 
-if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions safety limits events hosts selfhosted checks recover central forged; fi
+if [ $# -eq 0 ]; then set -- core fresh albums notifications update auto friendchecks feed move groups polls mentions safety limits events hosts selfhosted recover central forged; fi
 while [ $# -gt 0 ]; do
   case "$1" in
-    core|fresh|albums|update|auto|friendchecks|feed|move|groups|checks|recover|central|forged|screenshots|notifications|polls|mentions|safety|limits|events|hosts|selfhosted) "run_$1" ;;
+    core|fresh|albums|update|auto|friendchecks|feed|move|groups|recover|central|forged|screenshots|notifications|polls|mentions|safety|limits|events|hosts|selfhosted) "run_$1" ;;
     upgrade) shift; run_upgrade "${1:?give an older release tag, e.g. v0.12.0}" ;;
     crossover) shift; run_crossover "${1:?give an older release tag, e.g. v0.58.2}" ;;
     *) echo "Unknown suite: $1" >&2; FAILED=1 ;;

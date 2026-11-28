@@ -47,7 +47,7 @@ export function steady(page, prepare) {
 }
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { signCall } from "../../src/signedcalls.js";
@@ -246,3 +246,73 @@ export const signedGroupRecord = (page, groupId, fields, content = null) => page
   body.set("back", "/");
   return (await fetch(`/_groups/${g}/items/${f.item}/records`, { method: "POST", body, redirect: "manual" })).status;
 }, groupId, fields, content);
+
+// --- connecting to Cloudflare, stood in for -------------------------------------------------------------------------
+// A site sends the browser to Cloudflare's Allow page itself, with an address it builds (src/cloudflare.js allowLink),
+// from a page of its own first (allowPage: "Continue to Cloudflare"). Cloudflare then sends the browser back through
+// afterwrd.app's relay page (installer/connect.html), which reads the site's return address from `state`.
+
+/** Cloudflare's Allow page, which the tests stand in for (a page titled "Cloudflare stand-in"). */
+export const ALLOW_PAGE = "https://dash.cloudflare.com/oauth2/auth";
+/** The one address Cloudflare sends people back to: afterwrd.app's relay page. */
+export const RELAY = "https://afterwrd.app/connect/";
+const CLIENT = JSON.parse(readFileSync(join(WORKER, "package.json"), "utf8")).afterwrd.cloudflareClient;
+
+/** Whether `at` (a URL the browser went to) is Cloudflare's Allow page. */
+export const isAllowPage = (at) => at.origin + at.pathname === ALLOW_PAGE;
+
+/**
+ * Where a site's `state` says the relay sends the browser back to (`<random>~<return address, base64url>`), or null
+ * if it doesn't say.
+ * @param {string | null | undefined} state
+ */
+export function returnAddress(state) {
+  const [random, to, more] = String(state ?? "").split("~");
+  if (!random || !to || more !== undefined) return null;
+  return Buffer.from(to, "base64url").toString("utf8");
+}
+
+/**
+ * Whether Cloudflare's Allow page address `allow` asks for exactly `scope`, through this release's sign-in app, coming
+ * back through the relay, with a PKCE challenge, and a state naming the way back `to`. Returns "" if so, or what's wrong.
+ * @param {URL | null} allow @param {{ scope: string, to: string }} want
+ */
+export function allowAsks(allow, { scope, to }) {
+  if (!allow) return "never went to Cloudflare";
+  const p = allow.searchParams;
+  const wrong = [
+    !isAllowPage(allow) && `went to ${allow.origin}${allow.pathname}`,
+    p.get("response_type") !== "code" && `response_type ${p.get("response_type")}`,
+    p.get("client_id") !== CLIENT && `client_id ${p.get("client_id")}`,
+    p.get("redirect_uri") !== RELAY && `redirect_uri ${p.get("redirect_uri")}`,
+    p.get("scope") !== scope && `scope ${p.get("scope")}`,
+    !/^[\w-]{43}$/.test(p.get("code_challenge") ?? "") && `code_challenge ${p.get("code_challenge")}`,
+    p.get("code_challenge_method") !== "S256" && `code_challenge_method ${p.get("code_challenge_method")}`,
+    returnAddress(p.get("state")) !== to && `way back ${returnAddress(p.get("state"))}`,
+  ].filter(Boolean);
+  return wrong.join(", ");
+}
+
+/**
+ * Where the relay would send the browser back to from Cloudflare's Allow page `allow`, with `code` (or, as
+ * { error }, Cloudflare saying it wasn't allowed): the site's return address, with the answer in the fragment.
+ * @param {URL} allow @param {string | { error: string }} answer
+ */
+export function backThroughRelay(allow, answer) {
+  const state = allow.searchParams.get("state") ?? "";
+  const to = returnAddress(state);
+  if (!to) throw new Error(`No way back in the state Cloudflare was given: ${allow.href}`);
+  return `${to}#${new URLSearchParams(typeof answer === "string" ? { code: answer, state } : answer)}`;
+}
+
+/**
+ * On from wherever `go` takes `page` (a click, or a goto, that lands on the site's own page before Cloudflare's:
+ * cloudflare.js allowPage) to Cloudflare's Allow page, stood in for: presses "Continue to Cloudflare" and waits.
+ * @param {import("puppeteer-core").Page} page @param {() => Promise<unknown>} go
+ */
+export async function continueToCloudflare(page, go) {
+  await go();
+  await page.waitForFunction(() => document.title === "Connecting to Cloudflare · afterwrd", { timeout: 15_000 });
+  await Promise.all([page.waitForFunction(() => document.title === "Cloudflare stand-in", { timeout: 15_000 }),
+    page.click(`a.button[href^="${ALLOW_PAGE}?"]`)]);
+}

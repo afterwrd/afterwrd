@@ -3,7 +3,6 @@
 import { nonce } from "../nonce.js";
 import { asset, favicon, importMap, LOGO } from "./nav.js";
 import { escape } from "../util.js";
-import { resultHtml } from "./checks.js";
 
 const STYLE = `
   @font-face { font-family: "Nunito"; src: url("/static/fonts/nunito.woff2") format("woff2"); font-weight: 200 1000; font-display: swap; }
@@ -410,47 +409,6 @@ export function signOutPage() {
 
 export function messagePage(message, link = { href: "/_auth/login", label: "Go to sign in" }) {
   return page("afterwrd", `<p>${escape(message)}</p><a class="button" href="${escape(link.href)}">${escape(link.label)}</a>`);
-}
-
-// Opened from a check link (checks.js): a friend's site asking to check this person's site, read-only, through
-// Cloudflare. `result` is what a finished check found, and `by` the site that checked.
-export function checkLinkPage({ owner, checker, site, fixed, result, by = null, reading = false }) {
-  const style = `<style>
-  .check-good { color: var(--moss); } .check-bad { color: var(--danger); }
-  .check-good, .check-bad { margin: 0 0 14px; } .check-good b, .check-bad b { color: var(--text); }
-  .check-files { margin: -6px 0 16px; padding-left: 1.2rem; color: var(--muted); font-size: 0.9rem; word-break: break-word; }
-  .meta { font-size: 0.9rem; } main { max-width: 520px; }
-  .check-who { color: var(--text); padding: 12px 16px; border-radius: 16px; background: var(--sunken); word-break: break-word; }
-</style>`;
-  if (result && !reading) return page("Site check", `${style}<h1>${escape(owner)}'s site checked yours</h1>\n${resultHtml(result, "yours", by)}`);
-  return page("Check my site", `${style}
-${reading ? `<p class="check-bad">This check didn't finish. Start it again:</p>` : ""}
-<h1>${escape(owner)} would like to check your site</h1>
-<p>${escape(owner)}'s afterwrd site (<b>${escape(checker)}</b>, the site this page is on) will look at your Cloudflare
-account, read-only, for a moment. It downloads the code
-your afterwrd site is running and compares it with the published release, and reads your account's log of changes
-for anything afterwrd doesn't do. Cloudflare asks you to allow this. It can't change anything, and the access isn't kept.</p>
-<form id="check">
-  ${fixed ? `<p>Your site: <b>${escape(new URL(site).host)}</b></p>`
-    : `<input name="site" value="${escape(site ? new URL(site).host : "")}" placeholder="e.g. jo.example.workers.dev" required autocomplete="url" inputmode="url" aria-label="Your site's address">`}
-  <p id="error" role="alert"></p>
-  <button>Check my site</button>
-</form>
-<p class="meta" style="margin-top: 20px">Best done before you start using a new site, and again after updates.
-<a href="https://afterwrd.app/check/">More about checking</a>.</p>`, `
-  document.getElementById("check").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const button = e.target.querySelector("button");
-    button.disabled = true;
-    document.getElementById("error").textContent = "";
-    try {
-      const { relay } = await post(location.pathname + "/start", { site: e.target.site?.value.trim() });
-      location.assign(relay);
-    } catch (err) {
-      document.getElementById("error").textContent = err.message;
-      button.disabled = false;
-    }
-  });`);
 }
 
 // Opened from a friend link (connect.js): someone wants to be friends. With a site already, they say where it is and

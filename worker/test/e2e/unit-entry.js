@@ -26,3 +26,5 @@ export { keepSentKeys } from "../../src/groupcopies.js";
 export { ensureSchema } from "../../src/migrate.js";
 export { Outbox } from "../../src/outbox.js";
 export { objectNamed } from "../../src/sqlite.js";
+// What sitecheck.mjs tests: a check of a site's code and setup, read from Cloudflare (friends' checks).
+export { checkSite, siteIn } from "../../src/checks.js";

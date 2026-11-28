@@ -1,12 +1,15 @@
 <!doctype html>
 <!-- afterwrd's Connect page (https://afterwrd.app/connect/): the one address Cloudflare sends people back to after
-     they allow afterwrd to change their account for an hour. It does two things, both in the browser, with nothing
-     stored anywhere (the installer's Worker serves it as it is here, worker/central/site.js, never GitHub):
-       1. On the way out (?to=…&state=…&challenge=…, from a site's /_cloudflare/start): remembers which site asked,
-          in this tab only, and sends the browser to Cloudflare's sign-in.
-       2. On the way back (?code=…&state=…, from Cloudflare): checks the state is the one this tab started with, and
-          hands the one-time code to that same site (in the fragment, which no server or log sees). Only that site
-          holds the PKCE secret, so only it can turn the code into a token. See worker/src/cloudflare.js. -->
+     they allow afterwrd something in their account. Nothing is stored anywhere but this browser (the installer's Worker
+     serves it as it is here, worker/central/site.js, never GitHub). A site sends the browser straight to Cloudflare,
+     with an address it builds itself, so this page never sees what's asked for or the PKCE challenge (security review
+     2026-11 M11). On the way back (?code=…&state=…), `state` says which site: `<random>~<its return address, base64url>`.
+     This page hands the one-time code to that site (in the fragment, which no server or log sees); only that site holds
+     the PKCE secret, so only it can turn the code into a token. A look-alike site (afterwrd.sam-tay1or.workers.dev)
+     would get the person's Cloudflare access that way, so for a site this browser hasn't connected before, it first
+     shows the address and asks (M10). afterwrd never sends anyone here from a link.
+     Until sites from before 2.4 have updated, it also takes the old way out (?to=…&state=…&challenge=…): it asks
+     first, then builds Cloudflare's address. Remove that once they have. See worker/src/cloudflare.js. -->
 <html lang="en-GB">
 <head>
 <meta charset="utf-8">
@@ -31,12 +34,13 @@
   details.more summary { cursor: pointer; }
   ul.plain { padding-left: 1.1rem; }
   ul.plain li { margin: 0.4rem 0; }
-  #ask[hidden], #ask-check[hidden], #ask-auto[hidden], #ask-checks[hidden], #ask-both[hidden], #ask-recover[hidden] { display: none; }
+  #ask[hidden], #ask-auto[hidden], #ask-checks[hidden], #ask-both[hidden], #ask-recover[hidden], #send[hidden], #send-new[hidden] { display: none; }
   /* Passing through (on the way back from Cloudflare, or straight on to it): nothing but the background unless it takes
      a moment, so a page gone in a blink doesn't flash. Asking, or a problem, shows at once. */
   body.passing main { animation: appear 0s 0.5s both; }
   @keyframes appear { from { visibility: hidden; } }
-  #host, #check-host, #auto-host, #checks-host, #both-host, #recover-host { font: 800 1.15rem/1.3 var(--round); word-break: break-all; }
+  #host, #auto-host, #checks-host, #both-host, #recover-host, #send-host { font: 800 1.15rem/1.3 var(--round); word-break: break-all; }
+  #send-host mark { background: var(--accent); color: var(--bg); border-radius: 6px; padding: 0 0.2em; }
   .grants { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.92rem; }
   .grants th, .grants td { text-align: left; vertical-align: top; padding: 8px 6px; border-top: 1px solid #2e3d35; }
   .grants thead th { color: var(--muted); font-weight: 600; border-top: 0; }
@@ -116,14 +120,6 @@
     Access Management → Connected Applications.</p></details>
   <p><button id="continue-checks">Continue to Cloudflare</button></p>
 </section>
-<section id="ask-check" hidden>
-  <p>Let this friend's afterwrd site check yours?</p>
-  <p id="check-host"></p>
-  <p class="meta">It looks at your site's code, and at the record Cloudflare keeps of changes to your account, to check
-  your site is the genuine afterwrd. It can only <b>read</b>, never change anything, and the access ends after an hour.
-  Only continue if this is the site of a friend who offered to check yours.</p>
-  <p><button id="continue-check">Continue to Cloudflare</button></p>
-</section>
 <section id="ask-recover" hidden>
   <p>Get back into your afterwrd site?</p>
   <p id="recover-host"></p>
@@ -132,43 +128,43 @@
   for this:</b> nobody else, friends included, ever needs it.</p>
   <p><button id="continue-recover">Continue to Cloudflare</button></p>
 </section>
+<section id="send" hidden>
+  <p><b>Carry on to your afterwrd site?</b></p>
+  <p id="send-host"></p>
+  <p class="meta">Check the highlighted part is your own Cloudflare name, exactly. A site with a name made to look like
+  yours would get the access you just allowed.</p>
+  <p class="meta" id="send-new" hidden>This browser hasn't connected this site before. That's expected if you've just
+  made it, or you're on a new device.</p>
+  <p class="warn">afterwrd never sends you here from a link. If you didn't press a button on your own site just now,
+  close this page: the site named above then gets nothing.</p>
+  <p><button id="send-go">Carry on</button></p>
+</section>
 <p id="error" role="alert"></p>
 </main>
 <script>
-  // The sign-in apps a site may ask through: this release's, then earlier ones (worker/src/cloudflare.js). The one the
-  // site says, as that's the one it swaps the code with; a site from before 0.51.0 says nothing, and used the first.
-  const CLIENTS = "__OAUTH_CLIENTS__".split(" ");
-  const UNSAID = "__OAUTH_CLIENT_UNSAID__";
-  // What Cloudflare is asked for depends only on where the browser goes back to, so a check can't be given more:
-  //   /_cloudflare/done  a site installing or updating itself (as in worker/src/cloudflare.js SCOPES). "Workers
-  //                      Admin", because "Workers Editor" can't create a Worker.
-  //   /_check/done       a friend's site checking yours (worker/src/checks.js): read-only, your Workers' code and the
-  //                      account's settings and audit log.
-  //   /_cloudflare/auto-done  your own site keeping itself up to date (worker/src/auto.js): Background Access to change
-  //                      Workers (Workers Editor) and nothing else: no databases, no account settings, no tokens.
-  //   /_cloudflare/checks-done  your own site letting friends' sites check it by themselves (worker/src/friendchecks.js):
-  //                      Background Access to read your Workers' code, and nothing else.
-  //   /_auth/recover/done  getting back into your own site without a passkey (worker/src/recover.js): an hour's access
-  //                      to change Workers, which the site proves it has by making its running version live again.
-  //                      Never read-only: anyone can start a recovery, so a code allowed for a check mustn't fit it.
-  const SCOPES = {
-    "/_cloudflare/done": "workers-scripts.admin d1.write account-settings.read",
-    "/_check/done": "workers-scripts.content_read account-settings.read",
-    "/_cloudflare/auto-done": "offline_access workers-scripts.edit",
-    "/_cloudflare/checks-done": "offline_access workers-scripts.content_read",
-    "/_auth/recover/done": "workers-scripts.edit",
-  };
-  const KEY = "afterwrd-connect";
-  const BOTH_KEY = "afterwrd-connect-both";
-  const BOTH_FOR_MS = 15 * 60 * 1000;
   const status = document.getElementById("status");
   const problem = document.getElementById("error");
   const fail = (text) => { status.textContent = ""; problem.textContent = text; document.body.classList.remove("passing"); };
   const params = new URLSearchParams(location.search);
   history.replaceState(null, "", location.pathname); // neither the code nor the challenge belongs in the history
 
-  // The site that asked: an afterwrd site or installer at its workers.dev address (the only kind there is), at its
-  // own return paths (SCOPES), and nothing else. So a link can't send someone's code to an address elsewhere.
+  // The site's own return paths, and nothing else: so a link can't send someone's code to an address elsewhere, or to
+  // a page of the site that does something else with it. With what Cloudflare is asked for on the old way out (below).
+  //   /_cloudflare/done  a site installing or updating itself (worker/src/cloudflare.js SCOPES). "Workers Admin",
+  //                      because "Workers Editor" can't create a Worker.
+  //   /_cloudflare/auto-done  your own site keeping itself up to date (worker/src/auto.js): Background Access to change
+  //                      Workers (Workers Editor) and nothing else: no databases, no account settings, no tokens.
+  //   /_cloudflare/checks-done  your own site letting friends' sites check it by themselves (worker/src/friendchecks.js):
+  //                      Background Access to read your Workers' code, and nothing else.
+  //   /_auth/recover/done  getting back into your own site without a passkey (worker/src/recover.js): an hour's access
+  //                      to change Workers, which the site proves it has by making its running version live again.
+  const SCOPES = {
+    "/_cloudflare/done": "workers-scripts.admin d1.write account-settings.read",
+    "/_cloudflare/auto-done": "offline_access workers-scripts.edit",
+    "/_cloudflare/checks-done": "offline_access workers-scripts.content_read",
+    "/_auth/recover/done": "workers-scripts.edit",
+  };
+  // An afterwrd site at its workers.dev address (the only kind Cloudflare's sign-in is for), at one of those paths.
   const HOST_RE = /^[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev$/;
   const siteFrom = (to) => {
     try {
@@ -180,8 +176,38 @@
   };
   const ID_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
+  // Sites this browser has carried on to before (only ever after the person said so here, or on the old way out, which
+  // asked first). Going back to one of them needs no question; any other site's address is shown and asked about.
+  const KNOWN_KEY = "afterwrd-known-sites";
+  const knownSites = () => {
+    const seen = [];
+    for (const store of [() => localStorage, () => sessionStorage]) {
+      try { seen.push(...JSON.parse(store().getItem(KNOWN_KEY) || "[]")); } catch {}
+    }
+    return [...new Set(seen.filter((h) => typeof h === "string"))]; // both stores hold the same list
+  };
+  const remember = (host) => {
+    const sites = [host, ...knownSites().filter((h) => h !== host)].slice(0, 20);
+    for (const store of [() => localStorage, () => sessionStorage]) {
+      try { store().setItem(KNOWN_KEY, JSON.stringify(sites)); } catch {}
+    }
+  };
+  // On to the site, with Cloudflare's answer in the fragment.
+  const handOver = (site, answer) => {
+    status.textContent = "One moment…";
+    location.replace(site.href + "#" + new URLSearchParams(answer).toString());
+  };
+
+  // --- the old way out (sites from before 2.4: remove once they've updated) ------------------------------------------
+  // The site sends the browser here with its challenge; this page asks, then builds Cloudflare's address.
+  const CLIENTS = "__OAUTH_CLIENTS__".split(" ");
+  const UNSAID = "__OAUTH_CLIENT_UNSAID__";
+  const KEY = "afterwrd-connect";
+  const BOTH_KEY = "afterwrd-connect-both";
+  const BOTH_FOR_MS = 15 * 60 * 1000;
+  const WARNING = "afterwrd never sends you here from a link. Only continue if you pressed a button on your own afterwrd site just now; if someone sent you a link, close this page.";
+
   if (params.has("to")) {
-    // On the way out.
     const site = siteFrom(params.get("to"));
     const state = params.get("state") ?? "";
     const challenge = params.get("challenge") ?? "";
@@ -216,20 +242,18 @@
           toCloudflare();
         } else {
           // The one place the person can see which site is being connected, so it asks before going on.
-          const kind = both ? ["both-host", "ask-both", "continue-both"] : { "/_check/done": ["check-host", "ask-check", "continue-check"],
+          const kind = both ? ["both-host", "ask-both", "continue-both"] : {
             "/_cloudflare/auto-done": ["auto-host", "ask-auto", "continue-auto"],
             "/_cloudflare/checks-done": ["checks-host", "ask-checks", "continue-checks"],
             "/_auth/recover/done": ["recover-host", "ask-recover", "continue-recover"] }[site.pathname] ?? ["host", "ask", "continue"];
           status.textContent = "";
           document.getElementById(kind[0]).textContent = site.host;
-          // Anything but a friend's check comes from the person's own site, just now: never from a link someone sent
-          // (a site with a look-alike address would get their Cloudflare access: security review 2026-11 M10).
-          if (kind[0] !== "check-host") {
-            const warn = document.createElement("p");
-            warn.className = "warn";
-            warn.textContent = "Only continue if you pressed the button on your own afterwrd site just now. If you got here from a link someone sent you, close this page.";
-            document.getElementById(kind[0]).after(warn);
-          }
+          // Never from a link someone sent (a site with a look-alike address would get their Cloudflare access:
+          // security review 2026-11 M10).
+          const warn = document.createElement("p");
+          warn.className = "warn";
+          warn.textContent = WARNING;
+          document.getElementById(kind[0]).after(warn);
           document.getElementById(kind[1]).hidden = false;
           document.body.classList.remove("passing");
           document.getElementById(kind[2]).addEventListener("click", () => {
@@ -242,20 +266,53 @@
       }
     }
   } else if (params.has("code") || params.has("error")) {
-    // On the way back.
-    let started = null;
-    try { started = JSON.parse(sessionStorage.getItem(KEY) || "null"); sessionStorage.removeItem(KEY); } catch {}
-    const site = started && siteFrom(started.to);
-    if (!site || !ID_RE.test(started.state ?? "")) {
-      fail("This tab didn't start a connection, so there's nowhere to send you back to. Start again from your site.");
-    } else if (params.get("state") !== started.state) {
-      fail("This isn't the connection this tab started. Start again from your site.");
-    } else if (params.has("error")) {
-      location.replace(site.href + "#error=" + encodeURIComponent(params.get("error")));
+    // --- on the way back -------------------------------------------------------------------------------------------
+    const state = params.get("state") ?? "";
+    const answer = params.has("error") ? { error: params.get("error") ?? "" } : { code: params.get("code") ?? "", state };
+    const split = state.split("~");
+    if (split.length === 2 && ID_RE.test(split[0]) && /^[A-Za-z0-9_-]{1,400}$/.test(split[1])) {
+      // A site that built Cloudflare's address itself: the state says where it is.
+      let site = null;
+      try {
+        site = siteFrom(new TextDecoder().decode(Uint8Array.from(atob(split[1].replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0))));
+      } catch {}
+      if (!site) {
+        fail("This doesn't come from an afterwrd site, so there's nowhere to send you. Start again from your site.");
+      } else if (!answer.code || knownSites().includes(site.host)) {
+        // Nothing to hand over (they said no), or a site they've carried on to before: straight there.
+        if (answer.code) remember(site.host);
+        handOver(site, answer);
+      } else {
+        // A site this browser hasn't been to from here: its address first, its Cloudflare name picked out, as a
+        // look-alike differs there (M10).
+        const [name, account] = site.host.split(".");
+        const shown = document.getElementById("send-host");
+        shown.append(`${name}.`);
+        const mark = document.createElement("mark");
+        mark.textContent = account;
+        shown.append(mark, ".workers.dev");
+        document.getElementById("send-new").hidden = false;
+        status.textContent = "";
+        document.getElementById("send").hidden = false;
+        document.body.classList.remove("passing");
+        document.getElementById("send-go").addEventListener("click", () => {
+          remember(site.host);
+          handOver(site, answer);
+        });
+      }
     } else {
-      status.textContent = "One moment…";
-      const back = new URLSearchParams({ code: params.get("code"), state: started.state });
-      location.replace(site.href + "#" + back.toString());
+      // The old way: this tab remembered which site asked, on the way out (where it asked first).
+      let started = null;
+      try { started = JSON.parse(sessionStorage.getItem(KEY) || "null"); sessionStorage.removeItem(KEY); } catch {}
+      const site = started && siteFrom(started.to);
+      if (!site || !ID_RE.test(started.state ?? "")) {
+        fail("This tab didn't start a connection, so there's nowhere to send you back to. Start again from your site.");
+      } else if (state !== started.state) {
+        fail("This isn't the connection this tab started. Start again from your site.");
+      } else {
+        if (answer.code) remember(site.host);
+        handOver(site, answer);
+      }
     }
   } else {
     fail("This page is only used while connecting an afterwrd site to Cloudflare. There's nothing to see here.");

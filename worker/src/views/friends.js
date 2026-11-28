@@ -2,14 +2,11 @@
 // Friends. Views only draw: they read nothing and change nothing.
 import { nonce } from "../nonce.js";
 import { friendItemCard } from "./items.js";
-import { verdict } from "../checks.js";
-import { resultHtml } from "./checks.js";
 import { aspect, dateRange, fmtAgo, fmtDate, fmtDatetime, linkify, number, safeUrl, summary } from "./format.js";
 
 import { icon, initial } from "./nav.js";
 import { gone } from "../friendcopies.js";
 import { host } from "../sites.js";
-import { now } from "../util.js";
 import { html, raw } from "./html.js";
 import { layout, page } from "./layout.js";
 import { blockButton, feed, has, moreMenu, muteButton, pager } from "./parts.js";
@@ -102,7 +99,7 @@ export function introductionCard(i, back, tag = "li") {
 }
 
 /** The owner's Friends: friends on afterwrd first, then everyone from the Facebook download, in one list. */
-export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], checks = [], blocked = [], muted = [] }) {
+export function friendsIndexPage(ctx, { friends, facebook, requests = [], introductions = [], blocked = [], muted = [] }) {
   const people = has(ctx, "friends"); // Facebook people have pages only if the friends list is published
   const fbLink = (p) => (people && p.id ? html`<a href="/people/${p.id}">${p.name}</a>` : p.name);
   const linkForm = (c, body) => html`<form method="post" action="/_admin/connections/${c.id}/facebook" class="fb-link">${body}</form>`;
@@ -178,70 +175,6 @@ ${friends.length ? html`<ul class="friend-list">
   <p>No friends on afterwrd yet. When a friend has their own afterwrd site, connect with them to see each other's posts and photos.</p>
   <a class="chip primary" href="/_admin/connections">${raw(icon("connections"))}<span>Add a friend</span></a>
 </div>`}
-
-<details class="checks-fold" id="checks">
-<summary><h2>Checking a friend's site</h2></summary>
-<p class="meta">When a friend on afterwrd asks you to check their site, their request shows on <a href="/">Home</a>, with a
-button that makes the link to send back to them. If someone asks by message instead, paste it, or just their site's
-address, here. They open the link and allow read-only access in Cloudflare, and your site checks theirs is exactly the
-published afterwrd, with nothing else done in their account. You both see what it found. The link goes back by message,
-not between the sites, so a site that had been tampered with couldn't swap it for a fake.</p>
-<form class="check-form" id="check-form">
-  <input id="check-site" placeholder="Their message, or their site's address" aria-label="Their message, or their site's address">
-  <button class="chip" data-check="">Make a check link</button>
-</form>
-<section class="card invite-panel" id="check-panel" hidden>
-  <h2>Send this to your friend</h2>
-  <textarea id="check-message" readonly rows="6" aria-label="Check message"></textarea>
-  <p class="row"><button class="chip primary" id="check-copy">Copy message</button>
-    <button class="chip" id="check-done">Done</button></p>
-</section>
-<p class="error" id="check-error" role="alert"></p>
-${checks.length > 0 && html`<ul class="friend-list checks">
-  ${checks.map((k) => html`<li class="card">
-    <div class="check-head"><strong>${k.site ? host(k.site) : "Not opened yet"}</strong>
-      <span class="meta">${k.friend ? html`${k.friend} · ` : ""}${k.checked_at ? html`checked ${fmtDate(k.checked_at)}`
-        : k.result ? "check not finished" : k.expires_at > now() ? html`link made ${fmtDate(k.created_at)}, not used yet` : "link expired unused"}</span>
-      ${verdict(k.result) && html`<span class="badge ${verdict(k.result) === "all good" ? "" : "badge-new"}">${verdict(k.result)}</span>`}</div>
-    ${k.result && html`<details><summary class="meta">What it found</summary><div class="check-result">${raw(resultHtml(k.result))}</div></details>`}
-    <form method="post" action="/_admin/checks/${k.id}/delete"><button class="link">Forget</button></form>
-  </li>`)}
-</ul>`}
-<script nonce="${nonce()}">
-  // Check a friend's site: make a one-time link (for that friend, or for whoever it's sent to) and a message to send.
-  // The form is never sent: Enter presses its button, which does it here.
-  document.getElementById("check-form").addEventListener("submit", (e) => e.preventDefault());
-  const checkPanel = document.getElementById("check-panel");
-  document.addEventListener("click", async (e) => {
-    const button = e.target.closest("button[data-check]");
-    if (!button) return;
-    button.disabled = true;
-    document.getElementById("check-error").textContent = "";
-    try {
-      const res = await fetch("/_admin/checks/new", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ site: document.getElementById("check-site").value }) });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Something went wrong.");
-      document.getElementById("check-message").value = data.message;
-      checkPanel.hidden = false;
-      checkPanel.scrollIntoView({ block: "center" });
-    } catch (err) {
-      document.getElementById("check-error").textContent = err.message;
-    }
-    button.disabled = false;
-  });
-  document.getElementById("check-copy").addEventListener("click", async (e) => {
-    await navigator.clipboard.writeText(document.getElementById("check-message").value);
-    e.target.textContent = "Copied";
-    setTimeout(() => { e.target.textContent = "Copy message"; }, 1500);
-  });
-  document.getElementById("check-done").addEventListener("click", () => location.reload());
-  // Folded away, as friends' sites check each other by themselves: opened when linked to (Forget comes back here).
-  const openChecks = () => { if (location.hash === "#checks") document.getElementById("checks").open = true; };
-  openChecks();
-  addEventListener("hashchange", openChecks);
-</script>
-</details>
 
 ${facebook.length > 0 && html`
 <h2>From your Facebook download</h2>

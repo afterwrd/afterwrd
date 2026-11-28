@@ -33,8 +33,8 @@ import { GROUP_RELEASE, isGroupWorker } from "./groupsites.js";
 import { html, json, now, pageData } from "./util.js";
 import { headerMe } from "./photos.js";
 import { selfHostedUpdatePage, updatePage } from "./views/update.js";
-import { onCloudflare, selfHosted } from "./hosting.js";
-import { lastChecked, tooSoonToCheck } from "./checks.js";
+import { selfHosted } from "./hosting.js";
+import { lastChecked } from "./checks.js";
 import { checkAttempts, checkGrant, checkingFriends, friendCheckResults, lastFailure } from "./friendchecks.js";
 
 const VERSION = pkg.version;
@@ -211,17 +211,13 @@ async function updateData(request, env, url, owner) {
     available: Boolean(latest.version && newer(latest.version, VERSION)),
     // The newest release that fixed a security problem, if this site is older than it.
     securityFix: latest.securityFix && newer(latest.securityFix, VERSION) ? latest.securityFix : null,
-    site: url.host, connected: Boolean(connectedToken(request)), oldToken: Boolean(env.UPDATE_TOKEN), groups: await groupsBehind(env.DB),
-    go: url.searchParams.get("go"), checked: await lastChecked(env.DB), checkWait: tooSoonToCheck(env),
+    connected: Boolean(connectedToken(request)), oldToken: Boolean(env.UPDATE_TOKEN), groups: await groupsBehind(env.DB),
+    go: url.searchParams.get("go"), checked: await lastChecked(env.DB),
     auto: await autoData(env, url, latest),
     // Just turned off (POST /_admin/update/auto-off): the clean-up in Cloudflare is said then, not beside the button.
     turnedOff: url.searchParams.get("auto") === "off",
     madeGroups: (await env.DB.prepare(`SELECT COUNT(*) AS n FROM groups WHERE joined_at IS NOT NULL AND role = 'owner'
       AND script IS NOT NULL AND script != ''`).first())?.n ?? 0,
-    // Friends who could check this site: only those whose sites are on Cloudflare (hosting.js).
-    friends: (await env.DB.prepare(`SELECT id, name, origin FROM connections WHERE connected_at IS NOT NULL AND approved_at IS NOT NULL
-      ORDER BY name COLLATE NOCASE LIMIT 200`).all()).results
-      .filter((f) => onCloudflare(f.origin, env)).map(({ id, name }) => ({ id, name })),
     // The versions this site has run (migrate.js), newest first, and a newer one's database update that failed.
     history: (await env.DB.prepare("SELECT version, from_version, at FROM updates ORDER BY id DESC LIMIT 5").all()).results,
     problem: await updateProblem(env.DB),

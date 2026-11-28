@@ -390,7 +390,13 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   code, and the signed list of releases carries each release's). A pass is quiet. If a check finds something, both your
   Home and your friend's say so. Your friends' sites choose when to check, so a site that's been tampered with can't
   pick who checks it, and one that keeps refusing shows up on their Home too. These checks don't read your account's
-  log of changes; a check by link (on the Update page) still does, for when you want the fuller look.</p>
+  log of changes, which says more about you than a check needs; you can read it yourself (below).</p>
+  <p><b>Only ever press Allow after pressing a button on your own site.</b> Your site sends you straight to Cloudflare's
+  page with an address it makes itself, and Cloudflare sends you back through afterwrd.app's Connect page, which hands
+  Cloudflare's answer on to your site. Only your site can use that answer. The first time a browser connects a site,
+  the Connect page shows its address and asks before handing anything on, as a site with an address made to look like
+  yours (<code>afterwrd.sam-tay1or.workers.dev</code>) would get your Cloudflare access. afterwrd never sends you to
+  Cloudflare's page from a link, not even a friend's.</p>
   <p>To see for yourself what the installer did, <a href="/check/">Check your install</a> lists what should be in your
   account afterwards and the trail it leaves in Cloudflare's audit log.</p>
   <p>What <b>Allow</b> covers, plainly: for that hour, every Worker and database in the Cloudflare account, not just
@@ -431,8 +437,9 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
   <ul>
     <li><b>The hour while installing or updating.</b> Whatever installs or updates your site is allowed to change Workers and
     databases in your account for that hour, and Cloudflare can't cut it short. A check by a friend's site afterwards
-    catches changes to your site's code, its setup, other Workers connected to its database, and changes logged in your
-    account's audit log; but a change made straight to the database itself may not show up anywhere. That's why
+    catches changes to your site's code, its setup and other Workers connected to its database; but a change made
+    straight to the database itself only shows in your account's audit log (<a href="/check/">Check your install</a>
+    says how to read it). That's why
     access is only ever asked for an hour at a time, and why it's worth installing into a Cloudflare account used for
     nothing else.</li>
     <li><b>Automatic updates' standing access.</b> While they're on, your site keeps Background Access to change Workers
@@ -442,7 +449,7 @@ non-technical version, see <a href="/compared/">how afterwrd is different from F
     upload since the last check, not only what's live.</li>
     <li><b>A friend's check is a friend's word.</b> A friend's site whose own code had been tampered with could say all is
     well when it isn't. Several friends checking makes that much harder; and the checks can't see a change made
-    straight to your database (only your account's log of changes shows that, which a check by link reads).</li>
+    straight to your database (only your account's log of changes shows that, which only you read).</li>
     <li><b>Your Cloudflare account.</b> Anyone who gets into it can read your database and change your Worker (though
     not sign as you: that takes your passkey or your recovery code). Use a strong password and two-factor
     authentication there, and ideally an account used for nothing else.</li>

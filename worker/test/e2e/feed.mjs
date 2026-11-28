@@ -633,47 +633,14 @@ check("a friend's page keeps their site's address in the menu by their name, not
   (await ann.$eval(".feed-head details.more .menu-info", (m) => m.textContent).catch(() => "")).includes("Their site: localhost:8788")
   && !(await ann.$eval("main", (m) => m.textContent)).includes("a friend you're connected with"));
 
-// Ann asks Bob to check her site: his Home shows it, and one tap makes the link to send her (checks.js).
-const annIdOnB = sql(stateB, `SELECT id FROM connections WHERE origin = '${A}'`)[0].id;
-const makeLinkAsBob = () => bob.evaluate((id) => fetch("/_admin/checks/new", { method: "POST", headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ connection: id }) }).then((r) => r.status), annIdOnB);
+// Asking a friend to check your site by hand, with a link they send back, is gone (2.4): friends' sites check each other
+// by themselves (friendchecks.js). Bob's site doesn't take Ann's site asking, and neither shows anything about it.
+check("a friend's site asking for a check by hand finds nothing there (404)",
+  (await siteCall(stateA, A, `${B}/_p/check-request`, { type: "CheckRequest" })).status === 404);
 await bob.goto(`${B}/`);
-check("a friend's site can't make a check link for someone who didn't ask", (await makeLinkAsBob()) === 409);
+check("…and Home has nothing about friends asking for one", (await bob.$(".check-request")) === null);
 await ann.goto(`${A}/_admin/update`);
-await ann.$eval("#checks-more", (d) => { d.open = true; }); // asking by hand is folded away
-await ann.$eval("#ask-other", (d) => { d.open = true; });
-await ann.click("#ask-check");
-const askMessage = await ann.$eval("#ask-message", (t) => t.value);
-check("for anyone else, Update writes a message naming this site", askMessage.includes("localhost:8787")
-  && askMessage.includes("(or just my address)") && await ann.$eval("#ask-panel", (p) => !p.hidden), askMessage);
-await ann.click(`button[data-ask="${bobId}"]`);
-await ann.waitForFunction(() => document.getElementById("ask-result").textContent, { timeout: 10_000 });
-const asked = await ann.$eval("#ask-result", (p) => p.textContent);
-check("Update has a button to ask each friend, which sends Bob's site the request", asked.startsWith("Asked Bob Example.")
-  && sql(stateB, "SELECT COUNT(*) AS n FROM check_requests")[0].n === 1, asked);
-await bob.goto(`${B}/`);
-const request = await bob.$eval(".check-request", (d) => d.textContent.replace(/\s+/g, " ")).catch(() => "");
-check("Bob's Home shows Ann's request", request.includes("Ann Example asks you to check their afterwrd site"), request);
-await bob.click(".check-request button[data-check-request]");
-await bob.waitForFunction(() => document.querySelector(".check-request")?.dataset.message, { timeout: 10_000 });
-const sent = await bob.$eval(".check-request", (d) => d.dataset.message);
-const checkLink = /http\S+\/_check\/[\w-]{43}/.exec(sent)?.[0] ?? "";
-check("one tap makes a check link on Bob's site, in a message to send her", checkLink.startsWith(`${B}/_check/`) && sent.includes("as you asked")
-  && await bob.$eval(".check-share", (s) => !s.hidden), sent);
-check("…and the request is done with", sql(stateB, "SELECT COUNT(*) AS n FROM check_requests")[0].n === 0
-  && (await bob.goto(`${B}/`), (await bob.$(".check-request")) === null));
-await ann.goto(checkLink);
-const checkPage = await ann.$eval("main", (m) => m.textContent.replace(/\s+/g, " "));
-check("Ann opens it: Bob's site, ready to check her site and only hers", checkPage.includes("Bob Example would like to check your site")
-  && checkPage.includes("Your site: localhost:8787") && (await ann.$("input[name=site]")) === null, checkPage.slice(0, 300));
-await ann.goto(`${A}/_admin/update#checks-more`); // asking by hand is folded away; the link opens it
-await ann.click(`button[data-ask="${bobId}"]`);
-await ann.waitForFunction(() => document.getElementById("ask-result").textContent, { timeout: 10_000 });
-await bob.goto(`${B}/`);
-await Promise.all([settled(bob), bob.click(".check-request form button")]);
-check("\"Not now\" puts a request away", (await bob.$(".check-request")) === null && sql(stateB, "SELECT COUNT(*) AS n FROM check_requests")[0].n === 0);
-check("only a friend's site can ask for a check", (await fetch(`${B}/_p/check-request`, { method: "POST",
-  headers: { "Afterwrd-From": A, "Content-Type": "application/json" }, body: JSON.stringify({ type: "CheckRequest" }) })).status === 401);
+check("Update has no way to ask a friend for a check", !(await ann.$("#ask-check, #ask-other, button[data-ask]")));
 await ann.goto(`${A}/`);
 await Promise.all([ann.waitForNavigation(), ann.click("article.from-friend header .what a")]);
 check("Bob's name on Home opens his page on Ann's site", ann.url() === `${A}/friend/${bobId}/posts`, ann.url());

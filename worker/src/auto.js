@@ -4,9 +4,9 @@
 //
 // Turning it on and off (the owner, signed in):
 //   GET  /_cloudflare/auto-start      (?then=checks: straight on to letting friends' sites check it, friendchecks.js)
-//                                     a PKCE secret in a short cookie, then off to the relay page, which asks Cloudflare
-//                                     for `offline_access workers-scripts.edit` only (installer/connect.html)
-//   GET  /_cloudflare/auto-done       back from the relay: posts the code to…
+//                                     a PKCE secret in a short cookie, and the page before Cloudflare's, which asks for
+//                                     `offline_access workers-scripts.edit` only (cloudflare.js allowLink, allowPage)
+//   GET  /_cloudflare/auto-done       back through the relay: posts the code to…
 //   POST /_cloudflare/auto-finish     swaps it for a refresh token (kept in the outbox's vault, never in D1), sets the
 //                                     Worker's daily schedule, and turns automatic updates on
 //   POST /_admin/update/auto-off      clears the schedule and forgets the refresh token (Revoke in Cloudflare too)
@@ -30,7 +30,7 @@
 // kept for a later, owner-chosen restore.
 import { objectNamed } from "./sqlite.js";
 import pkg from "../package.json";
-import { CLIENT_ID, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
+import { allowLink, allowPage, CLIENT_ID, exchangeCode, grantClient, readCookie, testingHere, withCookie, CODE_RE, donePage } from "./cloudflare.js";
 import { existingDatabase, FILES_AT_ONCE, findWorker, liveVersion, loadRelease, stageVersion, switchTo, uploadAssets, useApiBase, api } from "./deploy.js";
 import { isGroupWorker } from "./groupsites.js";
 import { checkNewer, ensureSchema } from "./migrate.js";
@@ -98,19 +98,12 @@ export async function handleAutoConnect(request, env, url) {
     // Only from this site's own pages (or typed in), as with Connect.
     const from = request.headers.get("Sec-Fetch-Site");
     if (from && from !== "same-origin" && from !== "none") return json({ error: "Start from your own site." }, 403);
-    const { verifier, state, challenge } = await pkce();
-    const relay = new URL(RELAY);
-    relay.searchParams.set("to", `${url.origin}/_cloudflare/auto-done`);
-    relay.searchParams.set("state", state);
-    relay.searchParams.set("challenge", challenge);
-    relay.searchParams.set("client", CLIENT_ID);
-    // With friends' checks next, the relay page says what both are before the first Allow; during a new site's setup
+    const { verifier, state, link } = await allowLink(`${url.origin}/_cloudflare/auto-done`, AUTO_SCOPES);
+    // With friends' checks next, the page says what both are before the first Allow; during a new site's setup
     // (views/pages.js afterPasskey) it also offers to leave them for now.
     const checks = url.searchParams.get("then") === "checks";
     const setup = checks && url.searchParams.get("setup") === "1";
-    if (checks) relay.searchParams.set("both", "1");
-    if (setup) relay.searchParams.set("setup", "1");
-    return withCookie(Response.redirect(relay.toString(), 302),
+    return withCookie(html(allowPage(checks ? "both" : "auto", link, url.host, { skip: setup ? SETUP_DONE : null })),
       `${START_COOKIE}=${state}.${verifier}${checks ? ".checks" : ""}${setup ? ".setup" : ""}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
   }
   if (request.method === "GET" && path === "/auto-done") {
@@ -133,7 +126,8 @@ export async function handleAutoConnect(request, env, url) {
     // Asked for both at once (a new site's setup, or the Update page): on to friends' checks, one more Allow, unless
     // they're already allowed. Setup then ends at SETUP_DONE.
     const checksNext = then === "checks" && !(await checkGrant(env.DB)).on;
-    const next = checksNext ? `/_cloudflare/checks-start${setup === "setup" ? "?setup=1" : ""}`
+    // Straight on to Cloudflare (the page before the first Allow said what both are).
+    const next = checksNext ? `/_cloudflare/checks-start?straight=1${setup === "setup" ? "&setup=1" : ""}`
       : setup === "setup" ? SETUP_DONE : "/_admin/update#auto";
     return withCookie(json({ back: next }), clear);
   }

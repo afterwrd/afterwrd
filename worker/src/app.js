@@ -28,7 +28,6 @@ import { friendCallRoute, handleFriendCalls } from "./friendcalls.js";
 import { messagePage } from "./views/pages.js";
 import { signedFor } from "./share.js";
 import { PUBLIC_APP, PUBLIC_FONT, PUBLIC_SIGNING, serveStatic } from "./static.js";
-import { handleCheck } from "./checks.js";
 import { html, json } from "./util.js";
 import { bodyBytes } from "./calls.js";
 import { countRequest, testLimits } from "./limits.js";
@@ -58,9 +57,9 @@ export const HEADERS = {
 };
 
 // What a self-hosted site doesn't have (hosting.js): automatic updates and Connect (/_auto, /_cloudflare), friends'
-// checks both ways (/_check, /_admin/checks, and the protocol's check calls), and getting back in through Cloudflare
+// checks both ways (/_admin/checks, and the protocol's check calls), and getting back in through Cloudflare
 // (/_auth/recover). Updating (update.js) and starting groups (groupsites.js) say what to do instead.
-const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_check|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_p\/(check-request|check-token|check-soon|check-failed|checked)$/;
+const CLOUDFLARE_ONLY = /^\/(_auto|_cloudflare|_admin\/checks)(\/|$)|^\/_auth\/recover(\/|$)|^\/_p\/(check-token|check-soon|check-failed|checked)$/;
 // What the owner can still open before signing is set up (ownerRoute): setting it up, moving in (which brings an
 // identity with it), Download everything and Update; and files, live updates and the rest that aren't pages.
 const SIGNING_NOT_NEEDED = /^\/(_admin\/(keys|import\/move|export|update)|_cloudflare|_live|_push|_groups|files|static)(\/|$)/;
@@ -201,8 +200,6 @@ async function route(request, env, work) {
   // Anything else another site might ask under /_p/ isn't here: a plain 404, never the sign-in page (a 401 would read
   // to a friend's site as "they've removed you", so a call added in a later release would look like that to them).
   if (url.pathname.startsWith("/_p/")) return json({ error: "Not found." }, 404);
-  // A friend checking their site at this site's invitation (checks.js): they aren't signed in here.
-  if (url.pathname.startsWith("/_check/")) return handleCheck(request, env, url);
   const reading = request.method === "GET" || request.method === "HEAD";
   // The fonts are public, so the sign-in pages can use them too; they're open-licensed and say nothing about the site.
   if (reading && PUBLIC_FONT.test(url.pathname)) return serveStatic(request, env);

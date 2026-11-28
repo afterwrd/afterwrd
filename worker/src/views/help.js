@@ -73,9 +73,11 @@ export const helpBody = ({ version = null } = {}) => html`<nav class="contents" 
   <h3>Updates and friends' checks</h3>
   <p>Let afterwrd update itself, and let your friends' sites check yours: both are on the <strong>Update</strong> page. A
   check looks at whether your site is running exactly a signed afterwrd release, set up as afterwrd sets it up, and
-  whether every version of its code uploaded since the last check was one too. A check you ask a friend for by link
-  also reads your Cloudflare account's log, to see that apps and API tokens did only what installing, updating and
-  groups do.</p>
+  whether every version of its code uploaded since the last check was one too. It never reads anything else in your
+  Cloudflare account.</p>
+  <p><strong>Only ever press Allow on Cloudflare's page after pressing a button on your own site.</strong> afterwrd never
+  sends you there from a link, not even a friend's. A site with an address made to look like yours could get your
+  Cloudflare access that way.</p>
   <h3 id="checks">If a check finds something</h3>
   <p>Home tells you, and <strong>Update</strong> shows what it found.</p>
   <ul>

@@ -55,12 +55,16 @@ Besides the release key, two things are trusted, and anyone who controlled them 
 
 - **afterwrd.app and install.afterwrd.app**, which run in the project's own Cloudflare account (its domain, DNS and
   the installer's Worker all live there). The installer puts afterwrd on new sites, and afterwrd.app's Connect page
-  passes Cloudflare's permission codes back to sites. Someone who controlled that account or the domain, even
-  briefly, could install something else on new sites, or collect the permission of anyone connecting meanwhile. The
-  project's Cloudflare account has a single login, with two-step sign-in, and holds the domain's registration.
-- **The page you press *Allow* on.** Only press *Allow* when you started from your own site, just now: afterwrd.app's
-  Connect page shows which site the permission is for, and a site with a look-alike address, from a link someone sent
-  you, would get your Cloudflare access.
+  passes Cloudflare's permission codes back to sites. Since 2.4 each site makes Cloudflare's sign-in address itself,
+  with its own PKCE challenge, so a code passing through afterwrd.app is no use to anyone but the site it's for. But
+  someone who controlled that account or the domain, even briefly, could install something else on new sites, or send
+  people connecting to a page of their own. The project's Cloudflare account has a single login, with two-step
+  sign-in, and holds the domain's registration.
+- **The page you press *Allow* on.** Only press *Allow* after pressing a button on your own site, just now. afterwrd
+  never sends you to Cloudflare's page from a link, not even a friend's: a site with a look-alike address
+  (`afterwrd.sam-tay1or.workers.dev`) would get your Cloudflare access. The first time a browser connects a site,
+  afterwrd.app's Connect page shows its address, with its Cloudflare name picked out, and asks before handing anything
+  on.
 
 Releases are built on GitHub in a job that can only read the repository; the build record is signed and the release
 published by a separate job that runs none of the build's npm packages.

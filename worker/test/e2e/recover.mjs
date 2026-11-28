@@ -1,8 +1,8 @@
 // Getting back in without a passkey (src/recover.js), end to end on one local site, with a stand-in on 8799 for
 // Cloudflare's token endpoint and API. run.sh starts the site with ALLOW_LOCAL_SITES=1, OAUTH_TOKEN_URL,
 // CLOUDFLARE_API_URL, TEST_SUBDOMAIN=ann (the stand-in account's workers.dev name) and TEST_VERSION_ID (in case
-// wrangler doesn't say which version is running). The relay page (afterwrd.app/connect/) is stood in for as in
-// checks.mjs: the test reads where the site sent the browser, and comes back the way the relay would.
+// wrangler doesn't say which version is running). Cloudflare's Allow page is stood in for (helpers.mjs): the test
+// reads where the site sent the browser, and comes back the way afterwrd.app's relay page would.
 // Which account the stand-in shows depends on the code: "good" (this site's), "elsewhere" (another account), "stale"
 // (this site's name, but not serving this version).
 import { execFileSync } from "node:child_process";
@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
 import { fileURLToPath } from "node:url";
-import { sql, setUpSigning } from "./helpers.mjs";
+import { allowAsks, backThroughRelay, continueToCloudflare, isAllowPage, sql, setUpSigning } from "./helpers.mjs";
 const WORKER = fileURLToPath(new URL("../../", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const BASE = "http://localhost:8787";
@@ -73,14 +73,15 @@ async function device() {
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", transport: "internal",
     hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } });
-  // afterwrd.app's relay page, stood in for: where the site sent the browser is kept.
-  page.relay = null;
+  // Cloudflare's Allow page, stood in for: where the site sent the browser is kept.
+  page.allow = null;
   await page.setRequestInterception(true);
   page.on("request", (req) => {
     const at = new URL(req.url());
-    if (at.hostname !== "afterwrd.app") return req.continue();
-    if (at.pathname === "/connect/") page.relay = at;
-    req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+    if (at.hostname !== "dash.cloudflare.com" && at.hostname !== "afterwrd.app") return req.continue();
+    if (isAllowPage(at)) page.allow = at;
+    else if (at.pathname !== "/favicon.ico") errors.push(`went to ${at.href}`);
+    req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
   });
   return page;
 }
@@ -108,22 +109,35 @@ check("…which says what will happen: Cloudflare, nothing kept, every device si
   page.includes("Cloudflare account your site is in") && page.includes("keeps nothing")
   && page.includes("every device signed in to your site is signed out") && page.includes("replaces the passkeys on all your other devices"));
 
-/** Connect Cloudflare on the new phone, then back from the relay with `code` (and, if given, another state). */
+/**
+ * Connect Cloudflare on the new phone (the site's page first, then Cloudflare's), then back the way the relay would,
+ * with `code` (and, if given, another state).
+ */
 async function connect(code, { state = null } = {}) {
-  phone.relay = null;
+  phone.allow = null;
   await phone.goto(`${BASE}/_auth/recover`);
-  await Promise.all([phone.waitForFunction(() => document.title === "relay stand-in"), phone.click("a[href='/_auth/recover/start']")]);
-  const relay = phone.relay;
-  await phone.goto(`${relay.searchParams.get("to")}#${new URLSearchParams({ code: `${code}.one-time-code`, state: state ?? relay.searchParams.get("state") })}`);
+  let before = "";
+  await continueToCloudflare(phone, async () => {
+    await phone.click("a[href='/_auth/recover/start']");
+    await phone.waitForFunction(() => document.title === "Connecting to Cloudflare · afterwrd", { timeout: 15000 });
+    before = await words(phone);
+  });
+  const allow = phone.allow;
+  const back = new URL(backThroughRelay(allow, `${code}.one-time-code`));
+  if (state) back.hash = new URLSearchParams({ code: `${code}.one-time-code`, state }).toString();
+  await phone.goto(back.href);
   await phone.waitForFunction(() => location.pathname !== "/_auth/recover/done" || document.getElementById("error")?.textContent, { timeout: 15000 });
-  return { relay, error: await words(phone, "#error") };
+  return { allow, before, error: await words(phone, "#error") };
 }
 
 const first = await connect("elsewhere");
-check("Connect goes to afterwrd.app's relay page, coming back to the recovery page", first.relay?.searchParams.get("to") === `${BASE}/_auth/recover/done`
-  && first.relay.searchParams.get("challenge")?.length === 43 && Boolean(first.relay.searchParams.get("client")));
-check("the code is swapped with the PKCE secret, never shown to the relay", exchanges.at(-1)?.code_verifier?.length > 40
-  && !first.relay.href.includes(exchanges.at(-1).code_verifier) && exchanges.at(-1).redirect_uri === "https://afterwrd.app/connect/");
+check("the site's own page says what Cloudflare will ask, before it does", first.before.includes("Get back into your afterwrd site?")
+  && first.before.includes("Sign in to Cloudflare as the account your site is in") && first.before.includes("localhost:8787"), first.before);
+const firstAsked = allowAsks(first.allow, { scope: "workers-scripts.edit", to: `${BASE}/_auth/recover/done` });
+check("Continue asks Cloudflare for an hour's access to change Workers (never read-only), coming back to the recovery page", firstAsked === "", firstAsked);
+check("the code is swapped with the PKCE secret that matches the challenge, which is never in an address", exchanges.at(-1)?.code_verifier?.length > 40
+  && createHash("sha256").update(exchanges.at(-1).code_verifier).digest("base64url") === first.allow.searchParams.get("code_challenge")
+  && !first.allow.href.includes(exchanges.at(-1).code_verifier) && exchanges.at(-1).redirect_uri === "https://afterwrd.app/connect/");
 check("another Cloudflare account doesn't get anyone in", first.error.includes("isn't the one this site is in") && !(await phone.$("a[href='/_admin']")), first.error);
 check("…and nothing was changed: the old phone is still signed in", await signedIn(lostCookie));
 const stale = await connect("stale");

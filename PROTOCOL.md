@@ -2156,7 +2156,7 @@ signed call (section 2) made with the calling site's hosting key, and the receiv
 caller's identity at the caller's own address.
 
 This section covers every call between friends' sites except notes (`POST /_p/notes`, `POST /_p/mention`: section 9),
-site checks (`POST /_p/check-request`, `/_p/check-token`, `/_p/check-soon`, `/_p/check-failed`, `/_p/checked`:
+site checks (`POST /_p/check-token`, `/_p/check-soon`, `/_p/check-failed`, `/_p/checked`:
 section 11), and `POST /_p/before`, which only brings comments over from afterwrd 1 and isn't specified here.
 
 | Call | Caller | Purpose |
@@ -3729,20 +3729,20 @@ Source: `src/groups.js`, `src/groupmembers.js` `takeJoin`, `takeMemberRecord`; `
 
 A site can't vouch for itself. Tampered code can answer any question about itself with a copy of the real code. So
 evidence about a site on Cloudflare comes from Cloudflare's API, read with a read-only token the site's owner allowed,
-and the comparison runs on another site: the checker's. The site checked never handles the token used to check it in
-a check by link, and never sees the checker's working in either kind of check. The code is compared with releases
-signed with afterwrd's release key.
+and the comparison runs on another site: the checker's. The site checked never sees the checker's working. The code
+is compared with releases signed with afterwrd's release key.
 
 Checks apply only to sites on Cloudflare, at `https://<script>.<account-subdomain>.workers.dev`. A self-hosted site
 can't be checked, and every `/_p/check-*` or `/_p/checked` call from a friend whose address isn't on workers.dev gets `404
 {"error": "Not found."}`, as if the call didn't exist. A self-hosted site answers every one of them with a plain-text
 `404 Not found`.
 
-There are two kinds of check:
-- **By link.** A person is present. The checker makes a one-time link and the person opens it. Cloudflare asks them to
-  allow read-only access, and the checker's site reads the result.
-- **Automatic.** Nobody is present. A site whose owner allows it keeps a lasting read-only grant and hands a friend's
-  site a one-hour token on request. Friends' sites check each other a few times a week.
+Checks are automatic: nobody is present. A site whose owner allows it keeps a lasting read-only grant and hands a
+friend's site a one-hour token on request, and friends' sites check each other a few times a week (11.4). Nothing but
+Workers' code and setup is read: not the account's audit log, which says more about its owner than a check needs.
+(Until 2.4 there was also a check by link, which a person opened to allow a friend's site one-hour read-only access,
+and which read the audit log too. It was removed, so that a link to Cloudflare's Allow page is never something
+afterwrd sends.)
 
 ### 11.1 Signed releases
 
@@ -3817,43 +3817,58 @@ The checking site reads Cloudflare's API (`https://api.cloudflare.com/client/v4`
 | `GET <site>/_version` on the site itself (public, `{"id": <version id>}`) | equals the serving version's id, so the Worker read is the one answering at the address |
 | `…/versions/<serving id>` | `resources.script.etag` equals the signed `etag` for that version. Bindings are exactly `assets ASSETS`, `d1 DB`, `durable_object_namespace MEDIA MediaStore`, `durable_object_namespace OUTBOX Outbox`, `version_metadata VERSION`, plus, if present, the secrets `SETUP_CODE`, `UPDATE_TOKEN` and `OUTBOX_KEY` (the key every call to the site's own objects carries, so another Worker bound to them gets nothing). Neither `MEDIA` nor `OUTBOX` names another Worker (`script_name`) or another class: the signed code wired to someone else's objects would otherwise pass (since 2.3.2). `script_runtime`'s compatibility date and flags are the manifest's. `script_runtime.assets` has `raw_run_worker_first: true` and `serve_directly` not true, so every request reaches the code (Cloudflare's etag doesn't cover this setting or the site files). |
 | up to 8 other Workers' deployments and serving versions | none is bound to the site's D1 database, or to its Durable Objects: a `durable_object_namespace` binding naming the site's Worker (`script_name`) or one of its namespaces (`namespace_id`). More than 8 other Workers is reported. |
-| `HEAD <site><path>` for the manifest's private site files (up to 25 in a check by link; up to 44, in a step of its own, in an automatic check), unsigned in, no redirects followed | none answers `200` |
+| `HEAD <site><path>` for the manifest's private site files (up to 44, in a step of its own), unsigned in, no redirects followed | none answers `200` |
 
-A check by link also reads the account's audit log (11.3). An automatic check reads every upload since the last
-complete check instead (11.4).
+A check also reads every upload since the last complete check (11.4).
 
 Source: `src/checks.js` `checkSite`, `siteFiles`, `BINDINGS`; `src/app.js` (`/_version`).
 
-### 11.3 Check by link
+### 11.3 Allowing it: Cloudflare's sign-in
 
-This flow runs between the checker's site and the checked person's browser. No call passes between the two sites
-until the end.
+Everything a site on Cloudflare is allowed in its owner's account comes through Cloudflare's own sign-in for apps
+(OAuth 2.0 with PKCE, as a public client: no secret): installing, updating by hand, starting a group, turning on
+automatic updates or friends' checks, and getting back in without a passkey. The installer at install.afterwrd.app
+has a return address of its own. Every site comes back through the one registered for afterwrd,
+`https://afterwrd.app/connect/` (the relay).
 
-1. The site owner who wants a check sends `POST /_p/check-request` to a friend (11.5). The friend's Home shows the
-   request. The friend makes a link, `<checker>/_check/<token>`: a 43-character random token, kept only as its
-   SHA-256, usable once, for 14 days, with at most 20 unused links at a time. They send it back by message, outside
-   afterwrd. A link can also be made for any address, or none.
-2. The person opens the link and presses start. The checker's site redirects them through afterwrd's relay page
-   (`https://afterwrd.app/connect/`) to Cloudflare's OAuth, with PKCE. The relay chooses the scope from the return
-   path, so `/_check/done` only ever asks for `workers-scripts.content_read account-settings.read`.
-3. The code returns in the URL fragment, and the page posts it to `POST /_check/finish` on the checker's site. That
-   site swaps it for an access token and runs 11.2. The token is never stored in the database. It waits up to
-   10 minutes in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie on `/_check` in the person's own browser, while the
-   page calls `POST /_check/audit` for each page of the audit log (500 entries, newest first, from an hour before the
-   Worker was made until now).
-4. Audit entries made through OAuth that afterwrd itself does (uploading, deploying and scheduling the site's Worker
-   or its groups' Workers, making or deleting databases, setting a new account's workers.dev name within 5 minutes of
-   the Worker being made) are counted. Anything else done through OAuth or the API is listed: on the site's own Worker,
-   database or account as unexpected, and on other Workers and databases separately.
-5. If the result is "all good" and the site checked is a friend, the checker sends it `POST /_p/checked` (11.5).
+1. The owner presses a button on their own site (`Sec-Fetch-Site` must be `same-origin` or `none`). The site makes a
+   PKCE secret (48 random bytes, base64url) and a `state`, `<24 random bytes, base64url>~<return address, base64url>`,
+   keeps both in a short `HttpOnly`, `Secure`, `SameSite=Lax` cookie, and shows a page saying what Cloudflare will
+   ask, with a link to `https://dash.cloudflare.com/oauth2/auth` that the site builds itself: its client id, the
+   relay as `redirect_uri`, the scope, the `state`, and the S256 challenge. The relay never sees the challenge, so a
+   code passing through it is no use to anyone but the site holding the secret (since 2.4; security review 2026-11
+   M11).
+2. Cloudflare sends the browser to the relay with `code` and `state` (or `error`). The relay decodes the return
+   address from `state`. It must be `https://<script>.<account-subdomain>.workers.dev`, no port, query or fragment,
+   at one of `/_cloudflare/done`, `/_cloudflare/auto-done`, `/_cloudflare/checks-done` or `/_auth/recover/done`.
+3. If the browser has carried on to that site from the relay before (kept in the relay's own `localStorage`, at most 20
+   sites), or there's no code, the relay goes straight on. Otherwise it shows the address, with the account subdomain
+   picked out, and asks first: a look-alike address would otherwise get the person's access (M10). afterwrd never
+   sends anyone to Cloudflare's Allow page from a link.
+4. The relay hands `code` and `state` to the return address in the URL fragment, which no server or log sees. A page
+   there posts them to the matching `finish` path, which checks `state` against the cookie and swaps the code, with
+   the PKCE secret, for a token.
 
-Source: `src/checks.js` `makeCheckLink`, `start`, `finish`, `auditStep`, `readAuditPage`, `expected`, `tellChecked`;
-`src/cloudflare.js` `relayLink`, `exchangeCode`; `installer/connect.html`.
+What each return path asks for:
+
+| Return path | Scope | Kept |
+|---|---|---|
+| `/_cloudflare/done` | `workers-scripts.admin d1.write account-settings.read` | an hour, in a cookie only the site's pages can use |
+| `/_cloudflare/auto-done` | `offline_access workers-scripts.edit` | the refresh token, in the Outbox's vault, only if Cloudflare names no wider scope |
+| `/_cloudflare/checks-done` | `offline_access workers-scripts.content_read` | as above (11.4) |
+| `/_auth/recover/done` | `workers-scripts.edit` | nothing: used once, to prove the owner can change the site's Worker |
+
+Sites from before 2.4 send the browser to the relay first, with `?to=<return address>&state=<random>&challenge=…`.
+The relay asks there, keeps the return address in the tab's `sessionStorage`, chooses the scope from the return path
+as in the table, and builds Cloudflare's address itself. It accepts that until those sites have updated.
+
+Source: `src/cloudflare.js` `allowLink`, `allowPage`, `exchangeCode`, `donePage`; `src/auto.js`, `src/friendchecks.js`
+`handleChecksConnect`, `src/recover.js`; `installer/connect.html`.
 
 ### 11.4 Automatic checks
 
-**The site checked** allows it once. Its owner goes through the relay with the return path `/_cloudflare/checks-done`,
-which asks for `offline_access workers-scripts.content_read`. The site keeps the refresh token only if Cloudflare's
+**The site checked** allows it once, through Cloudflare's sign-in (11.3) with the return path
+`/_cloudflare/checks-done`, which asks for `offline_access workers-scripts.content_read`. The site keeps the refresh token only if Cloudflare's
 answer names a `scope` with nothing outside those two. It is kept in the Outbox's vault object, never in the database.
 On `POST /_p/check-token` the site hands out an access token from it. It reuses the token already handed out while
 that has more than 40 minutes left, because refreshing would end a check under way. Otherwise it refreshes, keeping
@@ -3895,10 +3910,9 @@ All are signed calls from a friend's site (section 2), answered only to approved
 
 | Call | Body | Answer | Effect and limits |
 |---|---|---|---|
-| `POST /_p/check-request` | `{"type": "CheckRequest"}` | `200 {"ok": true}`; `400` if `type` is wrong | Shows "please check my site" on the owner's Home. One per friend, refreshed at most hourly, 50 at most in all, gone after 14 days. Sent only when the sender's code was uploaded more than an hour ago. |
 | `POST /_p/check-token` | `{"type": "CheckToken"}` | `200 {"token": "<Cloudflare access token>", "until": <seconds>}`; `409 {"error", "off": true}` if not allowed or the grant is lost; `429` over the limit | 2 tokens a day to one friend's site, 12 to all (rolling 24 h, counted atomically). A refused request is remembered (at most one write a day per friend) to show the owner who tried. |
 | `POST /_p/check-soon` | `{"type": "CheckSoon"}` | `200 {"ok": true}` | "I've just been updated, please check me soon." Sent after an update to 2 random friends on Cloudflare, if the sender allows checks. Ignored if the receiver has checking turned off. |
-| `POST /_p/checked` | `{"type": "Checked", "site": "<receiver's own address>", "version": "x.y.z"}` | `200 {"ok": true}`; `400` if `site` isn't the receiver's address | A pass, from a check by link or an automatic one. It is the friend's word: kept at most once an hour per friend, the newest 10 kept, shown as "last checked by". It clears an earlier failure from the same friend. |
+| `POST /_p/checked` | `{"type": "Checked", "site": "<receiver's own address>", "version": "x.y.z"}` | `200 {"ok": true}`; `400` if `site` isn't the receiver's address | A pass. It is the friend's word: kept at most once an hour per friend, the newest 10 kept, shown as "last checked by". It clears an earlier failure from the same friend. |
 | `POST /_p/check-failed` | `{"type": "CheckFailed", "site": "<receiver's address>", "version": "x.y.z" \| null, "found": ["code", …]}` | `200`; `400` if `site` is wrong or no known code is given; `403` if the receiver hasn't handed this friend a token in the last 2 hours | Kept at most once an hour per friend, the newest 10 kept, and shown on Home in the receiver's own words for each code. Up to 6 codes; unknown codes are ignored. |
 
 `version` is kept only if it matches `\d{1,4}.\d{1,4}.\d{1,4}`. The finding codes:
@@ -3919,8 +3933,7 @@ All are signed calls from a friend's site (section 2), answered only to approved
 
 Free text from the checker never reaches the receiver's pages: only codes, which the receiver turns into its own words.
 
-Source: `src/friendcalls.js` `handleFriendCalls`; `src/checks.js` `askForCheck`, `receiveCheckRequest`,
-`receiveChecked`; `src/friendchecks.js` `giveCheckToken`, `askFriendsToCheckSoon`, `receiveCheckSoon`,
+Source: `src/friendcalls.js` `handleFriendCalls`; `src/checks.js` `receiveChecked`; `src/friendchecks.js` `giveCheckToken`, `askFriendsToCheckSoon`, `receiveCheckSoon`,
 `receiveCheckFailed`, `findingCodes`, `FOUND`.
 
 ## 12. Security considerations
@@ -4081,8 +4094,7 @@ owner's browser and their own site, and aren't part of the protocol.
 | `GET` or `HEAD /files/<sha256>?exp=<t>&sig=<s>` | a browser with a link this site signed, or the site's group copying a photo | 8.12, 10.10 |
 | `POST /_p/notes` | an approved friend, or a group the owner has joined | 9.1 |
 | `POST /_p/mention` | the site of someone whose comment mentions the owner | 9.4 |
-| `POST /_p/check-request`, `/_p/check-token`, `/_p/check-soon`, `/_p/checked`, `/_p/check-failed` | an approved friend on Cloudflare | 11.5 |
-| `GET /_check/<token>`, `POST /_check/<token>/start`, `GET /_check/done`, `POST /_check/finish`, `POST /_check/audit` | the browser of whoever opens a check link (on Cloudflare only) | 11.3 |
+| `/_p/check-token`, `/_p/check-soon`, `/_p/checked`, `/_p/check-failed` | an approved friend on Cloudflare | 11.5 |
 | `POST /_member/removed` | a group the owner has joined | 10.5 |
 | `POST /_p/before` | an approved friend, bringing comments over from afterwrd 1 | not specified (section 8) |
 

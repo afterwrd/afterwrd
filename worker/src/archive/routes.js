@@ -35,7 +35,6 @@ import { newDevices } from "../admin.js";
 import { identitySummary, ownMove } from "../keys.js";
 import { recoveredHere } from "../recover.js";
 import { newPushDevices, pushKey } from "../push.js";
-import { checkRequests, recentChecks } from "../checks.js";
 import { securityFixWaiting, waitingRelease } from "../update.js";
 import { autoState } from "../auto.js";
 import { checkGrant, friendCheckAlerts, lastFailure, lookAfterFacts, lookAfterReminder } from "../friendchecks.js";
@@ -814,7 +813,7 @@ const INTRODUCTIONS_SQL = `SELECT i.id, i.origin, i.name, i.note, c.name AS by_n
 async function home(ctx, params) {
   const { db } = ctx;
   await pullNew(ctx.env, ctx.url.origin); // friends whose signed posts this site has never had (friendcopies.js)
-  const [own, friendKept, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, requests, checkFailure,
+  const [own, friendKept, ownOld, friendRows, onThisDayPosts, newDevicesFound, newNotifying, securityFix, auto, checkFailure,
     friendChecks, checkGrantState, asking, introductions, recovered, lookAfterFound, archiveDropped, identity, gone, movingRows, sent, busy] = await Promise.all([
     ownItems(db), // afterwrd 2: the owner's own posts, signed (items.js)
     friendItems(db), // …and friends', kept here (friendcopies.js): asked for again below, after the page has gone
@@ -827,7 +826,6 @@ async function home(ctx, params) {
     newPushDevices(db),
     securityFixWaiting(db),
     autoState(db), // automatic updates (auto.js): anything that needs the owner
-    checkRequests(db),
     lastFailure(db),
     friendCheckAlerts(db),
     checkGrant(db),
@@ -893,8 +891,6 @@ async function home(ctx, params) {
     own, friendOwn, ownOld, onThisDay: onThisDayPosts, friends: friendRows, reportsWaiting,
     newDevices: newDevicesFound, newNotifying, securityFix, auto, recovered, identityChange, moved, friendsMoving, sent, bringOver, statusAway,
     pushKey: notifyKey,
-    // Friends asking for their site to be checked: one tap makes the link to send back (checks.js).
-    checkRequests: requests,
     // A friend's site that checked this one and found something; this one's checks of friends' sites that did (or
     // that their sites keep refusing): friendchecks.js.
     checkFailure, friendChecks,
@@ -1002,7 +998,7 @@ async function friendsIndex(ctx) {
   // Requests show only what their site said when it connected: nothing is fetched from a site you haven't approved,
   // so a stranger can't slow this page down or see when you look at it.
   return { friends, facebook, requests: requests.results, introductions: introductions.results,
-    checks: await recentChecks(db), blocked: await blockedList(db), muted: await mutedList(db) };
+    blocked: await blockedList(db), muted: await mutedList(db) };
 }
 
 /** Who a friend on afterwrd is in the owner's Facebook download, if the owner has linked them. */

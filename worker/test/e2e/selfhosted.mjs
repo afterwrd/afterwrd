@@ -80,7 +80,7 @@ await ann.goto(`${A}/_admin/update`);
 const update = await text(ann);
 check("the Update page says it's on her own server", update.includes("on your own server"), update.slice(0, 200));
 check("…with no Connect, automatic updates or check offers", !update.includes("Connect Cloudflare") && !update.includes("automatic updates")
-  && !(await ann.$("#auto, #checks-off, #ask-check, button[data-ask]")));
+  && !(await ann.$("#auto, #checks-off")));
 check("…and says friends' sites can't check it", update.includes("friends' sites can't check it"));
 check("updating through Cloudflare isn't there", (await post(ann, "/_admin/update/check", { tag: "v9.9.9" })).status === 404
   && (await post(ann, "/_admin/update/install-now")).status === 404 && (await post(ann, "/_admin/update/auto-off")).status === 404);
@@ -92,31 +92,20 @@ const gone = {
   "GET /_cloudflare/checks-start": await status(ann, "/_cloudflare/checks-start"),
   "GET /_cloudflare/connect": await status(ann, "/_cloudflare/connect?back=/"),
   "POST /_auto/step": (await fetch(`${A}/_auto/step`, { method: "POST", body: "{}" })).status,
-  "GET /_check/x": (await fetch(`${A}/_check/${"x".repeat(43)}`)).status,
-  "POST /_admin/checks/new": (await post(ann, "/_admin/checks/new", {})).status,
   "POST /_admin/checks/myself": await status(ann, "/_admin/checks/myself", "POST"),
   "POST /_p/check-token": (await fetch(`${A}/_p/check-token`, { method: "POST", body: "{}" })).status,
-  "POST /_p/check-request": (await fetch(`${A}/_p/check-request`, { method: "POST", body: "{}" })).status,
   "POST /_groups/create/check": (await post(ann, "/_groups/create/check", { name: "x" })).status,
 };
 const open = Object.entries(gone).filter(([, s]) => s !== 404);
 check("Connect, automatic updates, checks and making Workers aren't there", open.length === 0, JSON.stringify(open));
 
-// --- friends: Bob's site, on Cloudflare, can't check Ann's or ask hers for a check ------------------------------
+// --- friends: Bob's site, on Cloudflare, can't check Ann's ------------------------------------------------------
 await befriend(ann, A, bob, B);
 check("a self-hosted site and one on Cloudflare can be friends", n(stateA, "connections WHERE approved_at IS NOT NULL") === 1);
 const annOnBob = await bob.evaluate(() => fetch("/friend").then((r) => r.text()));
 const annId = Number(/href="\/friend\/(\d+)\/posts"/.exec(annOnBob)?.[1]);
 await bob.goto(`${B}/friend/${annId}/posts`);
 check("Bob's site says Ann's is self-hosted and can't be checked, in the menu by her name", (await bob.$eval(".feed-head details.more .menu-info", (m) => m.textContent).catch(() => "")).includes("self-hosted, can't be checked"));
-await bob.goto(`${B}/_admin/update`);
-check("Bob's Update page doesn't offer to ask Ann for a check", !(await bob.$(`button[data-ask="${annId}"]`)));
-const asked = await post(bob, "/_admin/checks/ask", { connection: annId });
-check("…and asking her anyway is refused", asked.status === 409 && /self-hosted/.test(asked.error ?? ""), JSON.stringify(asked));
-const link = await post(bob, "/_admin/checks/new", { site: A });
-check("a check link for Ann's site is refused", link.status === 400 && /isn't on Cloudflare/.test(link.error ?? ""), JSON.stringify(link));
-const pasted = await post(bob, "/_admin/checks/new", { site: "walkers.example.com" });
-check("…as is one for any address not on Cloudflare", pasted.status === 400 && /isn't on Cloudflare/.test(pasted.error ?? ""), JSON.stringify(pasted));
 
 // Checks only run between sites on Cloudflare, so a check call from Ann's site can only be made up: Bob's site gives it
 // nothing, even signed by Ann's site.
@@ -124,7 +113,6 @@ const fromAnn = async (path, body = null) => (await siteCall(stateA, A, `${B}${p
 const madeUp = {
   "check-token": await fromAnn("/_p/check-token", { type: "CheckToken" }),
   "checked": await fromAnn("/_p/checked", { type: "Checked", site: A, version: "0.0.1" }),
-  "check-request": await fromAnn("/_p/check-request", { type: "CheckRequest" }),
 };
 check("Bob's site refuses check calls from Ann's self-hosted site", Object.values(madeUp).every((s) => s === 404), JSON.stringify(madeUp));
 check("…and notes no attempt to check it", sql(stateB, "SELECT COUNT(*) AS n FROM settings WHERE key = 'check_attempts'")[0].n === 0);
@@ -165,7 +153,7 @@ check("deleting it empties the group's site, and Ann's forgets it", n(stateG, "g
 
 // --- Home -------------------------------------------------------------------------------------------------------
 await ann.goto(`${A}/`);
-check("Home has nothing about checks or automatic updates", !(await ann.$(".check-request, #check-failure, .friend-check")));
+check("Home has nothing about checks or automatic updates", !(await ann.$("#check-failure, .friend-check, #look-after")));
 
 check("no script errors", errors.length === 0, errors.join("; "));
 await browser.close();

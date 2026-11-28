@@ -5,9 +5,10 @@
 //   node update-ui.mjs remembered (older, and UPDATE_TOKEN set: a token a version before 0.20.0 kept)
 //   node update-ui.mjs current    (up to date)
 // Local sites aren't on workers.dev, so the actual update stops at "Updating works from the site's workers.dev address".
-// Connecting Cloudflare is run end to end with the relay page (afterwrd.app/connect/) stood in for: the test answers
-// for it, reads the state from the address the site sent the browser to, and comes back the way the real page would.
-import { setUpSigning } from "./helpers.mjs";
+// Connecting Cloudflare is run end to end with Cloudflare's Allow page stood in for (helpers.mjs): the test answers for
+// it, reads what the site asked for from the address it sent the browser to, and comes back the way afterwrd.app's
+// relay page would.
+import { allowAsks, backThroughRelay, continueToCloudflare, isAllowPage, setUpSigning } from "./helpers.mjs";
 import puppeteer from "puppeteer-core";
 import { createServer } from "node:http";
 import { createHash, createPrivateKey, sign } from "node:crypto";
@@ -77,12 +78,16 @@ const behind = mode !== "current";
 check(behind ? "Update button marked when a release is waiting" : "no mark when up to date",
   update.dot === behind && update.label === (behind ? "Update available" : "Update"), JSON.stringify(update));
 
-// The relay page, stood in for: any request to afterwrd.app gets a plain page, and the address it was sent to is kept.
-let relayUrl = null;
+// Cloudflare's Allow page, stood in for: the address the site sent the browser to is kept. (Nothing goes to afterwrd.app
+// on the way out now; if anything did, it's noted.)
+let allow = null;
 await page.setRequestInterception(true);
 page.on("request", (req) => {
-  if (new URL(req.url()).hostname === "afterwrd.app") { relayUrl = new URL(req.url()); req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" }); }
-  else req.continue();
+  const at = new URL(req.url());
+  if (at.hostname !== "dash.cloudflare.com" && at.hostname !== "afterwrd.app") return req.continue();
+  if (isAllowPage(at)) allow = at;
+  else if (at.pathname !== "/favicon.ico") errors.push(`went to ${at.href}`);
+  req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
 });
 const post = (path, body) => page.evaluate((path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body) }).then((r) => r.json()), path, body);
@@ -95,13 +100,20 @@ if (mode === "behind") {
   check("no Forget (nothing remembered)", !(await page.$("#forget")));
   check("Update without connecting says so", await page.evaluate(() => { document.getElementById("go").click(); return document.getElementById("error").textContent; }) === "Connect Cloudflare first.");
 
-  // Connect: off to the relay with the state and challenge, and a cookie holding the PKCE secret.
-  await Promise.all([page.waitForNavigation(), page.click("#connect")]);
-  check("Connect sends the browser to afterwrd.app/connect/ with where to come back to", relayUrl?.origin === "https://afterwrd.app" && relayUrl.pathname === "/connect/"
-    && relayUrl.searchParams.get("to") === `${BASE}/_cloudflare/done`, String(relayUrl));
-  const state = relayUrl.searchParams.get("state") ?? "";
-  const challenge = relayUrl.searchParams.get("challenge") ?? "";
-  check("with a state and a PKCE challenge", /^[\w-]{24,}$/.test(state) && /^[\w-]{43}$/.test(challenge));
+  // Connect: the site's own page, saying what's asked for, then off to Cloudflare with the state and challenge, and a
+  // cookie holding the PKCE secret.
+  let before = "";
+  await continueToCloudflare(page, async () => {
+    await page.click("#connect");
+    await page.waitForFunction(() => document.title === "Connecting to Cloudflare · afterwrd", { timeout: 15_000 });
+    before = await page.$eval("main", (m) => m.innerText);
+  });
+  check("Connect shows the site's own page first, saying what Cloudflare will ask and the site's address", /Connect your site to Cloudflare\?/.test(before)
+    && /one hour/.test(before) && before.includes("localhost:8787"), before.replace(/\s+/g, " "));
+  const askedFor = allowAsks(allow, { scope: "workers-scripts.admin d1.write account-settings.read", to: `${BASE}/_cloudflare/done` });
+  check("Continue sends the browser straight to Cloudflare, asking for an hour's access to install and update, coming back here through the relay",
+    askedFor === "", askedFor);
+  check("with a state and a PKCE challenge", /^[\w-]{32}~[\w-]+$/.test(allow?.searchParams.get("state") ?? ""), allow?.href);
   check("a back path on another site is refused", (await page.goto(`${BASE}/_cloudflare/start?back=//evil.example/`)).status() === 400);
   const session = (await page.cookies(BASE)).map((c) => `${c.name}=${c.value}`).join("; ");
   const crossSite = await fetch(`${BASE}/_cloudflare/start?back=/_admin/update?go=update`, { redirect: "manual",
@@ -119,10 +131,9 @@ if (mode === "behind") {
   check("a code with the wrong state is refused, and nothing is exchanged", /isn't the connection/.test(await page.$eval("#error", (e) => e.textContent)) && exchanges.length === 0);
   // Refusing clears the started connection, so a fresh one is needed.
   await page.goto(`${BASE}/_admin/update`);
-  await Promise.all([page.waitForNavigation(), page.click("#connect")]);
-  const state2 = relayUrl.searchParams.get("state");
-  const challenge2 = relayUrl.searchParams.get("challenge");
-  await page.goto(`${BASE}/_cloudflare/done#code=the-code&state=${state2}`);
+  await continueToCloudflare(page, () => page.click("#connect"));
+  const challenge2 = allow.searchParams.get("code_challenge");
+  await page.goto(backThroughRelay(allow, "the-code"));
   await page.waitForFunction(() => location.pathname === "/_admin/update", { timeout: 15_000 });
   const sent = exchanges.at(-1);
   check("the code goes to the token endpoint with the PKCE secret, the client id and the relay as redirect", exchanges.length === 1 && sent.params.grant_type === "authorization_code"
@@ -147,8 +158,8 @@ if (mode === "behind") {
     await page.goto(`${BASE}/_admin/update`);
     await post("/_cloudflare/disconnect", {});
     await page.goto(`${BASE}/_admin/update`);
-    await Promise.all([page.waitForNavigation(), page.click("#connect")]);
-    await page.goto(`${BASE}/_cloudflare/done#code=bad-code&state=${relayUrl.searchParams.get("state")}`);
+    await continueToCloudflare(page, () => page.click("#connect"));
+    await page.goto(backThroughRelay(allow, "bad-code"));
     await page.waitForFunction(() => document.getElementById("error").textContent, { timeout: 10_000 });
     return page.$eval("#error", (e) => e.textContent);
   })())));

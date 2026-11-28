@@ -1,13 +1,13 @@
 // Friends' automatic checks (src/friendchecks.js), end to end on two local sites: Ann's (A, 8787) lets her friends'
 // sites check it; Sam's (B, 8788) checks it in its daily run (started with /__scheduled; TEST_CHECK_EVERYONE makes it
 // check every friend due, not about three a week). Stand-ins on 8799: Cloudflare's token endpoint and API (Ann's
-// account, whose workers.dev name is "ann", TEST_SUBDOMAIN), GitHub's release downloads and the signed list. The relay
-// page is stood in for as in auto.mjs. The signing key is auto.mjs's throwaway one.
+// account, whose workers.dev name is "ann", TEST_SUBDOMAIN), GitHub's release downloads and the signed list. Cloudflare's
+// Allow page is stood in for as in auto.mjs (helpers.mjs). The signing key is auto.mjs's throwaway one.
 //   node friendchecks.mjs <A state dir> <B state dir>
 import { createHash, createPrivateKey, sign } from "node:crypto";
 import { createServer } from "node:http";
 import puppeteer from "puppeteer-core";
-import { settled, siteCall, siteSql as sql, steady, setUpSigning } from "./helpers.mjs";
+import { allowAsks, backThroughRelay, continueToCloudflare, isAllowPage, settled, siteCall, siteSql as sql, steady, setUpSigning } from "./helpers.mjs";
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const [stateA, stateB] = process.argv.slice(2);
 const A = "http://localhost:8787";
@@ -100,10 +100,10 @@ await new Promise((r) => server.listen(8799, "127.0.0.1", r));
 
 // --- the two owners, friends -------------------------------------------------------------------------------------
 const browser = await puppeteer.launch({ executablePath: CHROME, headless: true, args: ["--force-prefers-reduced-motion"] });
-let relay = null;
+let allow = null; // where a site last sent the browser at Cloudflare
 async function owner(site, name) {
   const context = await browser.createBrowserContext();
-  // What every page of theirs needs: errors noted, and afterwrd.app's relay stood in for.
+  // What every page of theirs needs: errors noted, and Cloudflare's Allow page stood in for.
   const prepare = async (page) => {
     page.on("pageerror", (e) => errors.push(`${site}: ${e.message}`));
     page.on("console", (m) => { if (/Content Security Policy|'integrity'/.test(m.text())) errors.push(`${site}: ${m.text()}`); }); // blocked by the page's policy
@@ -111,9 +111,10 @@ async function owner(site, name) {
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       const to = new URL(req.url());
-      if (to.hostname !== "afterwrd.app") return req.continue();
-      if (to.pathname === "/connect/") relay = to;
-      req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+      if (to.hostname !== "dash.cloudflare.com" && to.hostname !== "afterwrd.app") return req.continue();
+      if (isAllowPage(to)) allow = to;
+      else if (to.pathname !== "/favicon.ico") errors.push(`${site}: went to ${to.href}`);
+      req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
     });
   };
   const page = await context.newPage();
@@ -130,12 +131,13 @@ async function owner(site, name) {
   return steady(page, prepare);
 }
 const text = async (page, sel = "main") => (await page.$eval(sel, (m) => m.textContent).catch(() => "")).replace(/\s+/g, " ");
-// Press a button that goes to Cloudflare by way of the relay, and come back the way the relay would, with `code`.
+// Press a button that goes to the site's page before Cloudflare's, on to Cloudflare, and come back the way the relay
+// would, with `code`.
 async function connect(page, selector, code) {
-  relay = null;
+  allow = null;
   await page.goto(`${page.url().split("/").slice(0, 3).join("/")}/_admin/update`);
-  await Promise.all([page.waitForFunction(() => document.title === "relay stand-in"), page.click(selector)]);
-  await page.goto(`${relay.searchParams.get("to")}#${new URLSearchParams({ code, state: relay.searchParams.get("state") })}`);
+  await continueToCloudflare(page, () => page.click(selector));
+  await page.goto(backThroughRelay(allow, code));
   await page.waitForFunction(() => !location.pathname.startsWith("/_cloudflare/") || document.querySelector("#error")?.textContent, { timeout: 15000 });
   // The address changes before the page it's going to has arrived: wait for that page, or reading it finds nothing.
   await page.waitForFunction(() => document.readyState !== "loading", { timeout: 15000 });
@@ -178,6 +180,18 @@ befriend();
 cf.live = (await (await fetch(`${A}/_version`)).json()).id ?? "11111111-1111-4111-8111-111111111111";
 cf.versions.push(versionItem(cf.live, 7, 2400, ETAG_GOOD));
 
+// --- before any check: only Update says so (checks happen in the background, so Home and Add a friend don't nag) -----
+await ann.goto(`${A}/`);
+check("an unchecked site doesn't nag about it on Home", !(await text(ann)).includes("hasn't been checked yet"));
+await ann.goto(`${A}/_admin/connections`);
+check("…or on Add a friend", !(await text(ann)).includes("hasn't been checked yet"));
+await ann.goto(`${A}/_admin/update`);
+check("…but Update says it hasn't been", (await text(ann, "#last-checked")) === "Your site hasn't been checked yet.", await text(ann, "#last-checked"));
+// A friend's site saying it checked this one (POST /_p/checked): only a friend, and only of this site.
+check("only a friend's site can say it checked this one", (await stranger(A, "/_p/checked", { type: "Checked", site: A, version: "9.9.9" })).status === 401);
+check("…and only of this site", (await fromSam("/_p/checked", { type: "Checked", site: "http://localhost:8789", version: "9.9.9" })).status === 400
+  && (await ann.goto(`${A}/_admin/update`), await text(ann, "#last-checked")) === "Your site hasn't been checked yet.");
+
 // --- Ann lets her friends' sites check hers ------------------------------------------------------------------------
 check("before she allows it, a friend's site asking gets told no", (await fromSam("/_p/check-token", { type: "CheckToken" })).status === 409);
 await ann.goto(`${A}/_admin/update`);
@@ -186,7 +200,9 @@ const wide = await connect(ann, "a[href='/_cloudflare/checks-start']", "wide.cod
 check("a grant broader than reading code isn't kept", /more access than a check needs/.test(wide ?? ""), wide);
 const allowed = await connect(ann, "a[href='/_cloudflare/checks-start']", "checks.code-2");
 check("with Background Access to read code, it's on", allowed === null && (await text(ann, "#check")).includes("Your friends' sites check yours by themselves"), allowed);
-check("the relay is asked to come back to the site's own checks-done", relay?.searchParams.get("to") === `${A}/_cloudflare/checks-done`);
+const checksAsked = allowAsks(allow, { scope: "offline_access workers-scripts.content_read", to: `${A}/_cloudflare/checks-done` });
+check("Cloudflare is asked for lasting read-only access to Workers' code, and nothing else, coming back to the site's own checks-done",
+  checksAsked === "", checksAsked);
 check("the refresh token isn't in Ann's database", !JSON.stringify(sql(stateA, "SELECT * FROM settings")).includes("ref-check-"));
 
 // --- what a friend's site can ask for --------------------------------------------------------------------------------
@@ -199,6 +215,30 @@ check("a friend's site gets a one-hour read-only token", /^tok-check-\d+$/.test(
 check("…the same one again while it has long enough left (a new one would end the first)", second.json.token === first.json.token);
 check("…and two a day, no more", third.status === 429, String(third.status));
 sql(stateA, "DELETE FROM check_tokens");
+
+// --- check links are gone (2.4): checks are friends' automatic ones only -----------------------------------------------
+check("a friend's site asking for a check by hand finds nothing there (404)", (await fromSam("/_p/check-request", { type: "CheckRequest" })).status === 404);
+check("…and the tables check links used are gone", sql(stateA, "SELECT name FROM sqlite_master WHERE name IN ('site_checks', 'check_requests')").length === 0
+  && sql(stateA, "SELECT 1 FROM d1_migrations WHERE name = '0065_no_check_links.sql'").length === 1);
+const oldLink = await fetch(`${A}/_check/${"a".repeat(43)}`, { redirect: "manual" });
+check("an old check link, opened by someone not signed in, is sent to sign in like any page the site doesn't show the public",
+  oldLink.status === 302 && new URL(oldLink.headers.get("location")).pathname === "/_auth/login", `${oldLink.status} ${oldLink.headers.get("location")}`);
+await ann.goto(`${A}/_check/${"a".repeat(43)}`);
+check("an old check link is just a page the site doesn't have", (await ann.$("#check")) === null && !/check link/i.test(await text(ann, "body")), ann.url());
+await ann.goto(`${A}/friend`);
+check("Friends has nothing about checking a friend's site by hand", !(await ann.$("#checks, #check-site, .checks"))
+  && !(await text(ann)).includes("Checking a friend's site"));
+await ann.goto(`${A}/`);
+check("…nor Home about friends asking for a check", !(await ann.$(".check-request")) && !(await text(ann)).includes("asks you to check"));
+await ann.goto(`${A}/_admin/update`);
+check("…nor Update about asking a friend for one", !(await ann.$("#ask-check, #ask-other, button[data-ask], #check-wait"))
+  && !(await text(ann)).includes("Asking a friend to check yours"));
+check("…which still has \"check it yourself\", and saying you have", await ann.$eval("#checks-more form[action='/_admin/checks/myself?back=update']",
+  (f) => f.textContent.replace(/\s+/g, " ").includes("check it yourself") && f.querySelector("a").href === "https://afterwrd.app/check/" && Boolean(f.querySelector("button"))).catch(() => false));
+for (const gone of ["/_admin/checks/new", "/_admin/checks/ask", "/_admin/checks/1/delete", "/_admin/checks/requests/1/dismiss"]) {
+  const status = await ann.evaluate((path) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then((r) => r.status), gone);
+  check(`${gone} is gone`, status === 404, String(status));
+}
 
 // --- Sam's site turns on automatic updates, and checks Ann's in its daily run ----------------------------------------
 const autoOn = await connect(sam, "#auto a.button", "auto.code-1");
@@ -371,17 +411,23 @@ check("…and after Not now, never again", !(await ann.$("#look-after")) && sql(
 
 // --- a new site's setup: both Allows, one after the other, then on to the site -------------------------------------
 sql(stateB, "UPDATE settings SET value = json_set(value, '$.on', json('false')) WHERE key = 'auto_update'");
-relay = null;
-await Promise.all([sam.waitForFunction(() => document.title === "relay stand-in"), sam.goto(`${B}/_cloudflare/auto-start?then=checks&setup=1`)]);
-check("setup asks first for automatic updates, the relay page told it's both, during setup", relay?.searchParams.get("to") === `${B}/_cloudflare/auto-done`
-  && relay.searchParams.get("both") === "1" && relay.searchParams.get("setup") === "1", relay?.href);
-const firstState = relay.searchParams.get("state");
-relay = null;
-await sam.goto(`${B}/_cloudflare/auto-done#${new URLSearchParams({ code: "auto.code-9", state: firstState })}`);
-await sam.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 });
-check("…then straight on to letting friends' sites check it, still during setup", relay?.searchParams.get("to") === `${B}/_cloudflare/checks-done`
-  && relay.searchParams.get("setup") === "1", relay?.href);
-await sam.goto(`${relay.searchParams.get("to")}#${new URLSearchParams({ code: "checks.code-9", state: relay.searchParams.get("state") })}`);
+allow = null;
+let both = "";
+await continueToCloudflare(sam, async () => {
+  await sam.goto(`${B}/_cloudflare/auto-start?then=checks&setup=1`);
+  both = (await text(sam)) + (await sam.$("main a[href='/_admin/setup/done']") ? " [Not now]" : "");
+});
+const firstAsked = allowAsks(allow, { scope: "offline_access workers-scripts.edit", to: `${B}/_cloudflare/auto-done` });
+check("setup asks first for automatic updates, its page saying it's both, with Not now", firstAsked === "" && both.includes("Let your site look after itself?")
+  && both.includes("[Not now]"), firstAsked || both);
+const firstAllow = allow;
+allow = null;
+await sam.goto(backThroughRelay(firstAllow, "auto.code-9"));
+await sam.waitForFunction(() => document.title === "Cloudflare stand-in", { timeout: 15000 });
+const secondAsked = allowAsks(allow, { scope: "offline_access workers-scripts.content_read", to: `${B}/_cloudflare/checks-done` });
+check("…then straight on to Cloudflare for letting friends' sites check it, not asked about twice", secondAsked === ""
+  && allow.searchParams.get("state") !== firstAllow.searchParams.get("state"), secondAsked);
+await sam.goto(backThroughRelay(allow, "checks.code-9"));
 await sam.waitForFunction(() => location.pathname === "/", { timeout: 15000 });
 await sam.goto(`${B}/_admin/update`);
 check("…and both are on, and setup carries on to the site", (await text(sam, "#auto")).includes("Automatic updates are on") && (await text(sam, "#check")).includes("Your friends' sites check yours by themselves"));
@@ -399,6 +445,20 @@ again();
 const before = sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n;
 await samsRun(8000);
 check("once Sam stops it, his site checks no one", sql(stateB, "SELECT COUNT(*) AS n FROM friend_checks")[0].n === before);
+
+// --- the owner's own check, by hand (afterwrd.app/check/) --------------------------------------------------------------
+await ann.goto(`${A}/_admin/update#checking`);
+check("a link to something in Update's fold of checks opens it", await ann.$eval("#checks-more", (d) => d.open));
+await ann.goto(`${A}/_admin/update`);
+check("…which is folded away otherwise", await ann.$eval("#checks-more", (d) => !d.open));
+await ann.$eval("#checks-more", (d) => { d.open = true; });
+await Promise.all([ann.waitForNavigation(), ann.click("#checks-more form[action='/_admin/checks/myself?back=update'] button")]);
+const mine = await text(ann, "#last-checked");
+check("Ann can say she checked her site herself, from Update", ann.url().endsWith("/_admin/update#check")
+  && /^You last checked it yourself, on \d{1,2} \w{3} \d{4}\.$/.test(mine), mine);
+const annCookie = (await ann.cookies()).find((c) => c.name === "__Host-session")?.value;
+check("another site can't say the owner checked it", (await fetch(`${A}/_admin/checks/myself`, { method: "POST", redirect: "manual",
+  headers: { Cookie: `__Host-session=${annCookie}`, Origin: "https://evil.example" } })).status === 403);
 
 check("no page errors", errors.length === 0, errors.join(" | "));
 await browser.close();

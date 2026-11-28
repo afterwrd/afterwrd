@@ -11,8 +11,14 @@ import { b64url } from "../signed.js";
 import { savedKey } from "../browserkey.js";
 
 const line = document.getElementById("bring-over");
+// The notice starts hidden (views/home.js), and shows only once there's something to say: most visits only ask
+// friends' and groups' sites again, find nothing for this browser, and would otherwise flash it up and away.
 /** @param {string} text */
-const say = (text) => { if (line) line.textContent = text; };
+const say = (text) => {
+  if (!line) return;
+  line.textContent = text;
+  /** @type {HTMLElement} */ (line.closest(".notice") ?? line).hidden = false;
+};
 
 /** @param {"GET" | "POST"} method @param {object} [body] */
 async function call(method, body) {

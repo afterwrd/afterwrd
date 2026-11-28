@@ -5,7 +5,6 @@
 //                                 (connect.js); either can then ask the other to be friends
 //   POST /_p/ask-through          {origin}: their owner would like to be friends with someone who's a friend here
 //                                 too; if they are, that site is introduced to them (connect.js passOnAsk)
-//   POST /_p/check-request        their owner asks the owner here to check their site (checks.js)
 //   POST /_p/check-token          their site asks for a one-hour read-only token to check this one by itself
 //   POST /_p/check-soon           their site was just updated: check it soon (friendchecks.js)
 //   POST /_p/check-failed         {site, version, found}: their site checked this one and found something
@@ -24,11 +23,11 @@ import { shareAlbum, shareAlbums, sharePhoto, sharePost, sharePosts } from "./sh
 import { ownerName } from "./sites.js";
 import { json } from "./util.js";
 import { passOnAsk, receiveIntroduction } from "./connect.js";
-import { receiveChecked, receiveCheckRequest } from "./checks.js";
+import { receiveChecked } from "./checks.js";
 import { giveCheckToken, receiveCheckFailed, receiveCheckSoon } from "./friendchecks.js";
 import { friendGone } from "./events.js";
 
-const CHECKS = /^POST \/_p\/(check-request|check-token|check-soon|check-failed|checked)$/;
+const CHECKS = /^POST \/_p\/(check-token|check-soon|check-failed|checked)$/;
 const SHARED = /^GET \/_p\/(posts|albums|albums\/(\d+|other|videos)|photos\/([0-9a-f]{64})|posts\/(post-\d+-[0-9a-f]{8}))$/;
 
 /** Whether this module answers `route` ("METHOD /path"). */
@@ -60,8 +59,7 @@ export async function handleFriendCalls(request, env, url) {
   if (route === "POST /_p/ask-through") return json(...(await passOnAsk(env, url, peer, body)));
   if (CHECKS.test(route)) {
     if (!onCloudflare(peer.origin, env)) return json({ error: "Not found." }, 404);
-    const [answer, status] = route === "POST /_p/check-request" ? await receiveCheckRequest(env, peer, body)
-      : route === "POST /_p/check-token" ? await giveCheckToken(env, url, peer, body)
+    const [answer, status] = route === "POST /_p/check-token" ? await giveCheckToken(env, url, peer, body)
       : route === "POST /_p/check-soon" ? await receiveCheckSoon(env, peer, body)
       : route === "POST /_p/check-failed" ? await receiveCheckFailed(env, url, peer, body)
       : await receiveChecked(env, url, peer, body);

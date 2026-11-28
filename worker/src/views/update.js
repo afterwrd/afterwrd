@@ -1,5 +1,5 @@
 // The owner's Update page (update.js): this version, the latest release and its notes, bringing groups up to date,
-// and asking a friend to check the site.
+// and friends' sites checking this one.
 import { nonce } from "../nonce.js";
 import { connectLink } from "../cloudflare.js";
 import { TOKENS_PAGE } from "../update.js";
@@ -157,8 +157,8 @@ function checksPart(grant, failure, attempts = []) {
     allowed yet.</p>` : "";
   return `${found}<div id="checks-off">${grant.problem ? `<p class="notice alert">Friends' sites can't check yours by themselves any more: ${escape(grant.problem)}</p>` : ""}${tried}
   <p><b>Let your friends' sites check yours by themselves.</b> Now and then, a friend's afterwrd site checks yours is the
-  genuine afterwrd, and tells you if anything's wrong. It can only look, never change anything. Cloudflare will ask you
-  to <b>Allow</b> it: leave <b>Background Access</b> ticked.</p>
+  genuine afterwrd, and tells you if anything's wrong. It can only look, never change anything. Until you do, nobody can
+  check your site. Cloudflare will ask you to <b>Allow</b> it: leave <b>Background Access</b> ticked.</p>
   <details class="other"><summary>What exactly does it allow?</summary>
     <p class="meta">Lasting access to read the code of every Worker in your Cloudflare account, and nothing else. Your
     site gives a friend's site that asks a one-hour, read-only pass from it.
@@ -196,7 +196,7 @@ function checkingPart(auto, checking, results) {
 }
 
 /** @param {Record<string, any> & { auto?: AutoState, checkGrant?: CheckGrant }} data */
-export function updatePage({ owner, version: VERSION, latest, available, securityFix, site, connected, oldToken, groups, go, checked = null, friends = [], checkWait = 0, auto = { on: false }, history = [], problem = null, madeGroups = 0, checkGrant = {}, checkFailure = null, checking = true, friendChecks = [], checkAttempts = [], me = null, turnedOff = false }) {
+export function updatePage({ owner, version: VERSION, latest, available, securityFix, connected, oldToken, groups, go, checked = null, auto = { on: false }, history = [], problem = null, madeGroups = 0, checkGrant = {}, checkFailure = null, checking = true, friendChecks = [], checkAttempts = [], me = null, turnedOff = false }) {
   // While automatic updates are on, they're the one way to update (signed releases only), unless a release has to be
   // installed by hand (a new kind of store): then the steps below, with their access.
   const byHand = !auto.on || !auto.next || (auto.waiting?.needsHand && auto.waiting.version === auto.next.version);
@@ -259,7 +259,6 @@ ${byHand ? `${connectPart(connected, "/_admin/update?go=update", "to update your
 <p id="error" role="alert"></p>
 <section id="done" class="card" hidden>
   <p><b>Updated to ${escape(offer.version)}.</b></p>
-  ${checkGrant.on ? "" : `<p class="meta">If a friend has afterwrd, it's worth <a href="#checks-more">asking them to check your site</a> now.</p>`}
   <p><a class="button" href="/_admin/update">Done</a></p>
 </section>` : ""}`;
   }
@@ -281,8 +280,6 @@ ${favicon()}
   .security { padding: 0.6rem 0.9rem; border-left: 3px solid var(--danger); border-radius: 10px; background: var(--tint-4); }
   #done[hidden], #done [hidden] { display: none; }
   .notes h2, #check h2, #auto h2 { margin: 0 0 0.4rem; font-size: 1rem; }
-  #checks-more h3 { margin: 1.2rem 0 0.4rem; font-size: 0.95rem; }
-  #ask-message { width: 100%; font: inherit; padding: 0.6rem; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); color: var(--text); }
   .notes p { margin: 0; white-space: pre-wrap; }
   .other { margin: 1rem 0; }
   .other summary { cursor: pointer; color: var(--muted); }
@@ -306,27 +303,8 @@ ${historyPart(history)}
   <summary>More about checks</summary>
   ${letOffPart(checkGrant)}
   ${checkingPart(auto, checking, friendChecks)}
-  <h3>Asking a friend to check yours</h3>
-  <p class="meta">${checkGrant.on ? "For a fuller check, which also reads your account's log of changes," : "By hand,"} a friend's afterwrd site
-  can check that yours is exactly the published afterwrd, with nothing else done in your Cloudflare account. Ask a
-  friend: they'll send you a link by message. Open it and press Allow when Cloudflare asks.</p>
-  ${checkWait ? `<p class="notice" id="check-wait">Your site was updated less than an hour ago. Ask for a check after
-  <b>${escape(new Date(checkWait * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" }))}</b>:
-  for an hour after an update, the access it used could still change your site, so a check before then can't count.</p>` : ""}
-  ${checkWait ? "" : friends.length ? `<p class="row ask-friends">${friends.map((f) => `<button class="chip" data-ask="${f.id}">Ask ${escape(f.name)}</button>`).join(" ")}</p>
-  <p id="ask-result" role="status"></p>` : ""}
-  <details id="ask-other"${friends.length ? "" : " open"}${checkWait ? " hidden" : ""}>
-  <summary class="meta">${friends.length ? "Someone else, or their site is older? Send them a message instead" : "Ask by message"}</summary>
-  <p class="meta">This writes a message for you to send them. Their afterwrd site makes the link to send back.</p>
-  <p><button class="chip" id="ask-check">Write the message</button></p>
-  <div id="ask-panel" hidden>
-    <textarea id="ask-message" readonly rows="5" aria-label="Message asking for a check">Could you check that my afterwrd site is genuine? It's at ${escape(site)}. On your afterwrd site, go to Friends, paste this message (or just my address) under "Checking a friend's site", press "Make a check link", and send me the link it makes. Thank you!</textarea>
-    <p class="row"><button class="chip primary" id="ask-copy">Copy message</button>
-      <button class="chip" id="ask-share" hidden>Share…</button></p>
-  </div>
-  </details>
-  <form method="post" action="/_admin/checks/myself?back=update" class="meta">Or <a href="https://afterwrd.app/check/">check it
-    yourself</a>, and then <button class="link">say you've checked it</button>.</form>
+  <form method="post" action="/_admin/checks/myself?back=update" class="meta">You can also <a href="https://afterwrd.app/check/">check
+    it yourself</a> in Cloudflare's dashboard, and then <button class="link">say you've checked it</button>.</form>
   </details>
 </section>
 ${groupsPart}
@@ -343,42 +321,6 @@ ${forget}
   openFold();
   addEventListener("hashchange", openFold);
   const go = document.getElementById("go");
-  // Asking a friend for a check: their site is sent the request (it makes the link they send back), or, for anyone
-  // else, a message to send them.
-  document.querySelectorAll("button[data-ask]").forEach((button) => button.addEventListener("click", async () => {
-    const result = document.getElementById("ask-result");
-    button.disabled = true;
-    result.textContent = "";
-    try {
-      const res = await fetch("/_admin/checks/ask", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connection: Number(button.dataset.ask) }) });
-      const data = await res.json().catch(() => ({}));
-      if (data.older) {
-        document.getElementById("ask-other").open = true;
-        document.getElementById("ask-check").click();
-      }
-      if (!res.ok) throw new Error(data.error || "Something went wrong.");
-      result.textContent = "Asked " + data.name + ". Their site will show them your request. When their link comes,"
-        + " open it and press Allow.";
-    } catch (err) {
-      result.textContent = err.message;
-      button.disabled = false;
-    }
-  }));
-  document.getElementById("ask-check").addEventListener("click", () => {
-    document.getElementById("ask-panel").hidden = false;
-    document.getElementById("ask-message").select();
-  });
-  document.getElementById("ask-copy").addEventListener("click", async (e) => {
-    await navigator.clipboard.writeText(document.getElementById("ask-message").value);
-    e.target.textContent = "Copied";
-    setTimeout(() => { e.target.textContent = "Copy message"; }, 1500);
-  });
-  const askShare = document.getElementById("ask-share");
-  if (navigator.share) {
-    askShare.hidden = false;
-    askShare.addEventListener("click", () => navigator.share({ text: document.getElementById("ask-message").value }).catch(() => {}));
-  }
   const connected = ${connected || Boolean(auto.on)}; // automatic updates' access counts as connected
   const autoGo = ${JSON.stringify(go === "update" || go === "groups" ? go : null)};
   async function post(path, body) {

@@ -8,9 +8,10 @@
 // friendly checkers or stop being checked: refusing, again and again, shows too.
 //
 // The site checked (its owner, signed in):
-//   GET  /_cloudflare/checks-start    a PKCE secret in a short cookie, then the relay page, which asks Cloudflare for
-//                                     `offline_access workers-scripts.content_read` only (installer/connect.html)
-//   GET  /_cloudflare/checks-done     back from the relay: posts the code to…
+//   GET  /_cloudflare/checks-start    a PKCE secret in a short cookie, and the page before Cloudflare's (or, ?straight=1,
+//                                     just after automatic updates' Allow, straight there), which asks for
+//                                     `offline_access workers-scripts.content_read` only (cloudflare.js allowLink)
+//   GET  /_cloudflare/checks-done     back through the relay: posts the code to…
 //   POST /_cloudflare/checks-finish   swaps it for a refresh token, kept in the outbox's vault (never in D1)
 //   POST /_admin/checks/let-off       forgets it (and says to Revoke in Cloudflare too)
 //   POST /_admin/checks/let-later     "Not now" on Home's offer
@@ -28,7 +29,7 @@
 //   POST /_admin/checks/found/<id>/seen   puts a finding away on Home
 import { objectNamed } from "./sqlite.js";
 import pkg from "../package.json";
-import { CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, pkce, readCookie, RELAY, testingHere, withCookie } from "./cloudflare.js";
+import { allowLink, allowPage, CLIENT_ID, CODE_RE, donePage, exchangeCode, grantClient, readCookie, testingHere, withCookie } from "./cloudflare.js";
 import { autoState, SETUP_DONE, step } from "./auto.js";
 import { checkSite, filesThroughCode, cloudflareReader, siteFiles, siteIn, storageElsewhere } from "./checks.js";
 import { callFriend } from "./calls.js";
@@ -75,18 +76,13 @@ export async function handleChecksConnect(request, env, url) {
   if (request.method === "GET" && path === "/checks-start") {
     const from = request.headers.get("Sec-Fetch-Site");
     if (from && from !== "same-origin" && from !== "none") return json({ error: "Start from your own site." }, 403);
-    const { verifier, state, challenge } = await pkce();
-    const relay = new URL(RELAY);
-    relay.searchParams.set("to", `${url.origin}/_cloudflare/checks-done`);
-    relay.searchParams.set("state", state);
-    relay.searchParams.set("challenge", challenge);
-    relay.searchParams.set("client", CLIENT_ID);
-    // Straight after automatic updates during a new site's setup (auto.js): the relay page says so, and it ends at
-    // SETUP_DONE, allowed or not.
+    const { verifier, state, link } = await allowLink(`${url.origin}/_cloudflare/checks-done`, CHECK_SCOPES);
+    // Straight after automatic updates (auto.js), whose page said what both are: on to Cloudflare. During a new site's
+    // setup it ends at SETUP_DONE, allowed or not.
     const setup = url.searchParams.get("setup") === "1";
-    if (setup) relay.searchParams.set("setup", "1");
-    return withCookie(Response.redirect(relay.toString(), 302),
-      `${START_COOKIE}=${state}.${verifier}${setup ? ".setup" : ""}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`);
+    const cookie = `${START_COOKIE}=${state}.${verifier}${setup ? ".setup" : ""}; Path=/_cloudflare; Max-Age=${START_SECONDS}; HttpOnly; Secure; SameSite=Lax`;
+    if (url.searchParams.get("straight") === "1") return withCookie(Response.redirect(link.toString(), 302), cookie);
+    return withCookie(html(allowPage("checks", link, url.host)), cookie);
   }
   if (request.method === "GET" && path === "/checks-done") {
     const setup = (readCookie(request, START_COOKIE) ?? "").endsWith(".setup");

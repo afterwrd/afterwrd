@@ -2,9 +2,8 @@
 // Posts, ticked: Posts and Photos stay for afterwrd posts, while imported material follows what was ticked.
 // Needs a fresh local database with SETUP_CODE=local-test-setup-code.
 //   node fresh.mjs <zip> <fixtures dir>
-import { readFileSync } from "node:fs";
 import puppeteer from "puppeteer-core";
-import { siteSql, setUpSigning } from "./helpers.mjs";
+import { allowAsks, isAllowPage, siteSql, setUpSigning } from "./helpers.mjs";
 import { fileURLToPath } from "node:url";
 const OUT = process.env.OUT ?? fileURLToPath(new URL("./out/", import.meta.url));
 const CHROME = process.env.CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -27,29 +26,34 @@ const broughtLink = `http://localhost:8788/_connect/${"x".repeat(43)}`; // a fri
 await page.goto(`${BASE}/_auth/setup?code=local-test-setup-code#${new URLSearchParams({ name: "New Owner", invite: broughtLink })}`);
 check("the name given to the installer is shown on the setup page, not asked again", (await page.$eval("#name", (i) => i.value)) === "New Owner"
   && (await page.$eval("#given-name", (b) => b.textContent)) === "New Owner" && await page.$eval("#name-box", (p) => p.hidden));
-// afterwrd.app's relay page, stood in for: where the new site sends the browser to ask Cloudflare for its permissions.
-let relay = null;
+// Cloudflare's Allow page, stood in for (helpers.mjs): where the new site sends the browser to ask for its permissions.
+let allow = null;
 await page.setRequestInterception(true);
 const standIn = (req) => {
   const at = new URL(req.url());
-  if (at.hostname === "afterwrd.app" && at.pathname === "/favicon.ico") return req.respond({ status: 404, body: "" });
-  if (at.hostname === "afterwrd.app") {
-    relay = at;
-    return req.respond({ status: 200, contentType: "text/html", body: "<title>relay stand-in</title>" });
+  if (at.hostname === "dash.cloudflare.com" || at.hostname === "afterwrd.app") {
+    if (isAllowPage(at)) allow = at;
+    else if (at.pathname !== "/favicon.ico") errors.push(`went to ${at.href}`);
+    return req.respond({ status: 200, contentType: "text/html", body: "<title>Cloudflare stand-in</title>" });
   }
   req.continue();
 };
 page.on("request", standIn);
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
 await Promise.all([page.waitForNavigation(), page.click("#go")]);
-await setUpSigning(page, () => page.waitForFunction(() => document.title === "relay stand-in", { timeout: 15000 }));
-check("straight after the passkey, a site from the installer asks for automatic updates and friends' checks together",
-  relay?.searchParams.get("to") === `${BASE}/_cloudflare/auto-done` && relay.searchParams.get("both") === "1"
-  && relay.searchParams.get("setup") === "1"
-  && relay.searchParams.get("client") === JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).afterwrd.cloudflareClient,
-  relay?.href);
-// "Not now" on the relay page: on to the end of setup, which carries on as before.
-await page.goto(`${BASE}/_admin/setup/done`);
+await setUpSigning(page, () => page.waitForFunction(() => document.title === "Connecting to Cloudflare · afterwrd", { timeout: 15000 }));
+const asking = await page.$eval("main", (m) => m.textContent.replace(/\s+/g, " "));
+const continueTo = new URL(await page.$eval("a.button", (a) => a.href));
+const askedFor = allowAsks(continueTo, { scope: "offline_access workers-scripts.edit", to: `${BASE}/_cloudflare/auto-done` });
+check("straight after the passkey, a site from the installer asks for automatic updates and friends' checks together, on its own page",
+  new URL(page.url()).pathname === "/_cloudflare/auto-start" && asking.includes("Let your site look after itself?")
+  && asking.includes("Automatic updates") && asking.includes("Friends' checks") && askedFor === "", askedFor || asking.slice(0, 300));
+await Promise.all([page.waitForFunction(() => document.title === "Cloudflare stand-in", { timeout: 15000 }), page.click("a.button")]);
+check("…and Continue goes straight to Cloudflare, with what the page said", allow?.href === continueTo.href, allow?.href);
+// "Not now" on the site's page: on to the end of setup, which carries on as before.
+await page.goto(`${BASE}/_cloudflare/auto-start?then=checks&setup=1`);
+check("during setup it offers \"Not now\"", await page.$eval("main a[href='/_admin/setup/done']", (a) => a.textContent === "Not now").catch(() => false));
+await Promise.all([page.waitForNavigation(), page.click("main a[href='/_admin/setup/done']")]);
 await page.waitForFunction(() => location.pathname !== "/_admin/setup/done", { timeout: 15000 });
 const landed = new URL(page.url());
 check("…and after them (or without them), a friend's link brought from the installer opens", landed.pathname === "/_admin/connections/new"
